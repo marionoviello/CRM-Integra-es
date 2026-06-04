@@ -1,7 +1,5 @@
 """Tests for the typed settings loader."""
 
-import os
-
 import pytest
 
 from noviello_funil.config import Settings
