@@ -139,18 +139,25 @@ def transicao(
     """Atomic state transition: update lead.estado AND insert transicoes row.
 
     Always go through this function — never naked UPDATE estado.
-    """
-    current = conn.execute(
-        "SELECT estado FROM leads WHERE id = ?", (lead_id,)
-    ).fetchone()
-    if current is None:
-        raise ValueError(f"Lead {lead_id} not found")
 
-    estado_anterior = current["estado"]
+    BEGIN IMMEDIATE acquires the write lock up front so the SELECT-then-UPDATE
+    sequence cannot race against a concurrent writer on a different connection.
+    Under the current single-shared-connection setup this is belt-and-suspenders
+    (Python's sqlite3 module serializes ops on a connection), but it stays
+    correct if we ever move to per-task connections.
+    """
     payload_json = json.dumps(payload) if payload is not None else None
 
-    conn.execute("BEGIN")
+    conn.execute("BEGIN IMMEDIATE")
     try:
+        current = conn.execute(
+            "SELECT estado FROM leads WHERE id = ?", (lead_id,)
+        ).fetchone()
+        if current is None:
+            conn.execute("ROLLBACK")
+            raise ValueError(f"Lead {lead_id} not found")
+        estado_anterior = current["estado"]
+
         conn.execute(
             "UPDATE leads SET estado = ?, atualizado_em = datetime('now') WHERE id = ?",
             (estado_novo, lead_id),
@@ -164,7 +171,11 @@ def transicao(
         )
         conn.execute("COMMIT")
     except Exception:
-        conn.execute("ROLLBACK")
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.OperationalError:
+            # Already rolled back (e.g., via the ValueError path above)
+            pass
         raise
 
 
