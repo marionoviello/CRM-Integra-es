@@ -20,32 +20,56 @@ class OutboundError(Exception):
     """Raised when an outbound call exhausts all retries."""
 
 
+_RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+
+
 async def with_retry(
     op: Callable[[], Awaitable[T]],
     *,
     attempts: int = 3,
     base_delay: float = 1.0,
 ) -> T:
-    """Run async `op` with exponential backoff.
+    """Run async `op` with exponential backoff on transient failures only.
 
-    Delays: base_delay * (3 ** attempt-1) — so 1s, 3s, 9s for default.
-    Raises OutboundError if all attempts fail (preserves last httpx error
-    in __cause__).
+    Delays: ``base_delay * 3 ** (attempt - 1)`` — so 1s, 3s, 9s for default.
+    Raises ``OutboundError`` if all attempts fail (preserves last error in
+    ``__cause__``).
+
+    Retried:
+        - Network/transport errors (``httpx.TransportError``)
+        - Timeouts (``httpx.TimeoutException``)
+        - HTTP 408/429/500/502/503/504 (``httpx.HTTPStatusError``)
+        - Bare ``httpx.HTTPError`` (kept for cases where callers raise
+          the generic class — uncommon, mostly in tests)
+
+    NOT retried (raised immediately to bubble up to the caller):
+        - HTTP 4xx other than 408/429 — they will give the same answer next
+          time and retrying just burns latency and log noise.
     """
     last_exc: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
             return await op()
-        except (httpx.HTTPError, httpx.TimeoutException) as exc:
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code not in _RETRYABLE_STATUS_CODES:
+                raise
             last_exc = exc
-            if attempt == attempts:
-                break
-            delay = base_delay * (3 ** (attempt - 1))
-            logger.warning(
-                "outbound_retry attempt=%d/%d delay=%.1fs err=%s",
-                attempt, attempts, delay, exc,
-            )
-            await asyncio.sleep(delay)
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
+            last_exc = exc
+        except httpx.HTTPError as exc:
+            # Fallback: generic HTTPError (subclass not matched above). Real
+            # httpx code rarely raises this directly, but tests and exotic
+            # transports might.
+            last_exc = exc
+
+        if attempt == attempts:
+            break
+        delay = base_delay * (3 ** (attempt - 1))
+        logger.warning(
+            "outbound_retry attempt=%d/%d delay=%.1fs err=%s",
+            attempt, attempts, delay, last_exc,
+        )
+        await asyncio.sleep(delay)
     raise OutboundError(f"all {attempts} attempts failed") from last_exc
 
 
@@ -119,4 +143,5 @@ class JurichatClient:
             return resp.json()
 
         data = await with_retry(op, attempts=3, base_delay=base_delay)
-        return [t["name"] for t in data.get("tags", [])]
+        # Defensive: skip tag dicts missing a "name" key rather than crash.
+        return [t["name"] for t in data.get("tags", []) if "name" in t]
