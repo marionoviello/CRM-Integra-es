@@ -7,7 +7,7 @@ transient-failure resilience.
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import httpx
 
@@ -68,3 +68,55 @@ class JurichatClient:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    async def send_message(
+        self,
+        conversation_id: str,
+        text: str,
+        *,
+        base_delay: float = 1.0,
+    ) -> dict[str, Any]:
+        """POST /conversation/send-message (multipart/form-data)."""
+
+        async def op() -> dict[str, Any]:
+            resp = await self._client.post(
+                f"{self._base_url}/conversation/send-message",
+                data={"conversation_id": conversation_id, "text": text},
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        return await with_retry(op, attempts=3, base_delay=base_delay)
+
+    async def get_conversation(
+        self, conversation_id: str, *, base_delay: float = 1.0,
+    ) -> dict[str, Any]:
+        """GET /conversation/{id} — returns full conversation including transcription."""
+
+        async def op() -> dict[str, Any]:
+            resp = await self._client.get(
+                f"{self._base_url}/conversation/{conversation_id}"
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        return await with_retry(op, attempts=3, base_delay=base_delay)
+
+    async def get_lead_tags(
+        self, lead_id: str, *, base_delay: float = 1.0,
+    ) -> list[str]:
+        """GET /crm/lead/{id} — returns list of tag names (empty if none).
+
+        NOTE: exact endpoint shape pending confirmation (see spec §15.4).
+        Adjust the path if Jurichat docs differ.
+        """
+
+        async def op() -> dict[str, Any]:
+            resp = await self._client.get(
+                f"{self._base_url}/crm/lead/{lead_id}"
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        data = await with_retry(op, attempts=3, base_delay=base_delay)
+        return [t["name"] for t in data.get("tags", [])]
