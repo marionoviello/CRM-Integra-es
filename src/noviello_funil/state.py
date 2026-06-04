@@ -5,9 +5,11 @@ to keep migrations forgiving). All transitions go through explicit
 functions defined here — never UPDATE estado from outside this module.
 """
 
+import json
 import sqlite3
 from dataclasses import dataclass
-from typing import Final
+from datetime import datetime, timedelta
+from typing import Any, Final
 
 
 class Estado:
@@ -122,3 +124,144 @@ def mark_webhook_processed(
         """,
         (fonte, evento_id, hash_payload),
     )
+
+
+# --- Transitions and updates ---------------------------------------------
+
+def transicao(
+    conn: sqlite3.Connection,
+    lead_id: int,
+    estado_novo: str,
+    *,
+    motivo: str,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    """Atomic state transition: update lead.estado AND insert transicoes row.
+
+    Always go through this function — never naked UPDATE estado.
+    """
+    current = conn.execute(
+        "SELECT estado FROM leads WHERE id = ?", (lead_id,)
+    ).fetchone()
+    if current is None:
+        raise ValueError(f"Lead {lead_id} not found")
+
+    estado_anterior = current["estado"]
+    payload_json = json.dumps(payload) if payload is not None else None
+
+    conn.execute("BEGIN")
+    try:
+        conn.execute(
+            "UPDATE leads SET estado = ?, atualizado_em = datetime('now') WHERE id = ?",
+            (estado_novo, lead_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO transicoes (lead_id, estado_anterior, estado_novo, motivo, payload_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (lead_id, estado_anterior, estado_novo, motivo, payload_json),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def bump_turnos(conn: sqlite3.Connection, lead_id: int) -> None:
+    conn.execute(
+        "UPDATE leads SET turnos = turnos + 1, atualizado_em = datetime('now') "
+        "WHERE id = ?",
+        (lead_id,),
+    )
+
+
+def record_lead_message_received(
+    conn: sqlite3.Connection,
+    lead_id: int,
+    *,
+    proxima_acao_horas: int,
+    reset_turnos: bool = False,
+) -> None:
+    """Mark that a new message from the lead arrived.
+
+    Updates ultima_msg_lead_em=now, schedules proxima_acao_em=now+H hours.
+    If reset_turnos=True, also resets turnos to 0 (used when reopening
+    from encerrado_sem_resposta).
+    """
+    proxima = (datetime.utcnow() + timedelta(hours=proxima_acao_horas)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    if reset_turnos:
+        conn.execute(
+            """
+            UPDATE leads SET
+                ultima_msg_lead_em = datetime('now'),
+                proxima_acao_em = ?,
+                turnos = 0,
+                atualizado_em = datetime('now')
+            WHERE id = ?
+            """,
+            (proxima, lead_id),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE leads SET
+                ultima_msg_lead_em = datetime('now'),
+                proxima_acao_em = ?,
+                atualizado_em = datetime('now')
+            WHERE id = ?
+            """,
+            (proxima, lead_id),
+        )
+
+
+def schedule_next_action(
+    conn: sqlite3.Connection, lead_id: int, horas: int,
+) -> None:
+    """Set proxima_acao_em = now + horas. Used by scheduler after sending follow-up."""
+    proxima = (datetime.utcnow() + timedelta(hours=horas)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    conn.execute(
+        "UPDATE leads SET proxima_acao_em = ?, atualizado_em = datetime('now') WHERE id = ?",
+        (proxima, lead_id),
+    )
+
+
+def clear_next_action(conn: sqlite3.Connection, lead_id: int) -> None:
+    conn.execute(
+        "UPDATE leads SET proxima_acao_em = NULL, atualizado_em = datetime('now') "
+        "WHERE id = ?",
+        (lead_id,),
+    )
+
+
+def register_error(
+    conn: sqlite3.Connection, lead_id: int, erro: str | None,
+) -> None:
+    conn.execute(
+        "UPDATE leads SET erro_atual = ?, atualizado_em = datetime('now') WHERE id = ?",
+        (erro, lead_id),
+    )
+
+
+def list_leads_vencidos(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Leads whose proxima_acao_em has passed AND are in a non-terminal state."""
+    active_states = (
+        Estado.EM_CONVERSA,
+        Estado.FOLLOW_UP_1_ENVIADO,
+        Estado.FOLLOW_UP_2_ENVIADO,
+    )
+    placeholders = ",".join("?" * len(active_states))
+    return conn.execute(
+        f"""
+        SELECT * FROM leads
+        WHERE proxima_acao_em IS NOT NULL
+          AND proxima_acao_em < datetime('now')
+          AND estado IN ({placeholders})
+        ORDER BY proxima_acao_em ASC
+        """,
+        active_states,
+    ).fetchall()
