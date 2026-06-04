@@ -1,0 +1,42 @@
+# Secrets — NUNCA commitar
+.env
+.env.*
+!.env.example
+*.env.local
+
+# Database local
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# uv / venv
+.venv/
+venv/
+.python-version
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
