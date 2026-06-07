@@ -2,11 +2,12 @@
 
 import httpx
 import pytest
-import respx
 
 from noviello_funil.outbound import (
     JurichatClient,
     OutboundError,
+    format_notification,
+    notify_mario,
     with_retry,
 )
 
@@ -194,3 +195,64 @@ async def test_jurichat_get_lead_tags_skips_tags_without_name(respx_mock):
         await client.aclose()
 
     assert tags == ["Fazer Follow up", "Proposta enviada"]
+
+
+def test_format_notification_fechar():
+    msg = format_notification(
+        tipo="fechar",
+        nome="Maria",
+        telefone="5511999999999",
+        ultima_msg="como faço pra contratar?",
+        resumo="Plano negou bariátrica",
+        conversation_id="C-42",
+    )
+    assert msg.startswith("🔥")
+    assert "Maria" in msg
+    assert "5511999999999" in msg
+    assert "C-42" in msg
+
+
+def test_format_notification_handoff():
+    msg = format_notification(
+        tipo="handoff",
+        nome="João",
+        telefone="5511888888888",
+        ultima_msg="quero falar com humano",
+        resumo=None,
+        motivo="pediu falar com humano",
+        conversation_id="C-99",
+    )
+    assert msg.startswith("⚠️")
+    assert "pediu falar com humano" in msg
+
+
+def test_format_notification_turnos_excedidos():
+    msg = format_notification(
+        tipo="turnos",
+        nome="Ana",
+        telefone="5511777777777",
+        ultima_msg="vou pensar",
+        resumo=None,
+        conversation_id="C-1",
+    )
+    assert msg.startswith("⏸")
+    assert "20" in msg or "turnos" in msg.lower()
+
+
+@pytest.mark.asyncio
+async def test_notify_mario_sends_to_configured_number(respx_mock):
+    # Notification = a send_message to the special Mario notification
+    # "conversation" — Jurichat treats this as a normal outbound message.
+    respx_mock.post(
+        "https://api.jurichat.com/conversation/send-message"
+    ).mock(return_value=httpx.Response(200, json={"id": "msg-notif"}))
+
+    client = JurichatClient("jk-test", "https://api.jurichat.com")
+    try:
+        await notify_mario(
+            client,
+            mario_conversation_id="C-MARIO",
+            mensagem="🔥 teste de notificação",
+        )
+    finally:
+        await client.aclose()

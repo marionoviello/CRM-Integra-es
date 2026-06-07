@@ -145,3 +145,61 @@ class JurichatClient:
         data = await with_retry(op, attempts=3, base_delay=base_delay)
         # Defensive: skip tag dicts missing a "name" key rather than crash.
         return [t["name"] for t in data.get("tags", []) if "name" in t]
+
+
+def format_notification(
+    *,
+    tipo: str,
+    nome: str | None,
+    telefone: str,
+    ultima_msg: str,
+    resumo: str | None = None,
+    motivo: str | None = None,
+    conversation_id: str,
+) -> str:
+    """Format a notification message for Mario.
+
+    tipo: 'fechar' | 'handoff' | 'turnos'
+    """
+    nome_label = nome or "(sem nome)"
+
+    if tipo == "fechar":
+        head = f"🔥 Lead {nome_label} ({telefone}) — QUER FECHAR"
+        body = f'Última msg: "{ultima_msg}"'
+        extra = f"Resumo Claude: {resumo}" if resumo else ""
+    elif tipo == "handoff":
+        head = f"⚠️ Lead {nome_label} ({telefone}) — PRECISA DE VOCÊ"
+        body = f"Motivo: {motivo or 'não especificado'}"
+        extra = f'Última msg: "{ultima_msg}"'
+    elif tipo == "turnos":
+        head = f"⏸ Lead {nome_label} ({telefone}) — 20 turnos sem progresso"
+        body = f'Última msg: "{ultima_msg}"'
+        extra = ""
+    else:
+        raise ValueError(f"unknown notification type: {tipo}")
+
+    link = f"https://app.jurichat.com/conversation/{conversation_id}"
+
+    parts = [head, body]
+    if extra:
+        parts.append(extra)
+    parts.append(f"Link: {link}")
+    return "\n".join(parts)
+
+
+async def notify_mario(
+    client: JurichatClient,
+    *,
+    mario_conversation_id: str,
+    mensagem: str,
+) -> None:
+    """Send notification message to Mario via Jurichat.
+
+    `mario_conversation_id` is a conversation with Mario's own number,
+    pre-configured. Failures are logged but NOT raised — notifications
+    are fire-and-forget per spec §9.
+    """
+    try:
+        await client.send_message(mario_conversation_id, mensagem)
+    except OutboundError as exc:
+        logger.error("notify_mario failed: %s", exc)
