@@ -1,7 +1,5 @@
 """Tests for the state repository layer."""
 
-import pytest
-
 from noviello_funil.state import (
     Estado,
     bump_turnos,

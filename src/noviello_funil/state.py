@@ -5,6 +5,7 @@ to keep migrations forgiving). All transitions go through explicit
 functions defined here — never UPDATE estado from outside this module.
 """
 
+import contextlib
 import json
 import sqlite3
 from dataclasses import dataclass
@@ -171,11 +172,10 @@ def transicao(
         )
         conn.execute("COMMIT")
     except Exception:
-        try:
+        # ROLLBACK may itself fail if already rolled back via the ValueError
+        # path above — suppress that specific error and re-raise the original.
+        with contextlib.suppress(sqlite3.OperationalError):
             conn.execute("ROLLBACK")
-        except sqlite3.OperationalError:
-            # Already rolled back (e.g., via the ValueError path above)
-            pass
         raise
 
 

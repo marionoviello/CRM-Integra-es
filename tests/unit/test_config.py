@@ -1,6 +1,7 @@
 """Tests for the typed settings loader."""
 
 import pytest
+from pydantic import ValidationError
 
 from noviello_funil.config import Settings
 
@@ -34,5 +35,5 @@ def test_settings_missing_required_fails(monkeypatch):
     ]:
         monkeypatch.delenv(var, raising=False)
 
-    with pytest.raises(Exception):  # pydantic ValidationError
+    with pytest.raises(ValidationError):
         Settings()
