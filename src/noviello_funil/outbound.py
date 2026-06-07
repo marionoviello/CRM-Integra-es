@@ -195,11 +195,15 @@ async def notify_mario(
 ) -> None:
     """Send notification message to Mario via Jurichat.
 
-    `mario_conversation_id` is a conversation with Mario's own number,
+    ``mario_conversation_id`` is a conversation with Mario's own number,
     pre-configured. Failures are logged but NOT raised — notifications
     are fire-and-forget per spec §9.
+
+    Catches the full HTTP error surface (``OutboundError`` for exhausted
+    retries, ``HTTPStatusError`` for non-retryable 4xx like a wrong
+    ``MARIO_CONVERSATION_ID``, ``RequestError`` for transport failures).
     """
     try:
         await client.send_message(mario_conversation_id, mensagem)
-    except OutboundError as exc:
+    except (OutboundError, httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.error("notify_mario failed: %s", exc)

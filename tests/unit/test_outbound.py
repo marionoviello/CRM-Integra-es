@@ -240,6 +240,59 @@ def test_format_notification_turnos_excedidos():
 
 
 @pytest.mark.asyncio
+async def test_notify_mario_swallows_4xx_silently(respx_mock, caplog):
+    """Fire-and-forget per spec §9: a wrong MARIO_CONVERSATION_ID (404)
+    must NOT raise — it logs and returns. Same for any other 4xx."""
+    respx_mock.post(
+        "https://api.jurichat.com/conversation/send-message"
+    ).mock(return_value=httpx.Response(404, json={"error": "not found"}))
+
+    client = JurichatClient("jk-test", "https://api.jurichat.com")
+    try:
+        # Must NOT raise — that's the whole point of fire-and-forget
+        await notify_mario(
+            client,
+            mario_conversation_id="C-WRONG",
+            mensagem="🔥 should be swallowed",
+        )
+    finally:
+        await client.aclose()
+
+    assert any("notify_mario failed" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_notify_mario_swallows_outbound_error_silently(respx_mock, caplog):
+    """Exhausted retries (3x 503 → OutboundError) also must NOT raise."""
+    respx_mock.post(
+        "https://api.jurichat.com/conversation/send-message"
+    ).mock(return_value=httpx.Response(503))
+
+    client = JurichatClient("jk-test", "https://api.jurichat.com")
+    try:
+        # send_message will retry 3 times then raise OutboundError;
+        # notify_mario must swallow it.
+        await client._client.aclose() if False else None  # no-op placeholder
+        # Use a low base_delay path by calling client directly — but notify_mario
+        # uses default 1s base. To keep test fast we patch via a wrapper:
+        original = client.send_message
+
+        async def fast_send(conv, txt, *, base_delay=0.001):
+            return await original(conv, txt, base_delay=base_delay)
+
+        client.send_message = fast_send  # type: ignore[method-assign]
+        await notify_mario(
+            client,
+            mario_conversation_id="C-MARIO",
+            mensagem="🔥 retried then swallowed",
+        )
+    finally:
+        await client.aclose()
+
+    assert any("notify_mario failed" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_notify_mario_sends_to_configured_number(respx_mock):
     # Notification = a send_message to the special Mario notification
     # "conversation" — Jurichat treats this as a normal outbound message.
