@@ -1,0 +1,26 @@
+[Unit]
+Description=Noviello Funil Saude - FastAPI
+After=network.target
+Requires=network.target
+
+[Service]
+Type=simple
+User=noviello
+Group=noviello
+WorkingDirectory=/opt/noviello-funil-saude
+Environment=PATH=/opt/noviello-funil-saude/.venv/bin
+EnvironmentFile=/opt/noviello-funil-saude/.env
+ExecStart=/opt/noviello-funil-saude/.venv/bin/uvicorn \
+    noviello_funil.main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --no-access-log
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
