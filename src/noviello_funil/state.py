@@ -271,6 +271,34 @@ def schedule_next_action(
     )
 
 
+def schedule_next_action_seconds(
+    conn: sqlite3.Connection, lead_id: int, seconds: int,
+) -> None:
+    """Set proxima_acao_em = now + seconds. For sub-hour polling cadence."""
+    proxima = (datetime.utcnow() + timedelta(seconds=seconds)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    conn.execute(
+        "UPDATE leads SET proxima_acao_em = ?, atualizado_em = datetime('now') WHERE id = ?",
+        (proxima, lead_id),
+    )
+
+
+def mark_lead_activity_now(conn: sqlite3.Connection, lead_id: int) -> None:
+    """Stamp ultima_msg_lead_em = now without touching proxima_acao_em.
+
+    Used by the poll cycle when it detects a transcript change: this
+    ensures the follow-up cycle's "idle > 24h" carve-out treats the lead
+    as freshly active and does NOT nudge it. The poll cycle itself
+    schedules the next poll separately via schedule_next_action_seconds.
+    """
+    conn.execute(
+        "UPDATE leads SET ultima_msg_lead_em = datetime('now'), "
+        "atualizado_em = datetime('now') WHERE id = ?",
+        (lead_id,),
+    )
+
+
 def clear_next_action(conn: sqlite3.Connection, lead_id: int) -> None:
     conn.execute(
         "UPDATE leads SET proxima_acao_em = NULL, atualizado_em = datetime('now') "
@@ -312,20 +340,52 @@ def update_transcript_hash(
 
 
 def list_leads_vencidos(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """Leads whose proxima_acao_em has passed AND are in a non-terminal state."""
-    active_states = (
-        Estado.EM_CONVERSA,
-        Estado.FOLLOW_UP_1_ENVIADO,
-        Estado.FOLLOW_UP_2_ENVIADO,
-    )
-    placeholders = ",".join("?" * len(active_states))
+    """For the follow-up cycle: leads whose proxima_acao_em has passed AND
+    are in a non-terminal state.
+
+    Carve-out: em_conversa leads with activity in the last 24h are EXCLUDED
+    here — they are owned by the polling cycle (which reschedules
+    proxima_acao_em every minute). Without this exclusion the follow-up
+    cycle would fire immediately for every active polled conversation.
+
+    em_conversa leads with NO recorded activity (ultima_msg_lead_em IS NULL)
+    or last activity > 24h ago ARE included — those are genuinely idle and
+    should receive a follow-up nudge.
+    """
     return conn.execute(
-        f"""
+        """
         SELECT * FROM leads
         WHERE proxima_acao_em IS NOT NULL
           AND proxima_acao_em < datetime('now')
-          AND estado IN ({placeholders})
+          AND estado IN (?, ?, ?)
+          AND (
+              estado != ?
+              OR ultima_msg_lead_em IS NULL
+              OR ultima_msg_lead_em < datetime('now', '-24 hours')
+          )
         ORDER BY proxima_acao_em ASC
         """,
-        active_states,
+        (
+            Estado.EM_CONVERSA,
+            Estado.FOLLOW_UP_1_ENVIADO,
+            Estado.FOLLOW_UP_2_ENVIADO,
+            Estado.EM_CONVERSA,
+        ),
+    ).fetchall()
+
+
+def list_leads_para_polling(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """For the polling cycle: em_conversa leads whose poll tick is due.
+
+    Strictly em_conversa — follow-up states are handled by list_leads_vencidos.
+    """
+    return conn.execute(
+        """
+        SELECT * FROM leads
+        WHERE estado = ?
+          AND proxima_acao_em IS NOT NULL
+          AND proxima_acao_em < datetime('now')
+        ORDER BY proxima_acao_em ASC
+        """,
+        (Estado.EM_CONVERSA,),
     ).fetchall()
