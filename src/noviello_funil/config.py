@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     jurichat_webhook_secret: str
     jurichat_base_url: str = "https://api.jurichat.com"
 
+    # ID da inbox do Jurichat que o bot atende. Obrigatório no endpoint
+    # GET /conversation (sem ele, 400 Validation error). Aparece no
+    # payload de qualquer webhook como ``data.inboxId``.
+    jurichat_inbox_id: str
+
     # Mario's WhatsApp number for notifications (E.164, digits only)
     notificacao_telefone: str
 

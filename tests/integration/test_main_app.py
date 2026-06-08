@@ -10,6 +10,7 @@ def test_app_starts_and_serves_health(monkeypatch):
     monkeypatch.setenv("NOTIFICACAO_TELEFONE", "5511999999999")
     monkeypatch.setenv("DATABASE_PATH", ":memory:")
     monkeypatch.setenv("MARIO_CONVERSATION_ID", "C-MARIO")
+    monkeypatch.setenv("JURICHAT_INBOX_ID", "inbox-test")
 
     from noviello_funil.main import create_app
 

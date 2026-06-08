@@ -129,15 +129,16 @@ class JurichatClient:
     async def list_active_conversations(
         self,
         *,
+        inbox_id: str,
         page: int = 1,
         limit: int = 100,
         base_delay: float = 1.0,
     ) -> list[dict[str, Any]]:
-        """GET /conversation — lista conversas da inbox.
+        """GET /conversation — lista conversas de uma inbox.
 
-        Doc oficial declara ``page`` e ``limit`` como TIPO STRING
-        (não int). Mandar como int causa 400 Bad Request. Convertemos
-        explicitamente.
+        Parâmetros confirmados via 400 Validation Error 2026-06-08:
+          - ``inboxId``: obrigatório (sem ele 400).
+          - ``page``, ``limit``: strings (int causa 400).
 
         Response shape (per item):
             {
@@ -156,7 +157,11 @@ class JurichatClient:
         async def op() -> dict[str, Any]:
             resp = await self._client.get(
                 f"{self._base_url}/conversation",
-                params={"page": str(page), "limit": str(limit)},
+                params={
+                    "inboxId": inbox_id,
+                    "page": str(page),
+                    "limit": str(limit),
+                },
             )
             if resp.status_code >= 400:
                 # Log do body do erro pra debug rápido — 400/422 do Jurichat

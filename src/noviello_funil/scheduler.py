@@ -124,6 +124,7 @@ async def sync_jurichat_conversations(
     *,
     get_db: Callable[[], Any],
     jurichat: JurichatClient,
+    inbox_id: str,
 ) -> dict[str, int]:
     """Sincroniza conversas Jurichat → leads no nosso DB.
 
@@ -149,7 +150,9 @@ async def sync_jurichat_conversations(
     """
     conn = get_db()
     try:
-        conversations = await jurichat.list_active_conversations()
+        conversations = await jurichat.list_active_conversations(
+            inbox_id=inbox_id,
+        )
     except Exception as exc:
         logger.exception(
             "sync_jurichat_conversations: list_active_conversations falhou: %s",
@@ -588,6 +591,7 @@ def main() -> int:
         await sync_jurichat_conversations(
             get_db=lambda: conn,
             jurichat=jurichat,
+            inbox_id=settings.jurichat_inbox_id,
         )
         # 2. Poll cycle drives Claude on em_conversa leads (including
         #    the ones we just synced — they were scheduled for now).
