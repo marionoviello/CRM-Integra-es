@@ -155,3 +155,68 @@ async def test_cycle_skips_lead_with_excluding_tag(db_conn):
     assert lead["erro_atual"] == "excluido_followup_etiqueta"
     assert lead["proxima_acao_em"] is None
     fake_jurichat.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cycle_flags_lead_when_get_tags_fails(db_conn):
+    """get_lead_tags raises (network down, 5xx exhausted) → register_error
+    + continue. State unchanged so lead is retried next tick."""
+    _make_due_lead(db_conn, "L-1", "C-1", Estado.EM_CONVERSA)
+
+    fake_jurichat = MagicMock()
+    fake_jurichat.get_lead_tags = AsyncMock(side_effect=RuntimeError("boom"))
+    fake_jurichat.send_message = AsyncMock()
+
+    async def fake_followup_gen(**kwargs):
+        return "x"
+
+    await run_followup_cycle(
+        get_db=lambda: db_conn,
+        jurichat=fake_jurichat,
+        gerar_followup_msg=fake_followup_gen,
+        followup_2_apos_horas=72,
+        encerramento_apos_horas=24,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA  # unchanged
+    assert lead["erro_atual"] == "jurichat_get_tags_failed"
+    fake_jurichat.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cycle_flags_lead_when_dispatch_step_fails(db_conn):
+    """Send raises mid-dispatch → register_error('scheduler_step_failed').
+
+    Critical: this proves the new atomic transicao+schedule contract.
+    Because we transition+reschedule BEFORE sending, a send failure here
+    leaves the lead in FU1 with proxima_acao_em set 72h ahead — so the
+    lead WILL NOT be picked up on the next tick (no double-send risk)."""
+    _make_due_lead(db_conn, "L-1", "C-1", Estado.EM_CONVERSA)
+
+    fake_jurichat = MagicMock()
+    fake_jurichat.get_lead_tags = AsyncMock(return_value=[])
+    fake_jurichat.get_conversation = AsyncMock(return_value={
+        "transcription": "Lead: oi",
+    })
+    fake_jurichat.send_message = AsyncMock(side_effect=RuntimeError("send_down"))
+
+    async def fake_followup_gen(**kwargs):
+        return "Oi! Conseguiu olhar?"
+
+    await run_followup_cycle(
+        get_db=lambda: db_conn,
+        jurichat=fake_jurichat,
+        gerar_followup_msg=fake_followup_gen,
+        followup_2_apos_horas=72,
+        encerramento_apos_horas=24,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    # The transition committed before the send attempt → lead is FU1.
+    assert lead["estado"] == Estado.FOLLOW_UP_1_ENVIADO
+    # And proxima_acao_em is now 72h in the future, so next tick won't
+    # re-dispatch and double-send.
+    assert lead["proxima_acao_em"] is not None
+    # Error flagged so Mario can audit.
+    assert lead["erro_atual"] == "scheduler_step_failed"

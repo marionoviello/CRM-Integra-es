@@ -129,6 +129,12 @@ def mark_webhook_processed(
 
 # --- Transitions and updates ---------------------------------------------
 
+# Sentinel for transicao(): pass CLEAR_PROXIMA_ACAO to explicitly clear
+# the schedule in the same transaction. Distinct from `None`, which means
+# "don't touch proxima_acao_em".
+CLEAR_PROXIMA_ACAO: Final = object()
+
+
 def transicao(
     conn: sqlite3.Connection,
     lead_id: int,
@@ -136,6 +142,7 @@ def transicao(
     *,
     motivo: str,
     payload: dict[str, Any] | None = None,
+    proxima_acao_horas: int | object | None = None,
 ) -> None:
     """Atomic state transition: update lead.estado AND insert transicoes row.
 
@@ -146,8 +153,29 @@ def transicao(
     Under the current single-shared-connection setup this is belt-and-suspenders
     (Python's sqlite3 module serializes ops on a connection), but it stays
     correct if we ever move to per-task connections.
+
+    proxima_acao_horas behavior (atomic with the transition):
+        - None (default):       proxima_acao_em is NOT touched
+        - int N:                proxima_acao_em = now + N hours
+        - CLEAR_PROXIMA_ACAO:   proxima_acao_em set to NULL
+
+    Why this matters: the scheduler sends a non-idempotent WhatsApp message
+    after transitioning. If state changed but proxima_acao_em didn't, the
+    lead would be re-picked-up on the next tick and the message would fire
+    twice. Wrapping both updates in one transaction prevents the race.
     """
     payload_json = json.dumps(payload) if payload is not None else None
+
+    schedule_clause = ""
+    schedule_params: tuple = ()
+    if proxima_acao_horas is CLEAR_PROXIMA_ACAO:
+        schedule_clause = ", proxima_acao_em = NULL"
+    elif isinstance(proxima_acao_horas, int):
+        proxima = (
+            datetime.utcnow() + timedelta(hours=proxima_acao_horas)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        schedule_clause = ", proxima_acao_em = ?"
+        schedule_params = (proxima,)
 
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -160,8 +188,10 @@ def transicao(
         estado_anterior = current["estado"]
 
         conn.execute(
-            "UPDATE leads SET estado = ?, atualizado_em = datetime('now') WHERE id = ?",
-            (estado_novo, lead_id),
+            "UPDATE leads SET estado = ?, atualizado_em = datetime('now')"
+            + schedule_clause
+            + " WHERE id = ?",
+            (estado_novo, *schedule_params, lead_id),
         )
         conn.execute(
             """

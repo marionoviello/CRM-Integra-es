@@ -11,11 +11,11 @@ from typing import Any
 
 from noviello_funil.outbound import JurichatClient
 from noviello_funil.state import (
+    CLEAR_PROXIMA_ACAO,
     Estado,
     clear_next_action,
     list_leads_vencidos,
     register_error,
-    schedule_next_action,
     transicao,
 )
 
@@ -73,38 +73,41 @@ async def run_followup_cycle(
                 texto = await gerar_followup_msg(
                     conversation_transcript=conv.get("transcription", ""),
                 )
-                await jurichat.send_message(
-                    lead["jurichat_conversation_id"], texto,
-                )
+                # Atomic: transition state AND advance schedule together.
+                # If we transitioned without rescheduling, a crash would
+                # leave the lead picked up again next tick and the
+                # WhatsApp message would fire twice (non-idempotent).
                 transicao(
                     conn, lead["id"], Estado.FOLLOW_UP_1_ENVIADO,
                     motivo="scheduler_followup_1",
+                    proxima_acao_horas=followup_2_apos_horas,
                 )
-                schedule_next_action(
-                    conn, lead["id"], horas=followup_2_apos_horas,
+                # Send AFTER state+schedule are committed. If send fails
+                # the lead is correctly scheduled for the NEXT cycle and
+                # we won't double-send on retry (state is already FU1).
+                await jurichat.send_message(
+                    lead["jurichat_conversation_id"], texto,
                 )
 
             elif estado == Estado.FOLLOW_UP_1_ENVIADO:
                 nome = lead["contato_nome"] or "Olá"
                 texto = FOLLOWUP_2_TEXT.format(nome=nome)
-                await jurichat.send_message(
-                    lead["jurichat_conversation_id"], texto,
-                )
                 transicao(
                     conn, lead["id"], Estado.FOLLOW_UP_2_ENVIADO,
                     motivo="scheduler_followup_2",
+                    proxima_acao_horas=encerramento_apos_horas,
                 )
-                schedule_next_action(
-                    conn, lead["id"], horas=encerramento_apos_horas,
+                await jurichat.send_message(
+                    lead["jurichat_conversation_id"], texto,
                 )
 
             elif estado == Estado.FOLLOW_UP_2_ENVIADO:
-                # Silent close — no new message
+                # Silent close — no new message. Atomic transition + clear.
                 transicao(
                     conn, lead["id"], Estado.ENCERRADO_SEM_RESPOSTA,
                     motivo="scheduler_encerramento",
+                    proxima_acao_horas=CLEAR_PROXIMA_ACAO,
                 )
-                clear_next_action(conn, lead["id"])
 
             else:
                 logger.warning(
