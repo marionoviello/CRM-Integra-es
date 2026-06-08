@@ -607,12 +607,24 @@ def main() -> int:
             encerramento_apos_horas=settings.encerramento_apos_horas,
         )
 
+    async def _full_cycle_with_cleanup() -> int:
+        """Run cycle + close async clients within the SAME event loop.
+
+        Using two separate `asyncio.run` calls (one for the cycle, one
+        for aclose) corrupts the httpx async transport because the
+        AsyncClient was opened on the first loop and the second loop
+        rejects it as "Event loop is closed".
+        """
+        try:
+            await _full_cycle()
+            return 0
+        except Exception:
+            logger.exception("scheduler cycle failed")
+            return 1
+        finally:
+            await jurichat.aclose()
+
     try:
-        asyncio.run(_full_cycle())
-        return 0
-    except Exception:
-        logger.exception("scheduler cycle failed")
-        return 1
+        return asyncio.run(_full_cycle_with_cleanup())
     finally:
-        asyncio.run(jurichat.aclose())
         conn.close()

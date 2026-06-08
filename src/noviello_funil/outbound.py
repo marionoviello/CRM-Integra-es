@@ -135,22 +135,16 @@ class JurichatClient:
     ) -> list[dict[str, Any]]:
         """GET /conversation — lista conversas da inbox.
 
-        Confirmado contra a doc oficial em 2026-06-08. Suporta paginação
-        via ``page`` e ``limit``. Filtra defensivamente conversas arquivadas
-        e de grupo (lead individual é nosso caso de uso).
+        Doc oficial declara ``page`` e ``limit`` como TIPO STRING
+        (não int). Mandar como int causa 400 Bad Request. Convertemos
+        explicitamente.
 
         Response shape (per item):
             {
                 "id": "<conversation_id>",
                 "isArchived": false,
                 "isGroup": false,
-                "person": {
-                    "id": "<person_id>",
-                    "name": "<nome>",
-                    "phoneNumber": "<telefone>",
-                    "imageUrl": "..."
-                },
-                "group": null,
+                "person": { "id": "...", "name": "...", "phoneNumber": "..." },
                 ...
             }
 
@@ -162,12 +156,26 @@ class JurichatClient:
         async def op() -> dict[str, Any]:
             resp = await self._client.get(
                 f"{self._base_url}/conversation",
-                params={"page": page, "limit": limit},
+                params={"page": str(page), "limit": str(limit)},
             )
+            if resp.status_code >= 400:
+                # Log do body do erro pra debug rápido — 400/422 do Jurichat
+                # geralmente vem com mensagem específica do parâmetro errado.
+                logger.error(
+                    "list_active_conversations status=%d body=%r",
+                    resp.status_code, resp.text[:500],
+                )
             resp.raise_for_status()
             return resp.json()
 
-        data = await with_retry(op, attempts=3, base_delay=base_delay)
+        try:
+            data = await with_retry(op, attempts=3, base_delay=base_delay)
+        except httpx.HTTPStatusError as exc:
+            # Wrapping em OutboundError pra o scheduler tratar uniformemente
+            # (sem propagar o httpx pra cima).
+            raise OutboundError(
+                f"list_active_conversations falhou {exc.response.status_code}"
+            ) from exc
         return data.get("data", [])
 
     async def get_lead_tags(
