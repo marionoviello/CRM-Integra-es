@@ -20,7 +20,7 @@ SKILLS_DIR = Path(__file__).parent / "skills"
 
 VALID_ACOES = frozenset({
     "responder", "propor", "handoff",
-    "oferecer_horarios", "confirmar_horario",
+    "oferecer_horarios", "confirmar_horario", "remarcar_reuniao",
 })
 
 
@@ -28,7 +28,7 @@ VALID_ACOES = frozenset({
 class Decisao:
     acao: Literal[
         "responder", "propor", "handoff",
-        "oferecer_horarios", "confirmar_horario",
+        "oferecer_horarios", "confirmar_horario", "remarcar_reuniao",
     ]
     mensagem: str
     resumo_caso: str | None = None

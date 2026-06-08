@@ -320,3 +320,40 @@ async def test_create_event_com_email_adiciona_attendee_e_pede_meet(respx_mock):
     assert "sendUpdates=all" in qs
     # Response devolve o Meet link
     assert result["hangoutLink"] == "https://meet.google.com/abc-defg-hij"
+
+
+@pytest.mark.asyncio
+async def test_cancel_event_passa_sendUpdates_all(respx_mock):
+    respx_mock.post("https://oauth2.googleapis.com/token").mock(
+        return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600}),
+    )
+    route = respx_mock.delete(
+        "https://www.googleapis.com/calendar/v3/calendars/primary/events/evt-1",
+    ).mock(return_value=httpx.Response(204))
+
+    client = GoogleCalendarClient(client_id="c", client_secret="s", refresh_token="r")
+    try:
+        await client.cancel_event("evt-1")
+    finally:
+        await client.aclose()
+
+    assert route.called
+    qs = route.calls.last.request.url.query.decode()
+    assert "sendUpdates=all" in qs
+
+
+@pytest.mark.asyncio
+async def test_cancel_event_swallows_404(respx_mock):
+    """Evento já apagado (manualmente) → 404 não levanta."""
+    respx_mock.post("https://oauth2.googleapis.com/token").mock(
+        return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600}),
+    )
+    respx_mock.delete(
+        "https://www.googleapis.com/calendar/v3/calendars/primary/events/evt-old",
+    ).mock(return_value=httpx.Response(404, json={"error": "Not Found"}))
+
+    client = GoogleCalendarClient(client_id="c", client_secret="s", refresh_token="r")
+    try:
+        await client.cancel_event("evt-old")  # MUST NOT raise
+    finally:
+        await client.aclose()

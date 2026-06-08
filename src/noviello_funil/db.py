@@ -78,6 +78,17 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     """
     conn.executescript(SCHEMA)
     _ensure_column(conn, "leads", "ultimo_transcript_hash", "TEXT")
+    # Reunião agendada via Calendar (feature lembretes 2026-06-08).
+    # reuniao_em = quando vai rolar (ISO datetime); event_id pra cancelar
+    # via Google; meet_link pra reaproveitar nos lembretes.
+    _ensure_column(conn, "leads", "reuniao_em", "TEXT")
+    _ensure_column(conn, "leads", "reuniao_event_id", "TEXT")
+    _ensure_column(conn, "leads", "reuniao_meet_link", "TEXT")
+    # Timestamp do envio de cada lembrete (NULL = ainda não enviado).
+    # Usamos timestamp em vez de bool pra facilitar debug/auditoria.
+    _ensure_column(conn, "leads", "lembrete_24h_enviado_em", "TEXT")
+    _ensure_column(conn, "leads", "lembrete_2h_enviado_em", "TEXT")
+    _ensure_column(conn, "leads", "lembrete_30min_enviado_em", "TEXT")
 
 
 def _ensure_column(

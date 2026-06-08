@@ -524,9 +524,14 @@ async def test_confirmar_horario_cria_evento_com_email_e_meet(db_conn):
     assert call_kwargs["lead_email"] == "jose@exemplo.com"
     assert call_kwargs["lead_nome"] == "Maria"
 
-    # Estado virou aguardando_humano
+    # NOVO COMPORTAMENTO: lead PERMANECE em_conversa após confirmar
+    # (pra poder processar resposta a lembretes — ex: "preciso remarcar").
     lead = get_lead_by_conversation(db_conn, "C-1")
-    assert lead["estado"] == Estado.AGUARDANDO_HUMANO
+    assert lead["estado"] == Estado.EM_CONVERSA
+    # Reunião salva no DB com event_id + meet_link pro reminder cycle.
+    assert lead["reuniao_em"] == "2026-06-09T14:00:00-03:00"
+    assert lead["reuniao_meet_link"] == "https://meet.google.com/xyz-test"
+    assert lead["reuniao_event_id"] == "evt-1"
 
     # Mensagem pro lead substituiu AMBOS placeholders
     sent_text = jurichat.send_message.call_args_list[0][0][1]
@@ -534,6 +539,65 @@ async def test_confirmar_horario_cria_evento_com_email_e_meet(db_conn):
     assert "{{MEET_LINK}}" not in sent_text
     assert "ter (09/jun) às 14h" in sent_text
     assert "https://meet.google.com/xyz-test" in sent_text
+
+
+@pytest.mark.asyncio
+async def test_remarcar_reuniao_cancela_evento_e_oferece_novos(db_conn):
+    """Lead pediu remarcação → bot cancela evento antigo, limpa DB,
+    oferece novos horários."""
+    transcript = "Lead: Preciso remarcar, não vou poder amanhã"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+    # Lead já tinha reunião marcada — simula estado pós-confirmar.
+    db_conn.execute(
+        """UPDATE leads SET
+           reuniao_em='2026-06-10T17:00:00-03:00',
+           reuniao_event_id='evt-antigo',
+           reuniao_meet_link='https://meet.google.com/antigo',
+           lembrete_24h_enviado_em=datetime('now')
+           WHERE jurichat_conversation_id='C-1'"""
+    )
+
+    tz = ZoneInfo("America/Sao_Paulo")
+    novos_slots = [
+        Slot(start=datetime.datetime(2026, 6, 11, 14, 0, tzinfo=tz), duration_min=30),
+        Slot(start=datetime.datetime(2026, 6, 11, 14, 30, tzinfo=tz), duration_min=30),
+        Slot(start=datetime.datetime(2026, 6, 12, 15, 0, tzinfo=tz), duration_min=30),
+    ]
+
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar(novos_slots)
+    calendar_client.cancel_event = AsyncMock(return_value=None)
+
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="remarcar_reuniao",
+            mensagem="Sem problemas! Vou liberar o horário. Outros disponíveis:\n\n{{HORARIOS}}\n\nQual prefere?",
+        )
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )
+
+    # Evento antigo foi cancelado
+    calendar_client.cancel_event.assert_awaited_once_with("evt-antigo")
+    # DB limpo: reuniao_em volta pra None
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["reuniao_em"] is None
+    assert lead["reuniao_event_id"] is None
+    assert lead["lembrete_24h_enviado_em"] is None
+    # Lead permanece em_conversa pra próximo turno escolher novo horário
+    assert lead["estado"] == Estado.EM_CONVERSA
+    # send_message é chamado 2x: notify_mario PRIMEIRO, depois lead.
+    # Mensagem do lead (a última) substituiu placeholder com novos horários.
+    sent_text = jurichat.send_message.call_args_list[-1][0][1]
+    assert "{{HORARIOS}}" not in sent_text
+    assert "qui (11/jun) às 14h" in sent_text
 
 
 @pytest.mark.asyncio

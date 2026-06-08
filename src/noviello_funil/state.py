@@ -374,6 +374,110 @@ def list_leads_vencidos(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+# --- Reuniões agendadas + lembretes -------------------------------------
+
+def set_reuniao(
+    conn: sqlite3.Connection,
+    lead_id: int,
+    *,
+    reuniao_em_iso: str,
+    event_id: str,
+    meet_link: str,
+) -> None:
+    """Salva reunião marcada via Calendar. Reseta os 3 flags de lembrete.
+
+    Se ``reuniao_em`` já está dentro de janela de lembrete (< threshold),
+    o reminder_cycle vai disparar imediatamente no próximo tick — então
+    aqui marcamos os lembretes "tarde" como já enviados pra evitar
+    confusão. Ex: reunião marcada pra daqui a 90 min → lembrete 24h não
+    faz sentido, marca como enviado.
+    """
+    from datetime import timezone as _tz
+    now = datetime.now(_tz.utc)
+    try:
+        reuniao_dt = datetime.fromisoformat(reuniao_em_iso).astimezone(_tz.utc)
+    except ValueError:
+        reuniao_dt = now  # parse falhou — vamos depender do reminder_cycle pra logar
+    delta = reuniao_dt - now
+
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    lembrete_24h_sent = now_str if delta < timedelta(hours=24) else None
+    lembrete_2h_sent = now_str if delta < timedelta(hours=2) else None
+    lembrete_30min_sent = now_str if delta < timedelta(minutes=30) else None
+
+    conn.execute(
+        """
+        UPDATE leads SET
+            reuniao_em = ?,
+            reuniao_event_id = ?,
+            reuniao_meet_link = ?,
+            lembrete_24h_enviado_em = ?,
+            lembrete_2h_enviado_em = ?,
+            lembrete_30min_enviado_em = ?,
+            atualizado_em = datetime('now')
+        WHERE id = ?
+        """,
+        (
+            reuniao_em_iso, event_id, meet_link,
+            lembrete_24h_sent, lembrete_2h_sent, lembrete_30min_sent,
+            lead_id,
+        ),
+    )
+
+
+def clear_reuniao(conn: sqlite3.Connection, lead_id: int) -> None:
+    """Limpa reunião marcada (cancelamento ou já passou)."""
+    conn.execute(
+        """
+        UPDATE leads SET
+            reuniao_em = NULL,
+            reuniao_event_id = NULL,
+            reuniao_meet_link = NULL,
+            lembrete_24h_enviado_em = NULL,
+            lembrete_2h_enviado_em = NULL,
+            lembrete_30min_enviado_em = NULL,
+            atualizado_em = datetime('now')
+        WHERE id = ?
+        """,
+        (lead_id,),
+    )
+
+
+def mark_lembrete_enviado(
+    conn: sqlite3.Connection, lead_id: int, lembrete: str,
+) -> None:
+    """``lembrete`` ∈ {'24h', '2h', '30min'}. Idempotente."""
+    coluna_map = {
+        "24h": "lembrete_24h_enviado_em",
+        "2h": "lembrete_2h_enviado_em",
+        "30min": "lembrete_30min_enviado_em",
+    }
+    coluna = coluna_map[lembrete]
+    conn.execute(
+        f"UPDATE leads SET {coluna} = datetime('now'), "
+        "atualizado_em = datetime('now') WHERE id = ?",
+        (lead_id,),
+    )
+
+
+def list_leads_com_reuniao_futura(
+    conn: sqlite3.Connection,
+) -> list[sqlite3.Row]:
+    """Leads com reuniao_em > now (apenas reuniões futuras).
+
+    Independente do estado (em_conversa, aguardando_humano, etc.) — o
+    reminder cycle precisa cobrir todos. Reuniões já passadas são
+    limpadas pelo cycle (clear_reuniao).
+    """
+    return conn.execute(
+        """
+        SELECT * FROM leads
+        WHERE reuniao_em IS NOT NULL
+        ORDER BY reuniao_em ASC
+        """,
+    ).fetchall()
+
+
 def list_leads_para_polling(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """For the polling cycle: em_conversa leads whose poll tick is due.
 

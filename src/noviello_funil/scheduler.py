@@ -39,13 +39,17 @@ from noviello_funil.state import (
     CLEAR_PROXIMA_ACAO,
     Estado,
     clear_next_action,
+    clear_reuniao,
     create_lead_if_absent,
     get_lead_by_conversation,
+    list_leads_com_reuniao_futura,
     list_leads_para_polling,
     list_leads_vencidos,
     mark_lead_activity_now,
+    mark_lembrete_enviado,
     register_error,
     schedule_next_action_seconds,
+    set_reuniao,
     transicao,
     update_transcript_hash,
 )
@@ -286,6 +290,7 @@ async def _handle_confirmar_horario(
     # mas como freeBusy é eventualmente consistente, não validamos
     # antes — confiamos no create. Se der erro 409/4xx, log e degradar.)
     meet_link = ""
+    event_id = ""
     try:
         event = await calendar.client.create_event(
             start=start,
@@ -298,6 +303,7 @@ async def _handle_confirmar_horario(
         # hangoutLink só vem se conferenceData foi pedido (i.e., havia
         # lead_email). Vazio é OK — o template substitui sem quebrar.
         meet_link = event.get("hangoutLink", "") or ""
+        event_id = event.get("id", "") or ""
     except Exception as exc:
         logger.exception(
             "create_event failed for lead=%s: %s", lead_id, exc,
@@ -340,16 +346,26 @@ async def _handle_confirmar_horario(
         )
         # Evento já criado — segue pra handoff de qualquer jeito.
 
+    # Salva reunião no DB pro reminder_cycle (lembretes 24h/2h/30min).
+    # Lead PERMANECE em_conversa pra bot poder processar resposta do
+    # lead a um lembrete (ex: "preciso remarcar").
+    set_reuniao(
+        conn, lead_id,
+        reuniao_em_iso=iso, event_id=event_id, meet_link=meet_link,
+    )
+    schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
+    update_transcript_hash(conn, lead_id, new_hash)
+    # Registra a "transição" no log de auditoria sem mudar estado.
     transicao(
-        conn, lead_id, Estado.AGUARDANDO_HUMANO,
+        conn, lead_id, Estado.EM_CONVERSA,
         motivo="claude_confirmar_horario",
         payload={
             "horario_iso": iso,
+            "event_id": event_id,
+            "meet_link": meet_link,
             "resumo_caso": decisao.resumo_caso,
         },
-        proxima_acao_horas=CLEAR_PROXIMA_ACAO,
     )
-    update_transcript_hash(conn, lead_id, new_hash)
 
     try:
         notify_text = (
@@ -375,6 +391,67 @@ async def _handle_confirmar_horario(
         logger.exception(
             "notify_mario(agendado) failed for lead=%s: %s", lead_id, exc,
         )
+
+
+async def _handle_remarcar_reuniao(
+    *,
+    conn: Any,
+    lead: dict[str, Any],
+    decisao: Decisao,
+    transcript: str,
+    new_hash: str,
+    jurichat: JurichatClient,
+    calendar: CalendarConfig,
+    mario_conversation_id: str,
+    poll_interval_seconds: int,
+) -> None:
+    """Cancela evento atual, oferece novos horários."""
+    lead_id = lead["id"]
+    conv_id = lead["jurichat_conversation_id"]
+
+    event_id = lead["reuniao_event_id"]
+    # Sempre tenta cancelar o evento se temos id+client. Sem id, segue
+    # direto pra oferecer novos horários (talvez lead pediu remarcar sem
+    # ter agendado — Claude se confundiu).
+    if calendar.client is not None and event_id:
+        try:
+            await calendar.client.cancel_event(event_id)
+        except Exception as exc:
+            logger.warning(
+                "cancel_event failed for lead=%s event=%s: %s — "
+                "seguindo mesmo assim", lead_id, event_id, exc,
+            )
+
+    # Limpa reunião do DB (libera flags de lembrete + remove referência).
+    clear_reuniao(conn, lead_id)
+
+    # Notifica Mario do cancelamento.
+    try:
+        await notify_mario(
+            jurichat,
+            mario_conversation_id=mario_conversation_id,
+            mensagem=(
+                f"🔁 *Lead pediu remarcação*\n\n"
+                f"Lead: {lead['contato_nome']}\n"
+                f"Tel: {lead['contato_telefone']}\n\n"
+                f"Cancelei o evento anterior no Calendar. Bot já está "
+                f"oferecendo novos horários."
+            ),
+        )
+    except Exception as exc:
+        logger.exception(
+            "notify_mario(remarcar) failed lead=%s: %s", lead_id, exc,
+        )
+
+    # Reusa exatamente o handler de oferecer_horarios pra mandar slots
+    # novos (substitui {{HORARIOS}} na mensagem do Claude).
+    await _handle_oferecer_horarios(
+        conn=conn, lead=lead, decisao=decisao,
+        transcript=transcript, new_hash=new_hash,
+        jurichat=jurichat, calendar=calendar,
+        mario_conversation_id=mario_conversation_id,
+        poll_interval_seconds=poll_interval_seconds,
+    )
 
 
 async def _handoff_sem_calendar(
@@ -787,6 +864,20 @@ async def run_poll_cycle(
                 poll_interval_seconds=poll_interval_seconds,
             )
 
+        elif decisao.acao == "remarcar_reuniao":
+            await _handle_remarcar_reuniao(
+                conn=conn, lead=lead, decisao=decisao,
+                transcript=transcript, new_hash=new_hash,
+                jurichat=jurichat,
+                calendar=calendar or CalendarConfig(
+                    client=None, business_hours_start=14,
+                    business_hours_end=19, slot_min=30, buffer_min=0,
+                    lookahead_days=5, num_slots=3,
+                ),
+                mario_conversation_id=mario_conversation_id,
+                poll_interval_seconds=poll_interval_seconds,
+            )
+
         elif decisao.acao == "handoff":
             transicao(
                 conn, lead_id, Estado.AGUARDANDO_HUMANO,
@@ -820,6 +911,145 @@ async def run_poll_cycle(
             )
             register_error(conn, lead_id, "unknown_acao")
             schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
+
+
+async def run_reminder_cycle(
+    *,
+    get_db: Callable[[], Any],
+    jurichat: JurichatClient,
+) -> None:
+    """Manda lembretes 24h / 2h / 30min de cada reunião agendada.
+
+    Lógica por lead com ``reuniao_em`` futuro:
+      - Se já passou (delta < 0): clear_reuniao (limpa flag).
+      - Se delta ≤ 24h e !24h_enviado: manda 24h, marca.
+      - Se delta ≤ 2h e !2h_enviado: manda 2h, marca.
+      - Se delta ≤ 30min e !30min_enviado: manda 30min, marca.
+
+    Múltiplos lembretes podem disparar no mesmo tick (ex: reunião marcada
+    pra daqui 15 min → manda 30min imediato; reunião pra daqui 1h →
+    poderia mandar 2h e 30min em sequência se nenhum foi marcado, mas o
+    set_reuniao já pré-marca os "perdidos" como enviados).
+    """
+    from datetime import timezone as _tz
+    conn = get_db()
+    leads = list_leads_com_reuniao_futura(conn)
+    logger.info("reminder tick: %d leads com reuniao futura", len(leads))
+
+    now = datetime.datetime.now(_tz.utc)
+    for lead in leads:
+        try:
+            reuniao_dt = datetime.datetime.fromisoformat(
+                lead["reuniao_em"]
+            ).astimezone(_tz.utc)
+        except (ValueError, TypeError) as exc:
+            logger.warning(
+                "lead=%s reuniao_em inválido %r: %s",
+                lead["id"], lead["reuniao_em"], exc,
+            )
+            continue
+
+        delta = reuniao_dt - now
+
+        # Reunião já passou — limpa.
+        if delta.total_seconds() < 0:
+            logger.info("lead=%s reuniao passou, limpando", lead["id"])
+            clear_reuniao(conn, lead["id"])
+            continue
+
+        meet_link = lead["reuniao_meet_link"] or ""
+        nome = lead["contato_nome"] or "Olá"
+        conv_id = lead["jurichat_conversation_id"]
+        horario_human = _format_reuniao_human(reuniao_dt)
+
+        # Decide quais lembretes disparar neste tick. Ordem importa:
+        # se faltam 5 min e nenhum foi enviado, manda APENAS o 30min
+        # (não faria sentido mandar "24h" agora).
+        if delta <= datetime.timedelta(minutes=30):
+            if lead["lembrete_30min_enviado_em"] is None:
+                msg = _msg_lembrete_30min(nome, horario_human, meet_link)
+                await _enviar_lembrete(
+                    jurichat, conv_id, msg, lead["id"], "30min",
+                )
+                mark_lembrete_enviado(conn, lead["id"], "30min")
+        elif delta <= datetime.timedelta(hours=2):
+            if lead["lembrete_2h_enviado_em"] is None:
+                msg = _msg_lembrete_2h(nome, horario_human, meet_link)
+                await _enviar_lembrete(
+                    jurichat, conv_id, msg, lead["id"], "2h",
+                )
+                mark_lembrete_enviado(conn, lead["id"], "2h")
+        elif delta <= datetime.timedelta(hours=24):
+            if lead["lembrete_24h_enviado_em"] is None:
+                msg = _msg_lembrete_24h(nome, horario_human, meet_link)
+                await _enviar_lembrete(
+                    jurichat, conv_id, msg, lead["id"], "24h",
+                )
+                mark_lembrete_enviado(conn, lead["id"], "24h")
+
+
+def _format_reuniao_human(dt: datetime.datetime) -> str:
+    """Format reunião pro lembrete — usa o tz do Mario."""
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("America/Sao_Paulo")
+    local = dt.astimezone(tz)
+    dias = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
+    meses = [
+        "jan", "fev", "mar", "abr", "mai", "jun",
+        "jul", "ago", "set", "out", "nov", "dez",
+    ]
+    hora = local.strftime("%Hh") if local.minute == 0 else local.strftime("%Hh%M")
+    return f"{dias[local.weekday()]} ({local.day:02d}/{meses[local.month-1]}) às {hora}"
+
+
+def _msg_lembrete_24h(nome: str, horario: str, meet_link: str) -> str:
+    base = (
+        f"Oi {nome}! Lembrete: amanhã ({horario}) temos a videochamada "
+        f"com o Mario."
+    )
+    if meet_link:
+        base += f"\n\nLink Meet: {meet_link}"
+    base += (
+        "\n\nSe precisar remarcar ou tiver alguma dúvida, é só me chamar "
+        "por aqui."
+    )
+    return base
+
+
+def _msg_lembrete_2h(nome: str, horario: str, meet_link: str) -> str:
+    base = f"Oi {nome}! Em 2 horas começa nossa videochamada ({horario})."
+    if meet_link:
+        base += f"\n\nLink Meet: {meet_link}"
+    base += "\n\nTe vejo lá!"
+    return base
+
+
+def _msg_lembrete_30min(nome: str, horario: str, meet_link: str) -> str:
+    base = (
+        f"{nome}, lembrete rápido: em 30 minutos começa a videochamada "
+        f"com o Mario."
+    )
+    if meet_link:
+        base += f"\n\nLink Meet: {meet_link}"
+    return base
+
+
+async def _enviar_lembrete(
+    jurichat: JurichatClient, conv_id: str, msg: str,
+    lead_id: int, tag: str,
+) -> None:
+    """Envia lembrete com start_human_support + send_message. Loga erro
+    mas não levanta — falha de envio não deve travar o reminder cycle
+    inteiro (próximo tick reenviaria, mas como já marcamos enviado, vai
+    pular — esse é o trade-off conservador)."""
+    try:
+        await jurichat.start_human_support(conv_id)
+        await jurichat.send_message(conv_id, msg)
+        logger.info("lembrete %s enviado pra lead=%s", tag, lead_id)
+    except Exception as exc:
+        logger.exception(
+            "lembrete %s falhou pra lead=%s: %s", tag, lead_id, exc,
+        )
 
 
 async def run_followup_cycle(
@@ -1000,7 +1230,13 @@ def main() -> int:
             max_turnos=settings.max_turnos_por_lead,
             calendar=calendar_config,
         )
-        # 3. Follow-up cycle nudges idle leads.
+        # 3. Reminder cycle envia lembretes 24h/2h/30min antes de
+        #    cada reunião agendada.
+        await run_reminder_cycle(
+            get_db=lambda: conn,
+            jurichat=jurichat,
+        )
+        # 4. Follow-up cycle nudges idle leads.
         await run_followup_cycle(
             get_db=lambda: conn,
             jurichat=jurichat,

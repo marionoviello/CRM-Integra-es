@@ -358,6 +358,32 @@ class GoogleCalendarClient:
         return resp.json()
 
 
+    async def cancel_event(self, event_id: str) -> None:
+        """DELETE /calendars/{calId}/events/{eventId}?sendUpdates=all.
+
+        ``sendUpdates=all`` notifica o attendee (lead) por email do
+        cancelamento. Não levanta exceção em 404/410 (evento já não
+        existe — pode ter sido cancelado manualmente pelo Mario).
+        """
+        resp = await self._authed_request(
+            "DELETE",
+            f"{_CAL_BASE}/calendars/{self._calendar_id}/events/{event_id}",
+            params={"sendUpdates": "all"},
+        )
+        if resp.status_code in (404, 410):
+            logger.info(
+                "cancel_event: evento %s já não existia (%d)",
+                event_id, resp.status_code,
+            )
+            return
+        if resp.status_code >= 400:
+            logger.error(
+                "cancel_event failed: %d %r",
+                resp.status_code, resp.text[:300],
+            )
+            resp.raise_for_status()
+
+
 def _overlaps_any(
     start: datetime.datetime,
     end: datetime.datetime,
