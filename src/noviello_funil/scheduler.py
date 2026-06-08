@@ -109,23 +109,43 @@ def _last_lead_message(transcript: str) -> str:
     return ""
 
 
+# Tags que indicam que a conversa NÃO deve ser atendida pelo bot
+# (cliente já existente, advogado já lidando, lead desqualificado, etc.).
+EXCLUDED_TAGS_FOR_BOT = frozenset({
+    "Cliente Ativo",
+    "Pagamento pendente",
+    "Reunião marcada",
+    "Advogado adverso",
+    "Desqualificado",
+})
+
+
 async def sync_jurichat_conversations(
     *,
     get_db: Callable[[], Any],
     jurichat: JurichatClient,
-) -> int:
+) -> dict[str, int]:
     """Sincroniza conversas Jurichat → leads no nosso DB.
 
     Por que existe: Jurichat NÃO emite webhook por mensagem nova
     (confirmado 2026-06-07). ``chat.conversation.updated`` só dispara
     em mudança de status (atribuição a bot, encerramento, etc.).
 
-    Então pra descobrir conversas novas, listamos via ``GET /conversation``
-    a cada tick e criamos leads no DB pra conversas desconhecidas. O
-    poll cycle existente então puxa o transcript de cada uma e roda
-    Claude.
+    Estratégia defensiva (combinada):
 
-    Retorna o número de leads NOVOS registrados (apenas pra log).
+    1. **Primeira execução** (DB de leads vazio): registra TODAS as
+       conversas existentes como AGUARDANDO_HUMANO. Bot não atende
+       essas — funciona como baseline pra não bagunçar conversas
+       reais que já estão rodando.
+
+    2. **Execuções subsequentes**: pra cada conversa nova (que não
+       está no nosso DB), aplica 2 filtros:
+       a) Pula se tem ``responsables`` (advogado atribuído).
+       b) Pula se tem tag em ``EXCLUDED_TAGS_FOR_BOT``.
+       Se passar nos 2: registra como em_conversa + agenda poll
+       imediato.
+
+    Retorna ``{"baseline": N, "novos": N, "ignoradas": N}`` pra log.
     """
     conn = get_db()
     try:
@@ -135,9 +155,14 @@ async def sync_jurichat_conversations(
             "sync_jurichat_conversations: list_active_conversations falhou: %s",
             exc,
         )
-        return 0
+        return {"baseline": 0, "novos": 0, "ignoradas": 0}
 
-    new_count = 0
+    is_first_sync = (
+        conn.execute("SELECT COUNT(*) AS n FROM leads").fetchone()["n"] == 0
+    )
+
+    stats = {"baseline": 0, "novos": 0, "ignoradas": 0}
+
     for conv in conversations:
         # Pula arquivadas e grupos (lead individual é nosso caso).
         if conv.get("isArchived"):
@@ -151,11 +176,11 @@ async def sync_jurichat_conversations(
         if not conv_id or not person_id:
             continue
 
-        existing = get_lead_by_conversation(conn, conv_id)
-        if existing is not None:
+        if get_lead_by_conversation(conn, conv_id) is not None:
             continue  # já conhecemos, poll cycle cuida
 
-        # Lead novo — registra e marca pra poll imediato no mesmo tick.
+        # Cria o lead row (em em_conversa por default — vamos transicionar
+        # imediatamente pra AGUARDANDO_HUMANO se não for elegível).
         create_lead_if_absent(
             conn,
             jurichat_lead_id=person_id,
@@ -164,15 +189,69 @@ async def sync_jurichat_conversations(
             contato_nome=person.get("name"),
         )
         lead = get_lead_by_conversation(conn, conv_id)
-        if lead is not None:
-            schedule_next_action_seconds(conn, lead["id"], 0)
-            new_count += 1
+        if lead is None:
+            continue
 
-    if new_count > 0:
+        # Filtro 0: primeira execução → tudo vira AGUARDANDO_HUMANO.
+        if is_first_sync:
+            transicao(
+                conn, lead["id"], Estado.AGUARDANDO_HUMANO,
+                motivo="baseline_first_sync",
+                proxima_acao_horas=CLEAR_PROXIMA_ACAO,
+            )
+            stats["baseline"] += 1
+            continue
+
+        # Filtro 1: já tem advogado atribuído → não atende.
+        responsables = conv.get("responsables") or []
+        if responsables:
+            transicao(
+                conn, lead["id"], Estado.AGUARDANDO_HUMANO,
+                motivo="filtro_tem_responsavel",
+                payload={"responsables": responsables},
+                proxima_acao_horas=CLEAR_PROXIMA_ACAO,
+            )
+            stats["ignoradas"] += 1
+            continue
+
+        # Filtro 2: tem tag de exclusão → não atende.
+        # (Custo extra: 1 chamada à API por lead novo elegível em
+        # responsables-vazio. Tolerável em volume baixo.)
+        try:
+            tags = await jurichat.get_lead_tags(person_id)
+        except Exception as exc:
+            logger.warning(
+                "get_lead_tags falhou pra person_id=%s: %s", person_id, exc,
+            )
+            tags = []
+
+        if any(t in EXCLUDED_TAGS_FOR_BOT for t in tags):
+            transicao(
+                conn, lead["id"], Estado.AGUARDANDO_HUMANO,
+                motivo="filtro_tag_exclusao",
+                payload={"tags": tags},
+                proxima_acao_horas=CLEAR_PROXIMA_ACAO,
+            )
+            stats["ignoradas"] += 1
+            continue
+
+        # Passou nos 2 filtros — bot atende.
+        schedule_next_action_seconds(conn, lead["id"], 0)
+        stats["novos"] += 1
+
+    if is_first_sync:
         logger.info(
-            "sync_jurichat_conversations: %d novos leads registrados", new_count,
+            "sync_jurichat_conversations: PRIMEIRA EXECUCAO — %d conversas "
+            "registradas como AGUARDANDO_HUMANO (baseline, bot nao atende)",
+            stats["baseline"],
         )
-    return new_count
+    elif stats["novos"] > 0 or stats["ignoradas"] > 0:
+        logger.info(
+            "sync_jurichat_conversations: %d novos leads atendiveis, "
+            "%d ignorados (responsavel ou tag)",
+            stats["novos"], stats["ignoradas"],
+        )
+    return stats
 
 
 async def run_poll_cycle(
