@@ -18,15 +18,25 @@ from typing import Any, Literal
 
 SKILLS_DIR = Path(__file__).parent / "skills"
 
-VALID_ACOES = frozenset({"responder", "propor", "handoff"})
+VALID_ACOES = frozenset({
+    "responder", "propor", "handoff",
+    "oferecer_horarios", "confirmar_horario",
+})
 
 
 @dataclass
 class Decisao:
-    acao: Literal["responder", "propor", "handoff"]
+    acao: Literal[
+        "responder", "propor", "handoff",
+        "oferecer_horarios", "confirmar_horario",
+    ]
     mensagem: str
     resumo_caso: str | None = None
     motivo_handoff: str | None = None
+    # Presente apenas em ``acao = confirmar_horario`` — ISO 8601 com tz
+    # offset (ex: ``2026-06-09T14:30:00-03:00``). Claude parseia da
+    # transcrição (ele se lembra do que ofereceu + do que lead escolheu).
+    horario_escolhido_iso: str | None = None
 
 
 class DecisaoInvalida(Exception):
@@ -85,6 +95,7 @@ def parse_decisao(raw: str) -> Decisao:
         mensagem=mensagem,
         resumo_caso=data.get("resumo_caso"),
         motivo_handoff=data.get("motivo_handoff"),
+        horario_escolhido_iso=data.get("horario_escolhido_iso"),
     )
 
 

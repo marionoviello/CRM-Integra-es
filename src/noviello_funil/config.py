@@ -51,3 +51,21 @@ class Settings(BaseSettings):
     followup_1_apos_horas: int = Field(default=48, ge=1)
     followup_2_apos_horas: int = Field(default=72, ge=1)
     encerramento_apos_horas: int = Field(default=24, ge=1)
+
+    # Google Calendar — agendamento de reuniões com Mario via WhatsApp.
+    # Setup one-time: ``scripts/google_oauth_setup.py`` gera o refresh_token
+    # a partir do client_id/secret (OAuth Desktop app no GCP). O refresh
+    # token não expira (a menos que Mario revogue manualmente).
+    google_oauth_client_id: str = ""
+    google_oauth_client_secret: str = ""
+    google_oauth_refresh_token: str = ""
+    google_calendar_id: str = "primary"
+    calendar_timezone: str = "America/Sao_Paulo"
+    # Horário comercial pra slots oferecidos ao lead (decisão Mario
+    # 2026-06-08: 14h-19h, slots de 30min, sem buffer).
+    calendar_business_hours_start: int = Field(default=14, ge=0, le=23)
+    calendar_business_hours_end: int = Field(default=19, ge=1, le=24)
+    calendar_slot_min: int = Field(default=30, ge=15, le=180)
+    calendar_buffer_min: int = Field(default=0, ge=0, le=60)
+    calendar_lookahead_days: int = Field(default=5, ge=1, le=30)
+    calendar_num_slots: int = Field(default=3, ge=1, le=10)

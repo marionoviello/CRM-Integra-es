@@ -11,6 +11,9 @@ dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "python-dateutil>=2.9",
+    # tzdata: necessário no Windows (em Linux/Mac o zoneinfo usa o sistema).
+    # ~500KB pure-python, importação só em calendar_client.
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]

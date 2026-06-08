@@ -17,12 +17,19 @@ em_conversa leads with activity in the last 24h — see state.py.
 """
 
 import asyncio
+import datetime
 import hashlib
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from noviello_funil.brain import Decisao, DecisaoInvalida
+from noviello_funil.calendar_client import (
+    GoogleCalendarClient,
+    GoogleCalendarError,
+    Slot,
+)
 from noviello_funil.outbound import (
     JurichatClient,
     format_notification,
@@ -55,6 +62,24 @@ FOLLOWUP_2_TEXT = (
 
 # Default polling cadence. Overridable via run_poll_cycle parameter.
 DEFAULT_POLL_INTERVAL_SECONDS = 60
+
+
+@dataclass
+class CalendarConfig:
+    """Tudo que o scheduler precisa pra agendar via Google Calendar.
+
+    Quando ``client is None`` (config Google não definida no .env), as
+    ações ``oferecer_horarios`` e ``confirmar_horario`` viram handoff
+    automático ("vou te conectar com o advogado pra marcar").
+    """
+
+    client: GoogleCalendarClient | None
+    business_hours_start: int
+    business_hours_end: int
+    slot_min: int
+    buffer_min: int
+    lookahead_days: int
+    num_slots: int
 
 
 def is_eligible_for_followup(tags: list[str]) -> bool:
@@ -107,6 +132,261 @@ def _last_lead_message(transcript: str) -> str:
         if stripped.startswith("Lead:"):
             return stripped[len("Lead:") :].strip()
     return ""
+
+
+# --- Calendar handlers --------------------------------------------------
+
+def _format_slots_human(slots: list[Slot]) -> str:
+    """Formata 3 slots como bullet list pro WhatsApp."""
+    return "\n".join(f"• {s.format_human()}" for s in slots)
+
+
+async def _handle_oferecer_horarios(
+    *,
+    conn: Any,
+    lead: dict[str, Any],
+    decisao: Decisao,
+    transcript: str,
+    new_hash: str,
+    jurichat: JurichatClient,
+    calendar: CalendarConfig,
+    mario_conversation_id: str,
+    poll_interval_seconds: int,
+) -> None:
+    """Busca slots reais, substitui ``{{HORARIOS}}``, envia."""
+    lead_id = lead["id"]
+    conv_id = lead["jurichat_conversation_id"]
+
+    if calendar.client is None:
+        # Sem Google configurado — degradar pra handoff.
+        await _handoff_sem_calendar(
+            conn=conn, lead=lead, transcript=transcript, new_hash=new_hash,
+            jurichat=jurichat, mario_conversation_id=mario_conversation_id,
+            motivo="calendar_nao_configurado",
+        )
+        return
+
+    try:
+        slots = await calendar.client.find_available_slots(
+            business_hours_start=calendar.business_hours_start,
+            business_hours_end=calendar.business_hours_end,
+            slot_min=calendar.slot_min,
+            buffer_min=calendar.buffer_min,
+            lookahead_days=calendar.lookahead_days,
+            num_slots=calendar.num_slots,
+        )
+    except (GoogleCalendarError, Exception) as exc:
+        logger.exception(
+            "find_available_slots failed for lead=%s: %s", lead_id, exc,
+        )
+        register_error(conn, lead_id, "calendar_find_slots_failed")
+        schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
+        return
+
+    if not slots:
+        # Agenda lotada — degradar pra handoff humano.
+        await _handoff_sem_calendar(
+            conn=conn, lead=lead, transcript=transcript, new_hash=new_hash,
+            jurichat=jurichat, mario_conversation_id=mario_conversation_id,
+            motivo="agenda_lotada_proximos_dias",
+        )
+        return
+
+    horarios_texto = _format_slots_human(slots)
+    if "{{HORARIOS}}" in decisao.mensagem:
+        mensagem = decisao.mensagem.replace("{{HORARIOS}}", horarios_texto)
+    else:
+        # Claude esqueceu o placeholder — anexa no final.
+        mensagem = f"{decisao.mensagem.rstrip()}\n\n{horarios_texto}"
+
+    try:
+        await jurichat.start_human_support(conv_id)
+        await jurichat.send_message(conv_id, mensagem)
+    except Exception as exc:
+        logger.exception(
+            "send_message(oferecer_horarios) failed for lead=%s: %s",
+            lead_id, exc,
+        )
+        register_error(conn, lead_id, "jurichat_send_failed")
+        schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
+        return
+
+    update_transcript_hash(conn, lead_id, new_hash)
+    schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
+
+
+async def _handle_confirmar_horario(
+    *,
+    conn: Any,
+    lead: dict[str, Any],
+    decisao: Decisao,
+    transcript: str,
+    new_hash: str,
+    jurichat: JurichatClient,
+    calendar: CalendarConfig,
+    mario_conversation_id: str,
+    poll_interval_seconds: int,
+) -> None:
+    """Valida horário escolhido, cria evento, handoff, notifica Mario."""
+    lead_id = lead["id"]
+    conv_id = lead["jurichat_conversation_id"]
+
+    if calendar.client is None:
+        await _handoff_sem_calendar(
+            conn=conn, lead=lead, transcript=transcript, new_hash=new_hash,
+            jurichat=jurichat, mario_conversation_id=mario_conversation_id,
+            motivo="calendar_nao_configurado",
+        )
+        return
+
+    iso = decisao.horario_escolhido_iso
+    if not iso:
+        logger.error(
+            "confirmar_horario sem horario_escolhido_iso (lead=%s)", lead_id,
+        )
+        register_error(conn, lead_id, "claude_horario_iso_ausente")
+        schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
+        return
+
+    try:
+        start = datetime.datetime.fromisoformat(iso)
+    except ValueError as exc:
+        logger.error(
+            "horario_escolhido_iso inválido %r (lead=%s): %s", iso, lead_id, exc,
+        )
+        register_error(conn, lead_id, "claude_horario_iso_invalido")
+        schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
+        return
+
+    # Criar o evento (a API do Google rejeita conflito hard se houver,
+    # mas como freeBusy é eventualmente consistente, não validamos
+    # antes — confiamos no create. Se der erro 409/4xx, log e degradar.)
+    try:
+        await calendar.client.create_event(
+            start=start,
+            duration_min=calendar.slot_min,
+            lead_nome=lead["contato_nome"] or "Lead",
+            lead_telefone=lead["contato_telefone"] or "?",
+            resumo_caso=decisao.resumo_caso or "(sem resumo do bot)",
+        )
+    except Exception as exc:
+        logger.exception(
+            "create_event failed for lead=%s: %s", lead_id, exc,
+        )
+        register_error(conn, lead_id, "calendar_create_event_failed")
+        # Degradação: avisa lead, notifica Mario, handoff manual.
+        await _handoff_sem_calendar(
+            conn=conn, lead=lead, transcript=transcript, new_hash=new_hash,
+            jurichat=jurichat, mario_conversation_id=mario_conversation_id,
+            motivo="falha_criar_evento_calendar",
+        )
+        return
+
+    # Substitui placeholder no texto de confirmação.
+    horario_humano = Slot(
+        start=start, duration_min=calendar.slot_min,
+    ).format_human()
+    if "{{HORARIO_CONFIRMADO}}" in decisao.mensagem:
+        mensagem = decisao.mensagem.replace(
+            "{{HORARIO_CONFIRMADO}}", horario_humano,
+        )
+    else:
+        mensagem = f"{decisao.mensagem.rstrip()}\n\n(agendado pra {horario_humano})"
+
+    try:
+        await jurichat.start_human_support(conv_id)
+        await jurichat.send_message(conv_id, mensagem)
+    except Exception as exc:
+        logger.exception(
+            "send_message(confirmar_horario) failed for lead=%s: %s",
+            lead_id, exc,
+        )
+        # Evento já criado — segue pra handoff de qualquer jeito.
+
+    transicao(
+        conn, lead_id, Estado.AGUARDANDO_HUMANO,
+        motivo="claude_confirmar_horario",
+        payload={
+            "horario_iso": iso,
+            "resumo_caso": decisao.resumo_caso,
+        },
+        proxima_acao_horas=CLEAR_PROXIMA_ACAO,
+    )
+    update_transcript_hash(conn, lead_id, new_hash)
+
+    try:
+        await notify_mario(
+            jurichat,
+            mario_conversation_id=mario_conversation_id,
+            mensagem=(
+                f"📅 *Agendado via bot*\n\n"
+                f"Lead: {lead['contato_nome']}\n"
+                f"Tel: {lead['contato_telefone']}\n"
+                f"Quando: {horario_humano}\n\n"
+                f"Resumo: {decisao.resumo_caso or '(sem resumo)'}\n\n"
+                f"Evento já criado no seu Google Calendar."
+            ),
+        )
+    except Exception as exc:
+        logger.exception(
+            "notify_mario(agendado) failed for lead=%s: %s", lead_id, exc,
+        )
+
+
+async def _handoff_sem_calendar(
+    *,
+    conn: Any,
+    lead: dict[str, Any],
+    transcript: str,
+    new_hash: str,
+    jurichat: JurichatClient,
+    mario_conversation_id: str,
+    motivo: str,
+) -> None:
+    """Fallback comum: calendar fora do ar / agenda lotada / erro create.
+
+    Avisa lead, transiciona pra AGUARDANDO_HUMANO, pinga Mario.
+    """
+    lead_id = lead["id"]
+    conv_id = lead["jurichat_conversation_id"]
+    msg_lead = (
+        "Vou te conectar com o Mario aqui mesmo pra confirmar o horário. "
+        "Em instantes ele responde."
+    )
+    try:
+        await jurichat.start_human_support(conv_id)
+        await jurichat.send_message(conv_id, msg_lead)
+    except Exception as exc:
+        logger.exception(
+            "send_message(handoff_calendar) failed for lead=%s: %s",
+            lead_id, exc,
+        )
+
+    transicao(
+        conn, lead_id, Estado.AGUARDANDO_HUMANO,
+        motivo=motivo,
+        proxima_acao_horas=CLEAR_PROXIMA_ACAO,
+    )
+    update_transcript_hash(conn, lead_id, new_hash)
+
+    try:
+        await notify_mario(
+            jurichat,
+            mario_conversation_id=mario_conversation_id,
+            mensagem=format_notification(
+                tipo="handoff",
+                nome=lead["contato_nome"],
+                telefone=lead["contato_telefone"],
+                ultima_msg=_last_lead_message(transcript),
+                motivo=f"pedido agendamento — {motivo}",
+                conversation_id=conv_id,
+            ),
+        )
+    except Exception as exc:
+        logger.exception(
+            "notify_mario(handoff_calendar) failed for lead=%s: %s",
+            lead_id, exc,
+        )
 
 
 # Tags que indicam que a conversa NÃO deve ser atendida pelo bot
@@ -265,6 +545,7 @@ async def run_poll_cycle(
     mario_conversation_id: str,
     max_turnos: int,
     poll_interval_seconds: int = DEFAULT_POLL_INTERVAL_SECONDS,
+    calendar: CalendarConfig | None = None,
 ) -> None:
     """Process all em_conversa leads whose poll tick is due."""
     conn = get_db()
@@ -434,6 +715,34 @@ async def run_poll_cycle(
                     "notify_mario(fechar) failed for lead=%s: %s", lead_id, exc,
                 )
 
+        elif decisao.acao == "oferecer_horarios":
+            await _handle_oferecer_horarios(
+                conn=conn, lead=lead, decisao=decisao,
+                transcript=transcript, new_hash=new_hash,
+                jurichat=jurichat,
+                calendar=calendar or CalendarConfig(
+                    client=None, business_hours_start=14,
+                    business_hours_end=19, slot_min=30, buffer_min=0,
+                    lookahead_days=5, num_slots=3,
+                ),
+                mario_conversation_id=mario_conversation_id,
+                poll_interval_seconds=poll_interval_seconds,
+            )
+
+        elif decisao.acao == "confirmar_horario":
+            await _handle_confirmar_horario(
+                conn=conn, lead=lead, decisao=decisao,
+                transcript=transcript, new_hash=new_hash,
+                jurichat=jurichat,
+                calendar=calendar or CalendarConfig(
+                    client=None, business_hours_start=14,
+                    business_hours_end=19, slot_min=30, buffer_min=0,
+                    lookahead_days=5, num_slots=3,
+                ),
+                mario_conversation_id=mario_conversation_id,
+                poll_interval_seconds=poll_interval_seconds,
+            )
+
         elif decisao.acao == "handoff":
             transicao(
                 conn, lead_id, Estado.AGUARDANDO_HUMANO,
@@ -583,6 +892,34 @@ def main() -> int:
         base_url=settings.jurichat_base_url,
     )
     anthropic_client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+
+    # Google Calendar é opcional. Se as 3 creds OAuth não estão no .env,
+    # o scheduler roda normal e ações de agendamento viram handoff
+    # automático (msg "vou te conectar com o Mario").
+    calendar_config: CalendarConfig | None = None
+    if (
+        settings.google_oauth_client_id
+        and settings.google_oauth_client_secret
+        and settings.google_oauth_refresh_token
+    ):
+        calendar_client = GoogleCalendarClient(
+            client_id=settings.google_oauth_client_id,
+            client_secret=settings.google_oauth_client_secret,
+            refresh_token=settings.google_oauth_refresh_token,
+            calendar_id=settings.google_calendar_id,
+            timezone=settings.calendar_timezone,
+        )
+        calendar_config = CalendarConfig(
+            client=calendar_client,
+            business_hours_start=settings.calendar_business_hours_start,
+            business_hours_end=settings.calendar_business_hours_end,
+            slot_min=settings.calendar_slot_min,
+            buffer_min=settings.calendar_buffer_min,
+            lookahead_days=settings.calendar_lookahead_days,
+            num_slots=settings.calendar_num_slots,
+        )
+    else:
+        calendar_client = None
     # Multi-vertical prompt (imobiliário + sucessório + saúde). Substitui
     # o saude_suplementar.md anterior — vê src/noviello_funil/skills/.
     skill = load_skill("atendente_geral")
@@ -617,6 +954,7 @@ def main() -> int:
             triagem_fn=bound_triagem,
             mario_conversation_id=settings.mario_conversation_id,
             max_turnos=settings.max_turnos_por_lead,
+            calendar=calendar_config,
         )
         # 3. Follow-up cycle nudges idle leads.
         await run_followup_cycle(
@@ -643,6 +981,8 @@ def main() -> int:
             return 1
         finally:
             await jurichat.aclose()
+            if calendar_client is not None:
+                await calendar_client.aclose()
 
     try:
         return asyncio.run(_full_cycle_with_cleanup())

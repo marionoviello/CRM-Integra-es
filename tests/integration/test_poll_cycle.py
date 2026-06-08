@@ -14,11 +14,17 @@ Covers:
 import datetime
 import hashlib
 from unittest.mock import AsyncMock, MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from noviello_funil.brain import Decisao, DecisaoInvalida
-from noviello_funil.scheduler import run_followup_cycle, run_poll_cycle
+from noviello_funil.calendar_client import Slot
+from noviello_funil.scheduler import (
+    CalendarConfig,
+    run_followup_cycle,
+    run_poll_cycle,
+)
 from noviello_funil.state import Estado, get_lead_by_conversation
 
 # --- Test helpers ---------------------------------------------------------
@@ -384,3 +390,170 @@ async def test_poll_marks_lead_activity_when_hash_changes(db_conn):
 
     lead = get_lead_by_conversation(db_conn, "C-1")
     assert lead["ultima_msg_lead_em"] is not None
+
+
+# --- Calendar actions ---------------------------------------------------
+
+def _make_calendar(slots: list[Slot] | None = None):
+    """Fake calendar client com find_available_slots + create_event."""
+    fake = MagicMock()
+    fake.find_available_slots = AsyncMock(return_value=slots or [])
+    fake.create_event = AsyncMock(return_value={"id": "evt-1"})
+    return fake
+
+
+def _calendar_config(client=None):
+    return CalendarConfig(
+        client=client,
+        business_hours_start=14, business_hours_end=19,
+        slot_min=30, buffer_min=0,
+        lookahead_days=5, num_slots=3,
+    )
+
+
+@pytest.mark.asyncio
+async def test_oferecer_horarios_substitui_placeholder_e_envia(db_conn):
+    """Claude pediu agendamento → bot busca slots reais e substitui placeholder."""
+    transcript = "Atendente: Oi\nLead: Quero agendar uma conversa"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    tz = ZoneInfo("America/Sao_Paulo")
+    slots = [
+        Slot(start=datetime.datetime(2026, 6, 9, 14, 0, tzinfo=tz), duration_min=30),
+        Slot(start=datetime.datetime(2026, 6, 9, 14, 30, tzinfo=tz), duration_min=30),
+        Slot(start=datetime.datetime(2026, 6, 10, 15, 0, tzinfo=tz), duration_min=30),
+    ]
+
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="oferecer_horarios",
+            mensagem="Claro! Tenho esses horários:\n\n{{HORARIOS}}\n\nQual prefere?",
+        )
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        calendar=_calendar_config(client=_make_calendar(slots)),
+    )
+
+    sent_text = jurichat.send_message.call_args[0][1]
+    assert "{{HORARIOS}}" not in sent_text  # placeholder substituído
+    assert "ter (09/jun) às 14h" in sent_text
+    assert "ter (09/jun) às 14h30" in sent_text
+    assert "qua (10/jun) às 15h" in sent_text
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA  # ainda em conversa
+
+
+@pytest.mark.asyncio
+async def test_oferecer_horarios_sem_calendar_vira_handoff(db_conn):
+    """Sem Google configurado → degradar pra handoff cortês."""
+    transcript = "Atendente: Oi\nLead: Quero agendar"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="oferecer_horarios",
+            mensagem="Tenho esses horários: {{HORARIOS}}",
+        )
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        calendar=None,  # explicitamente sem calendar
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.AGUARDANDO_HUMANO
+    sent_text = jurichat.send_message.call_args_list[0][0][1]
+    assert "Mario" in sent_text or "advogado" in sent_text.lower()
+
+
+@pytest.mark.asyncio
+async def test_confirmar_horario_cria_evento_e_handoff(db_conn):
+    """Lead escolheu horário → cria evento + handoff + notifica."""
+    transcript = (
+        "Atendente: Tenho ter 14h, ter 14h30, qua 15h\n"
+        "Lead: A terça 14h tá bom"
+    )
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar()
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="confirmar_horario",
+            mensagem="Perfeito! Agendado pra {{HORARIO_CONFIRMADO}}.",
+            horario_escolhido_iso="2026-06-09T14:00:00-03:00",
+            resumo_caso="Inventário, pai faleceu 20 dias, 3 herdeiros, SP",
+        )
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )
+
+    # Evento criado com os dados certos
+    calendar_client.create_event.assert_awaited_once()
+    call_kwargs = calendar_client.create_event.call_args.kwargs
+    assert call_kwargs["lead_nome"] == "Maria"
+    assert call_kwargs["resumo_caso"].startswith("Inventário")
+    assert call_kwargs["duration_min"] == 30
+
+    # Estado virou aguardando_humano
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.AGUARDANDO_HUMANO
+
+    # Mensagem pro lead substituiu placeholder
+    # send_message é chamada 2x: confirmação ao lead + notify_mario
+    sent_text = jurichat.send_message.call_args_list[0][0][1]
+    assert "{{HORARIO_CONFIRMADO}}" not in sent_text
+    assert "ter (09/jun) às 14h" in sent_text
+
+
+@pytest.mark.asyncio
+async def test_confirmar_horario_sem_iso_registra_erro(db_conn):
+    """Claude esqueceu horario_escolhido_iso → erro, não cria evento."""
+    transcript = "Lead: A terça tá bom"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar()
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="confirmar_horario",
+            mensagem="Agendado",
+            horario_escolhido_iso=None,  # ESQUECEU
+            resumo_caso="caso x",
+        )
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )
+
+    calendar_client.create_event.assert_not_awaited()
+    jurichat.send_message.assert_not_awaited()
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["erro_atual"] == "claude_horario_iso_ausente"
+    assert lead["estado"] == Estado.EM_CONVERSA  # não progrediu
