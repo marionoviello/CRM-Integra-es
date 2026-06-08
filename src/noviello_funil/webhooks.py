@@ -16,7 +16,24 @@ from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 
-from noviello_funil.state import is_webhook_processed, mark_webhook_processed
+from noviello_funil.brain import Decisao, DecisaoInvalida
+from noviello_funil.outbound import (
+    JurichatClient,
+    format_notification,
+    notify_mario,
+)
+from noviello_funil.state import (
+    ESTADOS_ATIVOS_CLAUDE,
+    Estado,
+    bump_turnos,
+    create_lead_if_absent,
+    get_lead_by_conversation,
+    is_webhook_processed,
+    mark_webhook_processed,
+    record_lead_message_received,
+    register_error,
+    transicao,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,3 +102,190 @@ def register_webhooks(
         return Response(
             content=b'{"ok":true}', media_type="application/json",
         )
+
+
+def _is_from_lead(payload: dict[str, Any]) -> bool:
+    """Detect if the message in the payload came FROM the lead (not Mario).
+
+    Currently assumes Jurichat sets `message.from_me = True` for outbound
+    (atendente-sent) messages. Adjust here if the real payload differs
+    (see spec §15.6).
+    """
+    msg = payload.get("message") or {}
+    return not msg.get("from_me", False)
+
+
+def _extract_text(payload: dict[str, Any]) -> str:
+    return (payload.get("message") or {}).get("text", "")
+
+
+def build_lead_message_processor(
+    *,
+    get_db: Callable[[], Any],
+    jurichat: JurichatClient,
+    mario_conversation_id: str,
+    triagem_fn: Callable[..., Any],
+    max_turnos: int,
+    followup_horas: int,
+) -> Callable[[dict[str, Any]], Any]:
+    """Build the async processor that handles a single webhook payload.
+
+    Injected dependencies make this testable without real Anthropic/Jurichat.
+    `triagem_fn` is the (awaitable) Claude triage callable.
+    """
+
+    async def process(payload: dict[str, Any]) -> None:
+        conn = get_db()
+        conversation_id = payload.get("conversation_id")
+        lead_id_external = payload.get("lead_id")
+        contact = payload.get("contact") or {}
+        ultima_msg = _extract_text(payload)
+
+        if not conversation_id or not lead_id_external:
+            # LGPD: log only the keys, never the payload values (may contain
+            # lead message body).
+            logger.warning("payload missing ids: keys=%s", list(payload.keys()))
+            return
+
+        # Branch 1: message from Mario → halt Claude permanently for this lead
+        if not _is_from_lead(payload):
+            lead = get_lead_by_conversation(conn, conversation_id)
+            if lead is None:
+                lead = create_lead_if_absent(
+                    conn, lead_id_external, conversation_id,
+                    contact.get("phone", ""), contact.get("name"),
+                )
+            if lead["estado"] != Estado.AGUARDANDO_HUMANO:
+                transicao(
+                    conn, lead["id"], Estado.AGUARDANDO_HUMANO,
+                    motivo="mensagem_mario",
+                )
+            return
+
+        # Branch 2: message from lead
+        lead = create_lead_if_absent(
+            conn, lead_id_external, conversation_id,
+            contact.get("phone", ""), contact.get("name"),
+        )
+        estado_atual = lead["estado"]
+
+        if estado_atual == Estado.AGUARDANDO_HUMANO:
+            # Claude is silent on this lead
+            return
+
+        if estado_atual not in ESTADOS_ATIVOS_CLAUDE:
+            logger.warning(
+                "lead %s in unexpected state %s; skipping",
+                lead["id"], estado_atual,
+            )
+            return
+
+        # Reopen from encerrado_sem_resposta if applicable
+        if estado_atual == Estado.ENCERRADO_SEM_RESPOSTA:
+            transicao(
+                conn, lead["id"], Estado.EM_CONVERSA, motivo="lead_retornou",
+            )
+            record_lead_message_received(
+                conn, lead["id"],
+                proxima_acao_horas=followup_horas,
+                reset_turnos=True,
+            )
+        else:
+            record_lead_message_received(
+                conn, lead["id"], proxima_acao_horas=followup_horas,
+            )
+
+        bump_turnos(conn, lead["id"])
+        lead = get_lead_by_conversation(conn, conversation_id)
+        assert lead is not None
+
+        # Turn cap → force handoff before calling Claude (saves a token)
+        if lead["turnos"] >= max_turnos:
+            transicao(
+                conn, lead["id"], Estado.AGUARDANDO_HUMANO,
+                motivo="max_turnos",
+            )
+            await notify_mario(
+                jurichat,
+                mario_conversation_id=mario_conversation_id,
+                mensagem=format_notification(
+                    tipo="turnos",
+                    nome=lead["contato_nome"],
+                    telefone=lead["contato_telefone"],
+                    ultima_msg=ultima_msg,
+                    conversation_id=conversation_id,
+                ),
+            )
+            return
+
+        # Pull transcript and call Claude
+        try:
+            conv = await jurichat.get_conversation(conversation_id)
+            transcript = conv.get("transcription", "")
+        except Exception as exc:
+            register_error(conn, lead["id"], "jurichat_get_conversation_failed")
+            logger.exception("get_conversation failed: %s", exc)
+            return
+
+        try:
+            decisao: Decisao = await triagem_fn(
+                conversation_transcript=transcript,
+            )
+        except DecisaoInvalida:
+            register_error(conn, lead["id"], "claude_invalid_json")
+            await notify_mario(
+                jurichat,
+                mario_conversation_id=mario_conversation_id,
+                mensagem=(
+                    f"⚠️ Lead {lead['contato_nome']} ({lead['contato_telefone']}) "
+                    f"— Claude retornou JSON inválido. Verifique."
+                ),
+            )
+            return
+
+        # Route by acao
+        if decisao.acao == "responder":
+            await jurichat.send_message(conversation_id, decisao.mensagem)
+            return
+
+        if decisao.acao == "propor":
+            await jurichat.send_message(conversation_id, decisao.mensagem)
+            transicao(
+                conn, lead["id"], Estado.AGUARDANDO_HUMANO,
+                motivo="claude_propor",
+                payload={"resumo_caso": decisao.resumo_caso},
+            )
+            await notify_mario(
+                jurichat,
+                mario_conversation_id=mario_conversation_id,
+                mensagem=format_notification(
+                    tipo="fechar",
+                    nome=lead["contato_nome"],
+                    telefone=lead["contato_telefone"],
+                    ultima_msg=ultima_msg,
+                    resumo=decisao.resumo_caso,
+                    conversation_id=conversation_id,
+                ),
+            )
+            return
+
+        if decisao.acao == "handoff":
+            transicao(
+                conn, lead["id"], Estado.AGUARDANDO_HUMANO,
+                motivo="claude_handoff",
+                payload={"motivo_handoff": decisao.motivo_handoff},
+            )
+            await notify_mario(
+                jurichat,
+                mario_conversation_id=mario_conversation_id,
+                mensagem=format_notification(
+                    tipo="handoff",
+                    nome=lead["contato_nome"],
+                    telefone=lead["contato_telefone"],
+                    ultima_msg=ultima_msg,
+                    motivo=decisao.motivo_handoff,
+                    conversation_id=conversation_id,
+                ),
+            )
+
+    return process
