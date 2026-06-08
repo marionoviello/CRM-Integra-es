@@ -171,7 +171,22 @@ class JurichatClient:
     async def get_conversation(
         self, conversation_id: str, *, base_delay: float = 1.0,
     ) -> dict[str, Any]:
-        """GET /conversation/{id} — returns full conversation including transcription."""
+        """GET /conversation/{id} — returns full conversation with messages.
+
+        Response real captured 2026-06-08:
+            { "data": { "person": {...}, "messages": [
+                { "content": "...", "direction": "INBOUND"|"OUTBOUND",
+                  "messageAt": "...", "type": "text", ... },
+                ...
+            ]}}
+
+        We build a synthetic ``transcription`` string from the messages
+        array for backward compat with the rest of the pipeline (poll
+        cycle does ``conv.get("transcription", "")``).
+
+        ``direction = INBOUND`` → lead enviou.
+        ``direction = OUTBOUND`` → atendente (humano ou bot) enviou.
+        """
 
         async def op() -> dict[str, Any]:
             resp = await self._client.get(
@@ -180,7 +195,28 @@ class JurichatClient:
             resp.raise_for_status()
             return resp.json()
 
-        return await with_retry(op, attempts=3, base_delay=base_delay)
+        raw = await with_retry(op, attempts=3, base_delay=base_delay)
+        data = raw.get("data") or raw  # API às vezes encapsula em "data"
+        messages = data.get("messages") or []
+
+        # Constroi transcript no formato esperado pelo poll cycle:
+        # "Lead: <texto>\nAtendente: <texto>\n..."
+        lines: list[str] = []
+        for msg in messages:
+            content = (msg.get("content") or "").strip()
+            if not content:
+                continue
+            direction = msg.get("direction", "")
+            prefix = "Lead:" if direction == "INBOUND" else "Atendente:"
+            lines.append(f"{prefix} {content}")
+
+        # Resposta enriquecida: mantém os dados originais + transcription
+        # sintética que o resto do código já consome.
+        return {
+            **data,
+            "transcription": "\n".join(lines),
+            "messages_raw": messages,
+        }
 
     async def list_active_conversations(
         self,

@@ -84,13 +84,22 @@ async def test_jurichat_send_message_calls_correct_endpoint(respx_mock):
 
 @pytest.mark.asyncio
 async def test_jurichat_get_conversation_returns_transcript(respx_mock):
+    """Real Jurichat shape (captured 2026-06-08): {data: {messages: [
+        {content, direction: INBOUND|OUTBOUND, ...}, ...]}}.
+    get_conversation builds a synthetic ``transcription`` from messages
+    so the rest of the pipeline keeps working."""
     respx_mock.get(
         "https://api.jurichat.com/conversation/C-1"
     ).mock(return_value=httpx.Response(
         200, json={
-            "id": "C-1",
-            "transcription": "Lead: oi\nAtendente: ola",
-            "summary": "primeiro contato",
+            "data": {
+                "id": "C-1",
+                "person": {"name": "Maria"},
+                "messages": [
+                    {"content": "oi", "direction": "INBOUND", "type": "text"},
+                    {"content": "ola", "direction": "OUTBOUND", "type": "text"},
+                ],
+            },
         },
     ))
 
@@ -100,7 +109,8 @@ async def test_jurichat_get_conversation_returns_transcript(respx_mock):
     finally:
         await client.aclose()
 
-    assert result["transcription"].startswith("Lead:")
+    assert result["transcription"] == "Lead: oi\nAtendente: ola"
+    assert len(result["messages_raw"]) == 2
 
 
 @pytest.mark.asyncio
