@@ -53,10 +53,15 @@ def _sha(text: str) -> str:
 
 
 def _make_jurichat(transcript: str):
-    """Fake JurichatClient with stubbed get_conversation + send_message."""
+    """Fake JurichatClient with stubbed get_conversation + send_message.
+
+    Inclui ``start_human_support`` (idempotente, retorna sucesso) porque o
+    novo contrato exige essa chamada antes de cada send_message + notify_mario.
+    """
     fake = MagicMock()
     fake.get_conversation = AsyncMock(return_value={"transcription": transcript})
     fake.send_message = AsyncMock(return_value={"id": "msg-1"})
+    fake.start_human_support = AsyncMock(return_value={"success": True})
     return fake
 
 

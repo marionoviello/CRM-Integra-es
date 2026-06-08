@@ -72,8 +72,13 @@ async def test_jurichat_send_message_calls_correct_endpoint(respx_mock):
     assert route.called
     assert result == {"id": "msg-1"}
     sent_form = route.calls.last.request.read()
-    assert b'conversation_id' in sent_form
-    assert b'C-1' in sent_form
+    # Novo contrato (descoberto 2026-06-08): multipart/form-data com
+    # conversationId (camelCase), message, type=text.
+    assert b"conversationId" in sent_form
+    assert b"message" in sent_form
+    assert b"type" in sent_form
+    assert b"text" in sent_form
+    assert b"C-1" in sent_form
     assert b"Ol" in sent_form  # accent-encoded
 
 
@@ -256,6 +261,10 @@ def test_format_notification_turnos_excedidos():
 async def test_notify_mario_swallows_4xx_silently(respx_mock, caplog):
     """Fire-and-forget per spec §9: a wrong MARIO_CONVERSATION_ID (404)
     must NOT raise — it logs and returns. Same for any other 4xx."""
+    # Pré-requisito do novo contrato: start_human_support antes do send.
+    respx_mock.post(
+        "https://api.jurichat.com/conversation/start-human-support"
+    ).mock(return_value=httpx.Response(200, json={"success": True}))
     respx_mock.post(
         "https://api.jurichat.com/conversation/send-message"
     ).mock(return_value=httpx.Response(404, json={"error": "not found"}))
@@ -277,6 +286,10 @@ async def test_notify_mario_swallows_4xx_silently(respx_mock, caplog):
 @pytest.mark.asyncio
 async def test_notify_mario_swallows_outbound_error_silently(respx_mock, caplog):
     """Exhausted retries (3x 503 → OutboundError) also must NOT raise."""
+    # start_human_support volta 200 — o erro está no send-message.
+    respx_mock.post(
+        "https://api.jurichat.com/conversation/start-human-support"
+    ).mock(return_value=httpx.Response(200, json={"success": True}))
     respx_mock.post(
         "https://api.jurichat.com/conversation/send-message"
     ).mock(return_value=httpx.Response(503))
@@ -309,6 +322,10 @@ async def test_notify_mario_swallows_outbound_error_silently(respx_mock, caplog)
 async def test_notify_mario_sends_to_configured_number(respx_mock):
     # Notification = a send_message to the special Mario notification
     # "conversation" — Jurichat treats this as a normal outbound message.
+    # Novo contrato exige start_human_support antes do send.
+    respx_mock.post(
+        "https://api.jurichat.com/conversation/start-human-support"
+    ).mock(return_value=httpx.Response(200, json={"success": True}))
     respx_mock.post(
         "https://api.jurichat.com/conversation/send-message"
     ).mock(return_value=httpx.Response(200, json={"id": "msg-notif"}))

@@ -93,6 +93,43 @@ class JurichatClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    async def start_human_support(
+        self,
+        conversation_id: str,
+        *,
+        is_random: bool = True,
+        base_delay: float = 1.0,
+    ) -> dict[str, Any]:
+        """POST /conversation/start-human-support (application/json).
+
+        Transfere a conversa para "modo atendimento humano" — pré-requisito
+        para poder enviar mensagens via send-message. Sem isso, send-message
+        retorna 400 "Conversa não está em modo de atendimento humano".
+
+        Confirmado idempotente: chamar várias vezes na mesma conversa
+        retorna sempre {"success": true} sem efeito colateral.
+
+        ``is_random=True`` deixa o Jurichat escolher qualquer atendente
+        (não precisamos especificar selectedUserId).
+
+        Confirmado 2026-06-08 via curl: STATUS 200 + {"success": true}.
+        """
+
+        async def op() -> dict[str, Any]:
+            resp = await self._client.post(
+                f"{self._base_url}/conversation/start-human-support",
+                json={"conversationId": conversation_id, "isRandom": is_random},
+            )
+            if resp.status_code >= 400:
+                logger.error(
+                    "start_human_support status=%d body=%r",
+                    resp.status_code, resp.text[:500],
+                )
+            resp.raise_for_status()
+            return resp.json()
+
+        return await with_retry(op, attempts=3, base_delay=base_delay)
+
     async def send_message(
         self,
         conversation_id: str,
@@ -100,17 +137,26 @@ class JurichatClient:
         *,
         base_delay: float = 1.0,
     ) -> dict[str, Any]:
-        """POST /conversation/send-message (application/json).
+        """POST /conversation/send-message (multipart/form-data).
 
-        Jurichat retornou 415 Unsupported Media Type quando enviamos como
-        application/x-www-form-urlencoded (httpx ``data=``). Aceita JSON.
-        Confirmado em 2026-06-08.
+        Formato real descoberto 2026-06-08:
+          - Content-Type: multipart/form-data (não JSON, não urlencoded)
+          - conversationId: camelCase (não snake_case)
+          - message: campo para o texto (não 'text')
+          - type: "text" para mensagens textuais (obrigatório)
+
+        Pré-requisito: conversa em modo human-support. Veja
+        ``start_human_support``.
         """
 
         async def op() -> dict[str, Any]:
             resp = await self._client.post(
                 f"{self._base_url}/conversation/send-message",
-                json={"conversation_id": conversation_id, "text": text},
+                files={
+                    "conversationId": (None, conversation_id),
+                    "message": (None, text),
+                    "type": (None, "text"),
+                },
             )
             if resp.status_code >= 400:
                 logger.error(
@@ -275,6 +321,9 @@ async def notify_mario(
     ``MARIO_CONVERSATION_ID``, ``RequestError`` for transport failures).
     """
     try:
+        # Pré-requisito: a conversa do Mario também precisa estar em
+        # human-support mode. Idempotente.
+        await client.start_human_support(mario_conversation_id)
         await client.send_message(mario_conversation_id, mensagem)
     except (OutboundError, httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.error("notify_mario failed: %s", exc)

@@ -375,6 +375,9 @@ async def run_poll_cycle(
         # Dispatch on Claude's decision.
         if decisao.acao == "responder":
             try:
+                # Pré-requisito: conversa em human-support mode.
+                # Idempotente — chamar repetidamente não tem efeito colateral.
+                await jurichat.start_human_support(conv_id)
                 await jurichat.send_message(conv_id, decisao.mensagem)
             except Exception as exc:
                 logger.exception(
@@ -390,6 +393,7 @@ async def run_poll_cycle(
         elif decisao.acao == "propor":
             # Send the closing message, then hand off.
             try:
+                await jurichat.start_human_support(conv_id)
                 await jurichat.send_message(conv_id, decisao.mensagem)
             except Exception as exc:
                 logger.exception(
@@ -506,6 +510,9 @@ async def run_followup_cycle(
                 # Send AFTER state+schedule are committed. If send fails
                 # the lead is correctly scheduled for the NEXT cycle and
                 # we won't double-send on retry (state is already FU1).
+                await jurichat.start_human_support(
+                    lead["jurichat_conversation_id"],
+                )
                 await jurichat.send_message(
                     lead["jurichat_conversation_id"], texto,
                 )
@@ -517,6 +524,9 @@ async def run_followup_cycle(
                     conn, lead["id"], Estado.FOLLOW_UP_2_ENVIADO,
                     motivo="scheduler_followup_2",
                     proxima_acao_horas=encerramento_apos_horas,
+                )
+                await jurichat.start_human_support(
+                    lead["jurichat_conversation_id"],
                 )
                 await jurichat.send_message(
                     lead["jurichat_conversation_id"], texto,

@@ -64,6 +64,7 @@ async def test_cycle_sends_first_followup_when_in_em_conversa(db_conn):
     fake_jurichat.get_conversation = AsyncMock(return_value={
         "transcription": "Lead: oi (há 2 dias)",
     })
+    fake_jurichat.start_human_support = AsyncMock(return_value={"success": True})
     fake_jurichat.send_message = AsyncMock(return_value={"id": "x"})
 
     async def fake_followup_gen(**kwargs):
@@ -88,6 +89,7 @@ async def test_cycle_sends_second_followup_when_in_follow_up_1(db_conn):
 
     fake_jurichat = MagicMock()
     fake_jurichat.get_lead_tags = AsyncMock(return_value=[])
+    fake_jurichat.start_human_support = AsyncMock(return_value={"success": True})
     fake_jurichat.send_message = AsyncMock(return_value={"id": "x"})
 
     async def fake_followup_gen(**kwargs):
