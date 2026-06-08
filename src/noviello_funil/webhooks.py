@@ -197,7 +197,12 @@ def build_lead_message_processor(
 
         bump_turnos(conn, lead["id"])
         lead = get_lead_by_conversation(conn, conversation_id)
-        assert lead is not None
+        if lead is None:
+            # Should be impossible (we just created/loaded it above), but
+            # don't rely on `assert` which is stripped under python -O.
+            raise RuntimeError(
+                f"lead disappeared after bump_turnos: conversation_id={conversation_id}"
+            )
 
         # Turn cap → force handoff before calling Claude (saves a token)
         if lead["turnos"] >= max_turnos:
@@ -236,9 +241,12 @@ def build_lead_message_processor(
             await notify_mario(
                 jurichat,
                 mario_conversation_id=mario_conversation_id,
-                mensagem=(
-                    f"⚠️ Lead {lead['contato_nome']} ({lead['contato_telefone']}) "
-                    f"— Claude retornou JSON inválido. Verifique."
+                mensagem=format_notification(
+                    tipo="claude_erro",
+                    nome=lead["contato_nome"],
+                    telefone=lead["contato_telefone"],
+                    ultima_msg=ultima_msg,
+                    conversation_id=conversation_id,
                 ),
             )
             return

@@ -159,7 +159,7 @@ def format_notification(
 ) -> str:
     """Format a notification message for Mario.
 
-    tipo: 'fechar' | 'handoff' | 'turnos'
+    tipo: 'fechar' | 'handoff' | 'turnos' | 'claude_erro'
     """
     nome_label = nome or "(sem nome)"
 
@@ -174,6 +174,10 @@ def format_notification(
     elif tipo == "turnos":
         head = f"⏸ Lead {nome_label} ({telefone}) — 20 turnos sem progresso"
         body = f'Última msg: "{ultima_msg}"'
+        extra = ""
+    elif tipo == "claude_erro":
+        head = f"⚠️ Lead {nome_label} ({telefone}) — Claude retornou JSON inválido"
+        body = "Verifique a conversa; o lead segue em em_conversa para retry."
         extra = ""
     else:
         raise ValueError(f"unknown notification type: {tipo}")

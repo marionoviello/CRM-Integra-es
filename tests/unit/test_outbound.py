@@ -226,6 +226,19 @@ def test_format_notification_handoff():
     assert "pediu falar com humano" in msg
 
 
+def test_format_notification_claude_erro():
+    msg = format_notification(
+        tipo="claude_erro",
+        nome="Bia",
+        telefone="5511666666666",
+        ultima_msg="qualquer coisa",
+        conversation_id="C-7",
+    )
+    assert msg.startswith("⚠️")
+    assert "Claude retornou JSON inválido" in msg
+    assert "C-7" in msg
+
+
 def test_format_notification_turnos_excedidos():
     msg = format_notification(
         tipo="turnos",
