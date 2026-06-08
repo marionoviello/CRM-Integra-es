@@ -417,7 +417,9 @@ def main() -> int:
         base_url=settings.jurichat_base_url,
     )
     anthropic_client = AsyncAnthropic(api_key=settings.anthropic_api_key)
-    skill = load_skill("saude_suplementar")
+    # Multi-vertical prompt (imobiliário + sucessório + saúde). Substitui
+    # o saude_suplementar.md anterior — vê src/noviello_funil/skills/.
+    skill = load_skill("atendente_geral")
 
     bound_followup = partial(
         gen,
