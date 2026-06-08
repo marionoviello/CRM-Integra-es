@@ -59,6 +59,29 @@ def test_parse_decisao_extracts_json_from_markdown_block():
     assert d.acao == "responder"
 
 
+def test_parse_decisao_extracts_json_from_prose_wrapped_fence():
+    """Claude sometimes adds prose around the fence: 'Sure: ```{...}``` ok?'"""
+    raw = (
+        'Claro, aqui está a decisão:\n'
+        '```json\n{"acao": "responder", "mensagem": "oi maria"}\n```\n'
+        'Espero ter ajudado.'
+    )
+    d = parse_decisao(raw)
+    assert d.acao == "responder"
+    assert d.mensagem == "oi maria"
+
+
+def test_parse_decisao_extracts_bare_json_from_prose():
+    """No fence at all — just JSON embedded in conversational prose."""
+    raw = (
+        'Tudo bem! A decisão é {"acao": "handoff", "mensagem": "ok", '
+        '"motivo_handoff": "fora escopo"} — pode prosseguir.'
+    )
+    d = parse_decisao(raw)
+    assert d.acao == "handoff"
+    assert d.motivo_handoff == "fora escopo"
+
+
 @pytest.mark.asyncio
 async def test_triagem_returns_decision_on_first_call():
     fake_client = MagicMock()

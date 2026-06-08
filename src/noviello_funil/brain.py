@@ -42,19 +42,32 @@ def load_skill(name: str) -> str:
 def parse_decisao(raw: str) -> Decisao:
     """Parse Claude's text response into a Decisao.
 
-    Strips markdown code fences if Claude added them despite instructions.
-    Raises DecisaoInvalida on any parse problem.
+    Robust to the most common Claude misbehaviors:
+      1. Wrapping the whole response in a ```json``` / ``` fence.
+      2. Adding prose before/after a fenced or bare JSON object.
+
+    Strategy:
+      a. Try strict parse on the trimmed text.
+      b. If that fails, strip a leading/trailing fence and try again.
+      c. If still failing, find the first ``{`` and last ``}`` and try
+         that substring as JSON.
+
+    Raises DecisaoInvalida on any unrecoverable problem.
     """
     text = raw.strip()
-    # Strip ```json ... ``` or ``` ... ``` wrappers if present
-    fenced = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
-    if fenced:
-        text = fenced.group(1).strip()
 
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise DecisaoInvalida(f"not valid json: {exc}") from exc
+    data: Any = None
+    last_err: Exception | None = None
+
+    for candidate in _json_candidates(text):
+        try:
+            data = json.loads(candidate)
+            break
+        except json.JSONDecodeError as exc:
+            last_err = exc
+
+    if data is None:
+        raise DecisaoInvalida(f"not valid json: {last_err}") from last_err
 
     if not isinstance(data, dict):
         raise DecisaoInvalida(f"expected json object, got {type(data).__name__}")
@@ -73,6 +86,28 @@ def parse_decisao(raw: str) -> Decisao:
         resumo_caso=data.get("resumo_caso"),
         motivo_handoff=data.get("motivo_handoff"),
     )
+
+
+def _json_candidates(text: str):
+    """Yield successive candidate strings that might parse as JSON.
+
+    Each candidate is tried in order; the first to parse wins.
+    """
+    # 1. The raw text as-is (the happy path: pure JSON, no prose)
+    yield text
+
+    # 2. Strip a wrapping ```json``` or ``` fence anywhere in the text
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+    if fenced:
+        yield fenced.group(1).strip()
+
+    # 3. Extract from the first ``{`` to the last ``}`` (handles JSON
+    #    surrounded by prose without code fences). Greedy on purpose so
+    #    nested braces are preserved.
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace > first_brace:
+        yield text[first_brace : last_brace + 1]
 
 
 def _build_system(skill_content: str) -> list[dict[str, Any]]:
@@ -132,7 +167,15 @@ async def triagem(
             {"role": "user", "content": retry_text},
         ],
     )
-    return parse_decisao(second.content[0].text)
+    second_raw = second.content[0].text
+    try:
+        return parse_decisao(second_raw)
+    except DecisaoInvalida as exc:
+        # Enrich the error with both raw responses so prod debugging
+        # doesn't require log archaeology.
+        raise DecisaoInvalida(
+            f"after retry: {exc}; first_raw={raw!r}; second_raw={second_raw!r}"
+        ) from exc
 
 
 async def gerar_followup_msg(
