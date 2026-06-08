@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     # Mario's WhatsApp number for notifications (E.164, digits only)
     notificacao_telefone: str
 
+    # Mario's conversation ID inside Jurichat (the conversation the bot
+    # sends Mario's notifications to).
+    mario_conversation_id: str
+
     # SQLite
     database_path: str = "./data/noviello.db"
 

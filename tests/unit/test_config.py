@@ -11,6 +11,7 @@ def test_settings_loads_from_env(monkeypatch):
     monkeypatch.setenv("JURICHAT_API_KEY", "jk-test")
     monkeypatch.setenv("JURICHAT_WEBHOOK_SECRET", "whsec-test")
     monkeypatch.setenv("NOTIFICACAO_TELEFONE", "5511999999999")
+    monkeypatch.setenv("MARIO_CONVERSATION_ID", "C-MARIO")
 
     s = Settings()
 
@@ -32,6 +33,7 @@ def test_settings_missing_required_fails(monkeypatch):
         "JURICHAT_API_KEY",
         "JURICHAT_WEBHOOK_SECRET",
         "NOTIFICACAO_TELEFONE",
+        "MARIO_CONVERSATION_ID",
     ]:
         monkeypatch.delenv(var, raising=False)
 
