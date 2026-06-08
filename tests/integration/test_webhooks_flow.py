@@ -64,6 +64,52 @@ def test_webhook_returns_401_on_invalid_signature(client):
     assert r.status_code == 401
 
 
+def test_webhook_accepts_sha256_prefixed_signature(client):
+    """Jurichat sends X-JuriChat-Signature as 'sha256=<hex>' (real format
+    captured 2026-06-07). The verifier must strip the prefix."""
+    body = b'{"event":"webhook.test"}'
+    sig = "sha256=" + _sign("whsec-test", body)
+    r = client.post(
+        "/webhooks/jurichat",
+        content=body,
+        headers={"X-JuriChat-Signature": sig, "Content-Type": "application/json"},
+    )
+    assert r.status_code == 200
+
+
+def test_webhook_uses_jurichat_delivery_header_for_idempotency(client):
+    """When X-JuriChat-Delivery is present, it should be used as event_id
+    (instead of payload['id'] or hash). Sending the same delivery id twice
+    must dedupe even if the body differs slightly."""
+    body1 = b'{"event":"webhook.test","timestamp":"2026-06-07T01:00:00Z"}'
+    body2 = b'{"event":"webhook.test","timestamp":"2026-06-07T01:00:01Z"}'
+    sig1 = "sha256=" + _sign("whsec-test", body1)
+    sig2 = "sha256=" + _sign("whsec-test", body2)
+    delivery = "cmq4kdfcs00ugo10idkzycrn2"
+
+    r1 = client.post(
+        "/webhooks/jurichat",
+        content=body1,
+        headers={
+            "X-JuriChat-Signature": sig1,
+            "X-JuriChat-Delivery": delivery,
+            "Content-Type": "application/json",
+        },
+    )
+    r2 = client.post(
+        "/webhooks/jurichat",
+        content=body2,  # different body, same delivery id
+        headers={
+            "X-JuriChat-Signature": sig2,
+            "X-JuriChat-Delivery": delivery,
+            "Content-Type": "application/json",
+        },
+    )
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    assert r2.json().get("duplicated") is True
+
+
 def test_webhook_returns_200_on_valid_signature(client):
     body = b'{"event":"chat.conversation.updated","id":"e-1"}'
     sig = _sign("whsec-test", body)

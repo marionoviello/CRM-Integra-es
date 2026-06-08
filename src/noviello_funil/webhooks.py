@@ -41,18 +41,41 @@ logger = logging.getLogger(__name__)
 def _verify_signature(secret: str, body: bytes, signature: str | None) -> bool:
     """Constant-time HMAC-SHA256 verification.
 
-    Assumes Jurichat sends the raw hex digest (no ``sha256=`` prefix).
-    If they ever switch to GitHub-style ``sha256=<hex>``, strip the
-    prefix here before comparing.
+    Jurichat sends the signature as ``sha256=<hex>`` (GitHub-style),
+    confirmed by inspecting a real webhook test event on 2026-06-07.
+    We strip the prefix before comparing.
+
+    We accept raw hex too (no prefix) as a forward-compat safety net in
+    case Jurichat ever changes the format back.
     """
     if not signature:
         return False
+    if signature.startswith("sha256="):
+        signature = signature[len("sha256=") :]
     expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, signature)
 
 
-def _extract_event_id(payload: dict[str, Any]) -> str:
-    """Best-effort event id. Falls back to a payload hash."""
+def _extract_event_id(
+    payload: dict[str, Any], headers: dict[str, str] | None = None,
+) -> str:
+    """Best-effort event id for idempotency.
+
+    Order of preference (most reliable first):
+      1. ``X-JuriChat-Delivery`` header — Jurichat's own unique ID per
+         delivery attempt. Confirmed real on 2026-06-07 inspection.
+      2. ``payload["id"]`` or ``payload["event_id"]`` — fallback.
+      3. Hash of the body — last resort.
+    """
+    if headers:
+        # Headers in FastAPI are case-insensitive on access via
+        # request.headers, but when a dict is passed in for testing
+        # we accept both cases.
+        delivery = headers.get("x-jurichat-delivery") or headers.get(
+            "X-JuriChat-Delivery"
+        )
+        if delivery:
+            return delivery
     return (
         payload.get("id")
         or payload.get("event_id")
@@ -86,7 +109,7 @@ def register_webhooks(
             raise HTTPException(status_code=400, detail=f"bad json: {exc}") from exc
 
         conn = get_db()
-        event_id = _extract_event_id(payload)
+        event_id = _extract_event_id(payload, headers=dict(request.headers))
         if is_webhook_processed(conn, "jurichat", event_id):
             logger.info("webhook duplicate event_id=%s", event_id)
             return Response(
