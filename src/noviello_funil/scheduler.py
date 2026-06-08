@@ -261,14 +261,19 @@ async def _handle_confirmar_horario(
     # Criar o evento (a API do Google rejeita conflito hard se houver,
     # mas como freeBusy é eventualmente consistente, não validamos
     # antes — confiamos no create. Se der erro 409/4xx, log e degradar.)
+    meet_link = ""
     try:
-        await calendar.client.create_event(
+        event = await calendar.client.create_event(
             start=start,
             duration_min=calendar.slot_min,
             lead_nome=lead["contato_nome"] or "Lead",
             lead_telefone=lead["contato_telefone"] or "?",
             resumo_caso=decisao.resumo_caso or "(sem resumo do bot)",
+            lead_email=decisao.lead_email,
         )
+        # hangoutLink só vem se conferenceData foi pedido (i.e., havia
+        # lead_email). Vazio é OK — o template substitui sem quebrar.
+        meet_link = event.get("hangoutLink", "") or ""
     except Exception as exc:
         logger.exception(
             "create_event failed for lead=%s: %s", lead_id, exc,
@@ -282,16 +287,24 @@ async def _handle_confirmar_horario(
         )
         return
 
-    # Substitui placeholder no texto de confirmação.
+    # Substitui placeholders no texto de confirmação.
     horario_humano = Slot(
         start=start, duration_min=calendar.slot_min,
     ).format_human()
-    if "{{HORARIO_CONFIRMADO}}" in decisao.mensagem:
-        mensagem = decisao.mensagem.replace(
-            "{{HORARIO_CONFIRMADO}}", horario_humano,
-        )
+    mensagem = decisao.mensagem
+    if "{{HORARIO_CONFIRMADO}}" in mensagem:
+        mensagem = mensagem.replace("{{HORARIO_CONFIRMADO}}", horario_humano)
     else:
-        mensagem = f"{decisao.mensagem.rstrip()}\n\n(agendado pra {horario_humano})"
+        mensagem = f"{mensagem.rstrip()}\n\n(agendado pra {horario_humano})"
+    # {{MEET_LINK}}: se calendar não criou Meet (sem email), remove o
+    # placeholder pra não vazar literal no WhatsApp.
+    if "{{MEET_LINK}}" in mensagem:
+        if meet_link:
+            mensagem = mensagem.replace("{{MEET_LINK}}", meet_link)
+        else:
+            # Sem Meet — remove a frase do template ("{{MEET_LINK}}" + qualquer
+            # texto solto na mesma linha vira nada).
+            mensagem = mensagem.replace("{{MEET_LINK}}", "").rstrip()
 
     try:
         await jurichat.start_human_support(conv_id)
@@ -315,17 +328,24 @@ async def _handle_confirmar_horario(
     update_transcript_hash(conn, lead_id, new_hash)
 
     try:
+        notify_text = (
+            f"📅 *Agendado via bot*\n\n"
+            f"Lead: {lead['contato_nome']}\n"
+            f"Tel: {lead['contato_telefone']}\n"
+        )
+        if decisao.lead_email:
+            notify_text += f"Email: {decisao.lead_email}\n"
+        notify_text += (
+            f"Quando: {horario_humano}\n\n"
+            f"Resumo: {decisao.resumo_caso or '(sem resumo)'}\n\n"
+            f"Evento já criado no seu Google Calendar."
+        )
+        if meet_link:
+            notify_text += f"\nMeet: {meet_link}"
         await notify_mario(
             jurichat,
             mario_conversation_id=mario_conversation_id,
-            mensagem=(
-                f"📅 *Agendado via bot*\n\n"
-                f"Lead: {lead['contato_nome']}\n"
-                f"Tel: {lead['contato_telefone']}\n"
-                f"Quando: {horario_humano}\n\n"
-                f"Resumo: {decisao.resumo_caso or '(sem resumo)'}\n\n"
-                f"Evento já criado no seu Google Calendar."
-            ),
+            mensagem=notify_text,
         )
     except Exception as exc:
         logger.exception(

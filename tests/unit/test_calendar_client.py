@@ -246,7 +246,7 @@ async def test_find_slots_requires_30min_anticipation(respx_mock):
 # --- create_event ---------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_create_event_posts_full_body(respx_mock):
+async def test_create_event_sem_email_nao_inclui_attendees_nem_meet(respx_mock):
     respx_mock.post("https://oauth2.googleapis.com/token").mock(
         return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600}),
     )
@@ -275,3 +275,48 @@ async def test_create_event_posts_full_body(respx_mock):
     assert "wa.me/5511915469015" in body
     assert "Inventário" in body
     assert "[Atendimento] José Silva" in body
+    # Sem email → sem attendees, sem conferenceData
+    assert "attendees" not in body
+    assert "conferenceData" not in body
+    # Query string sem conferenceDataVersion
+    qs = route.calls.last.request.url.query.decode()
+    assert "conferenceDataVersion" not in qs
+    assert "sendUpdates" not in qs
+
+
+@pytest.mark.asyncio
+async def test_create_event_com_email_adiciona_attendee_e_pede_meet(respx_mock):
+    respx_mock.post("https://oauth2.googleapis.com/token").mock(
+        return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600}),
+    )
+    route = respx_mock.post(
+        "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+    ).mock(return_value=httpx.Response(200, json={
+        "id": "evt-2",
+        "status": "confirmed",
+        "hangoutLink": "https://meet.google.com/abc-defg-hij",
+    }))
+
+    client = GoogleCalendarClient(client_id="c", client_secret="s", refresh_token="r")
+    try:
+        result = await client.create_event(
+            start=_dt(2026, 6, 9, 14, 30),
+            duration_min=30,
+            lead_nome="José Silva",
+            lead_telefone="5511915469015",
+            resumo_caso="Inventário",
+            lead_email="jose@exemplo.com",
+        )
+    finally:
+        await client.aclose()
+
+    body = route.calls.last.request.read().decode()
+    assert "attendees" in body
+    assert "jose@exemplo.com" in body
+    assert "conferenceData" in body
+    assert "hangoutsMeet" in body
+    qs = route.calls.last.request.url.query.decode()
+    assert "conferenceDataVersion=1" in qs
+    assert "sendUpdates=all" in qs
+    # Response devolve o Meet link
+    assert result["hangoutLink"] == "https://meet.google.com/abc-defg-hij"

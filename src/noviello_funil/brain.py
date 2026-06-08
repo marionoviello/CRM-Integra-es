@@ -37,6 +37,10 @@ class Decisao:
     # offset (ex: ``2026-06-09T14:30:00-03:00``). Claude parseia da
     # transcrição (ele se lembra do que ofereceu + do que lead escolheu).
     horario_escolhido_iso: str | None = None
+    # Email do lead, presente em ``confirmar_horario`` quando Claude
+    # extraiu da transcrição. Vai como attendee no evento — Google manda
+    # convite ICS + Meet link automático.
+    lead_email: str | None = None
 
 
 class DecisaoInvalida(Exception):
@@ -96,6 +100,7 @@ def parse_decisao(raw: str) -> Decisao:
         resumo_caso=data.get("resumo_caso"),
         motivo_handoff=data.get("motivo_handoff"),
         horario_escolhido_iso=data.get("horario_escolhido_iso"),
+        lead_email=data.get("lead_email"),
     )
 
 

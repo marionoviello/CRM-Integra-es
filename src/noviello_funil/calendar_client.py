@@ -280,12 +280,17 @@ class GoogleCalendarClient:
         lead_nome: str,
         lead_telefone: str,
         resumo_caso: str,
+        lead_email: str | None = None,
     ) -> dict[str, Any]:
         """Cria evento no calendar do Mario.
 
-        Lead NÃO é convidado (sem email). O description carrega
-        nome+telefone+WhatsApp link pra Mario ligar/abrir conversa
-        no horário marcado.
+        Se ``lead_email`` for fornecido:
+          - Adiciona lead como attendee (Google manda convite ICS por email)
+          - Cria Google Meet automático (``conferenceData.createRequest``)
+          - Response traz o link em ``data.hangoutLink``
+
+        Sem email, evento fica privado no calendar do Mario com
+        nome+telefone no description.
         """
         start_tz = start.astimezone(self._tz)
         end_tz = start_tz + datetime.timedelta(minutes=duration_min)
@@ -294,7 +299,7 @@ class GoogleCalendarClient:
         digits = "".join(c for c in lead_telefone if c.isdigit())
         wa_link = f"https://wa.me/{digits}" if digits else lead_telefone
 
-        body = {
+        body: dict[str, Any] = {
             "summary": f"[Atendimento] {lead_nome}",
             "description": (
                 f"Lead qualificado pelo bot.\n\n"
@@ -320,9 +325,28 @@ class GoogleCalendarClient:
             },
         }
 
+        params: dict[str, str] = {}
+        if lead_email:
+            body["attendees"] = [{"email": lead_email}]
+            # requestId precisa ser único por evento (Google deduplica
+            # tentativas). Usamos start ISO + email — mesmo evento criado
+            # 2x não duplica o Meet (idempotente).
+            req_id = f"noviello-{start_tz.strftime('%Y%m%dT%H%M%S')}-{abs(hash(lead_email)) % 10**8}"
+            body["conferenceData"] = {
+                "createRequest": {
+                    "requestId": req_id,
+                    "conferenceSolutionKey": {"type": "hangoutsMeet"},
+                },
+            }
+            # conferenceDataVersion=1 é OBRIGATÓRIO pra Google criar Meet.
+            params["conferenceDataVersion"] = "1"
+            # sendUpdates=all garante que Google manda convite ICS pro lead.
+            params["sendUpdates"] = "all"
+
         resp = await self._authed_request(
             "POST",
             f"{_CAL_BASE}/calendars/{self._calendar_id}/events",
+            params=params,
             json=body,
         )
         if resp.status_code >= 400:

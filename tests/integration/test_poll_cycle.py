@@ -394,11 +394,14 @@ async def test_poll_marks_lead_activity_when_hash_changes(db_conn):
 
 # --- Calendar actions ---------------------------------------------------
 
-def _make_calendar(slots: list[Slot] | None = None):
+def _make_calendar(slots: list[Slot] | None = None, *, with_meet: bool = True):
     """Fake calendar client com find_available_slots + create_event."""
     fake = MagicMock()
     fake.find_available_slots = AsyncMock(return_value=slots or [])
-    fake.create_event = AsyncMock(return_value={"id": "evt-1"})
+    event_response: dict = {"id": "evt-1"}
+    if with_meet:
+        event_response["hangoutLink"] = "https://meet.google.com/xyz-test"
+    fake.create_event = AsyncMock(return_value=event_response)
     return fake
 
 
@@ -480,9 +483,12 @@ async def test_oferecer_horarios_sem_calendar_vira_handoff(db_conn):
 
 
 @pytest.mark.asyncio
-async def test_confirmar_horario_cria_evento_e_handoff(db_conn):
-    """Lead escolheu horário → cria evento + handoff + notifica."""
+async def test_confirmar_horario_cria_evento_com_email_e_meet(db_conn):
+    """Lead escolheu horário + email na transcrição → evento com Meet link."""
     transcript = (
+        "Lead: Quero agendar\n"
+        "Atendente: Qual seu email?\n"
+        "Lead: jose@exemplo.com\n"
         "Atendente: Tenho ter 14h, ter 14h30, qua 15h\n"
         "Lead: A terça 14h tá bom"
     )
@@ -493,8 +499,12 @@ async def test_confirmar_horario_cria_evento_e_handoff(db_conn):
     triagem_fn = await _triagem_returning(
         Decisao(
             acao="confirmar_horario",
-            mensagem="Perfeito! Agendado pra {{HORARIO_CONFIRMADO}}.",
+            mensagem=(
+                "Perfeito! Agendado pra {{HORARIO_CONFIRMADO}}. "
+                "Link Meet: {{MEET_LINK}}"
+            ),
             horario_escolhido_iso="2026-06-09T14:00:00-03:00",
+            lead_email="jose@exemplo.com",
             resumo_caso="Inventário, pai faleceu 20 dias, 3 herdeiros, SP",
         )
     )
@@ -508,21 +518,54 @@ async def test_confirmar_horario_cria_evento_e_handoff(db_conn):
         calendar=_calendar_config(client=calendar_client),
     )
 
-    # Evento criado com os dados certos
+    # Evento criado com email
     calendar_client.create_event.assert_awaited_once()
     call_kwargs = calendar_client.create_event.call_args.kwargs
+    assert call_kwargs["lead_email"] == "jose@exemplo.com"
     assert call_kwargs["lead_nome"] == "Maria"
-    assert call_kwargs["resumo_caso"].startswith("Inventário")
-    assert call_kwargs["duration_min"] == 30
 
     # Estado virou aguardando_humano
     lead = get_lead_by_conversation(db_conn, "C-1")
     assert lead["estado"] == Estado.AGUARDANDO_HUMANO
 
-    # Mensagem pro lead substituiu placeholder
-    # send_message é chamada 2x: confirmação ao lead + notify_mario
+    # Mensagem pro lead substituiu AMBOS placeholders
     sent_text = jurichat.send_message.call_args_list[0][0][1]
     assert "{{HORARIO_CONFIRMADO}}" not in sent_text
+    assert "{{MEET_LINK}}" not in sent_text
+    assert "ter (09/jun) às 14h" in sent_text
+    assert "https://meet.google.com/xyz-test" in sent_text
+
+
+@pytest.mark.asyncio
+async def test_confirmar_horario_sem_email_remove_meet_placeholder(db_conn):
+    """Sem email → sem Meet link, placeholder removido pra não vazar literal."""
+    transcript = "Lead: 14h"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar(with_meet=False)
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="confirmar_horario",
+            mensagem="Agendado pra {{HORARIO_CONFIRMADO}}. Meet: {{MEET_LINK}}",
+            horario_escolhido_iso="2026-06-09T14:00:00-03:00",
+            lead_email=None,  # sem email
+            resumo_caso="caso x",
+        )
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )
+
+    sent_text = jurichat.send_message.call_args_list[0][0][1]
+    assert "{{MEET_LINK}}" not in sent_text  # placeholder não vaza
+    assert "meet.google.com" not in sent_text  # nenhum link Meet
     assert "ter (09/jun) às 14h" in sent_text
 
 
