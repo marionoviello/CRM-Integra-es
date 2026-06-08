@@ -4,12 +4,15 @@ Description=Run Noviello scheduler (poll active conversations + follow-up cycle)
 [Timer]
 # Poll-based architecture (confirmed 2026-06-07 — Jurichat has no
 # per-message webhook event). One tick runs both:
-#   run_poll_cycle      → active em_conversa leads (60s cadence)
+#   run_poll_cycle      → active em_conversa leads
 #   run_followup_cycle  → idle leads needing FU1/FU2/closure
-# The 1-minute interval is the upper bound on lead response latency.
-OnBootSec=30s
-OnUnitActiveSec=1min
-AccuracySec=15s
+#
+# 30s cadence: garante latência total < 1 min mesmo no pior caso
+# (30s espera + ~15s processing = ~45s). Custos cresceram 2x vs 1min
+# mas em volume MVP (5-30 leads/dia) é desprezível.
+OnBootSec=10s
+OnUnitActiveSec=30s
+AccuracySec=5s
 Persistent=true
 Unit=noviello-followup.service
 
