@@ -126,6 +126,50 @@ class JurichatClient:
 
         return await with_retry(op, attempts=3, base_delay=base_delay)
 
+    async def list_active_conversations(
+        self,
+        *,
+        page: int = 1,
+        limit: int = 100,
+        base_delay: float = 1.0,
+    ) -> list[dict[str, Any]]:
+        """GET /conversation — lista conversas da inbox.
+
+        Confirmado contra a doc oficial em 2026-06-08. Suporta paginação
+        via ``page`` e ``limit``. Filtra defensivamente conversas arquivadas
+        e de grupo (lead individual é nosso caso de uso).
+
+        Response shape (per item):
+            {
+                "id": "<conversation_id>",
+                "isArchived": false,
+                "isGroup": false,
+                "person": {
+                    "id": "<person_id>",
+                    "name": "<nome>",
+                    "phoneNumber": "<telefone>",
+                    "imageUrl": "..."
+                },
+                "group": null,
+                ...
+            }
+
+        Used by the scheduler to sync Jurichat → our DB. Since Jurichat
+        has NO per-message webhook event, we poll the conversation list
+        periodically to discover new leads.
+        """
+
+        async def op() -> dict[str, Any]:
+            resp = await self._client.get(
+                f"{self._base_url}/conversation",
+                params={"page": page, "limit": limit},
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        data = await with_retry(op, attempts=3, base_delay=base_delay)
+        return data.get("data", [])
+
     async def get_lead_tags(
         self, lead_id: str, *, base_delay: float = 1.0,
     ) -> list[str]:

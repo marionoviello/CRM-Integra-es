@@ -32,6 +32,8 @@ from noviello_funil.state import (
     CLEAR_PROXIMA_ACAO,
     Estado,
     clear_next_action,
+    create_lead_if_absent,
+    get_lead_by_conversation,
     list_leads_para_polling,
     list_leads_vencidos,
     mark_lead_activity_now,
@@ -105,6 +107,72 @@ def _last_lead_message(transcript: str) -> str:
         if stripped.startswith("Lead:"):
             return stripped[len("Lead:") :].strip()
     return ""
+
+
+async def sync_jurichat_conversations(
+    *,
+    get_db: Callable[[], Any],
+    jurichat: JurichatClient,
+) -> int:
+    """Sincroniza conversas Jurichat → leads no nosso DB.
+
+    Por que existe: Jurichat NÃO emite webhook por mensagem nova
+    (confirmado 2026-06-07). ``chat.conversation.updated`` só dispara
+    em mudança de status (atribuição a bot, encerramento, etc.).
+
+    Então pra descobrir conversas novas, listamos via ``GET /conversation``
+    a cada tick e criamos leads no DB pra conversas desconhecidas. O
+    poll cycle existente então puxa o transcript de cada uma e roda
+    Claude.
+
+    Retorna o número de leads NOVOS registrados (apenas pra log).
+    """
+    conn = get_db()
+    try:
+        conversations = await jurichat.list_active_conversations()
+    except Exception as exc:
+        logger.exception(
+            "sync_jurichat_conversations: list_active_conversations falhou: %s",
+            exc,
+        )
+        return 0
+
+    new_count = 0
+    for conv in conversations:
+        # Pula arquivadas e grupos (lead individual é nosso caso).
+        if conv.get("isArchived"):
+            continue
+        if conv.get("isGroup"):
+            continue
+
+        conv_id = conv.get("id")
+        person = conv.get("person") or {}
+        person_id = person.get("id")
+        if not conv_id or not person_id:
+            continue
+
+        existing = get_lead_by_conversation(conn, conv_id)
+        if existing is not None:
+            continue  # já conhecemos, poll cycle cuida
+
+        # Lead novo — registra e marca pra poll imediato no mesmo tick.
+        create_lead_if_absent(
+            conn,
+            jurichat_lead_id=person_id,
+            jurichat_conversation_id=conv_id,
+            contato_telefone=person.get("phoneNumber", ""),
+            contato_nome=person.get("name"),
+        )
+        lead = get_lead_by_conversation(conn, conv_id)
+        if lead is not None:
+            schedule_next_action_seconds(conn, lead["id"], 0)
+            new_count += 1
+
+    if new_count > 0:
+        logger.info(
+            "sync_jurichat_conversations: %d novos leads registrados", new_count,
+        )
+    return new_count
 
 
 async def run_poll_cycle(
@@ -435,8 +503,15 @@ def main() -> int:
     )
 
     async def _full_cycle() -> None:
-        # Poll first so any state transitions land before the follow-up
-        # cycle re-reads the lead table.
+        # 1. Sync Jurichat conversations into our DB (registers new
+        #    leads). Required because Jurichat has no per-message
+        #    webhook event — we discover leads by polling.
+        await sync_jurichat_conversations(
+            get_db=lambda: conn,
+            jurichat=jurichat,
+        )
+        # 2. Poll cycle drives Claude on em_conversa leads (including
+        #    the ones we just synced — they were scheduled for now).
         await run_poll_cycle(
             get_db=lambda: conn,
             jurichat=jurichat,
@@ -444,6 +519,7 @@ def main() -> int:
             mario_conversation_id=settings.mario_conversation_id,
             max_turnos=settings.max_turnos_por_lead,
         )
+        # 3. Follow-up cycle nudges idle leads.
         await run_followup_cycle(
             get_db=lambda: conn,
             jurichat=jurichat,
