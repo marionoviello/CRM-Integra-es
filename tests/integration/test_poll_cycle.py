@@ -190,7 +190,15 @@ async def test_hash_changed_handoff_transitions_and_notifies(db_conn):
 
 
 @pytest.mark.asyncio
-async def test_last_line_atendente_assumes_mario_no_claude_call(db_conn):
+async def test_last_line_outbound_does_not_handoff_just_reschedules(db_conn):
+    """Defensive policy: última msg OUTBOUND (atendente) NÃO causa
+    AGUARDANDO_HUMANO porque não dá pra distinguir entre nossa própria
+    resposta vs humano real respondendo. Só atualiza hash e reschedule.
+
+    Trade-off documentado em scheduler.py: humano real que responde
+    pelo Jurichat web não pausa o bot automaticamente (precisa fazer
+    manualmente). Bug oposto (bot achar que era humano quando era ele
+    mesmo) é pior — trava a conversa."""
     transcript = "Lead: oi\nAtendente: eu assumo daqui (Mario)"
     _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
 
@@ -206,10 +214,15 @@ async def test_last_line_atendente_assumes_mario_no_claude_call(db_conn):
     )
 
     lead = get_lead_by_conversation(db_conn, "C-1")
-    assert lead["estado"] == Estado.AGUARDANDO_HUMANO
-    assert lead["proxima_acao_em"] is None
+    # Lead segue em em_conversa (não cai pra AGUARDANDO_HUMANO).
+    assert lead["estado"] == Estado.EM_CONVERSA
+    # Hash atualizado pra refletir o que processamos.
     assert lead["ultimo_transcript_hash"] == _sha(transcript)
+    # proxima_acao_em foi rescheduled (não None — vai pollar de novo).
+    assert lead["proxima_acao_em"] is not None
+    # Claude NÃO foi chamado (nada novo do lead pra responder).
     triagem_fn.assert_not_called()
+    # Nada foi enviado pra ninguém.
     jurichat.send_message.assert_not_awaited()
 
 

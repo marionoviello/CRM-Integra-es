@@ -299,14 +299,20 @@ async def run_poll_cycle(
         # follow-up cycle's "idle > 24h" carve-out keeps its hands off.
         mark_lead_activity_now(conn, lead_id)
 
-        # Signal 1: Mario assumed the conversation (last line is his).
+        # Signal 1: última mensagem é OUTBOUND (atendente) — pode ser
+        # nossa própria resposta OU humano real assumindo. Como não dá
+        # pra distinguir sem trackear messageIds individuais, adotamos a
+        # política DEFENSIVA: NÃO marca como AGUARDANDO_HUMANO. Só
+        # atualiza o hash e reschedule. Se o lead responder depois, o
+        # próximo tick processa.
+        #
+        # Trade-off conhecido: se humano real responder pelo Jurichat
+        # web, o bot pode continuar tentando responder no próximo turno
+        # do lead. Pra parar manualmente, mude o estado do lead no DB
+        # ou adicione tag de exclusão na conversa.
         if _last_line_from_atendente(transcript):
-            transicao(
-                conn, lead_id, Estado.AGUARDANDO_HUMANO,
-                motivo="mensagem_mario_detectada",
-                proxima_acao_horas=CLEAR_PROXIMA_ACAO,
-            )
             update_transcript_hash(conn, lead_id, new_hash)
+            schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
             continue
 
         # Signal 2: turn cap reached → hand off to Mario.
