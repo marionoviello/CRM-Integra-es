@@ -100,13 +100,23 @@ class JurichatClient:
         *,
         base_delay: float = 1.0,
     ) -> dict[str, Any]:
-        """POST /conversation/send-message (multipart/form-data)."""
+        """POST /conversation/send-message (application/json).
+
+        Jurichat retornou 415 Unsupported Media Type quando enviamos como
+        application/x-www-form-urlencoded (httpx ``data=``). Aceita JSON.
+        Confirmado em 2026-06-08.
+        """
 
         async def op() -> dict[str, Any]:
             resp = await self._client.post(
                 f"{self._base_url}/conversation/send-message",
-                data={"conversation_id": conversation_id, "text": text},
+                json={"conversation_id": conversation_id, "text": text},
             )
+            if resp.status_code >= 400:
+                logger.error(
+                    "send_message status=%d body=%r",
+                    resp.status_code, resp.text[:500],
+                )
             resp.raise_for_status()
             return resp.json()
 
