@@ -6,6 +6,7 @@ transient-failure resilience.
 
 import asyncio
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
@@ -21,6 +22,41 @@ class OutboundError(Exception):
 
 
 _RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+
+# WhatsApp NÃO renderiza HTML — quebras de linha precisam ser ``\n``
+# literais, listas precisam ser ``• `` (bullet Unicode), etc. Jurichat
+# web renderiza ``<br />`` mas no celular sai LITERAL. Confirmado em
+# campo 2026-06-08. Saneamos no send_message como defesa em profundidade
+# (a skill também instrui Claude a não gerar HTML, mas garantimos aqui).
+_BR_TAG_RE = re.compile(r"<\s*br\s*/?\s*>", re.IGNORECASE)
+_P_OPEN_RE = re.compile(r"<\s*p\s*>", re.IGNORECASE)
+_P_CLOSE_RE = re.compile(r"<\s*/\s*p\s*>", re.IGNORECASE)
+_LI_OPEN_RE = re.compile(r"<\s*li\s*>", re.IGNORECASE)
+_LI_CLOSE_RE = re.compile(r"<\s*/\s*li\s*>", re.IGNORECASE)
+# Catch-all pra qualquer outra tag remanescente.
+_ANY_TAG_RE = re.compile(r"<[^>]+>")
+# Colapsar 3+ quebras em só 2 (parágrafo).
+_MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
+
+
+def _sanitize_for_whatsapp(text: str) -> str:
+    """Remove HTML que Claude eventualmente gera e que WhatsApp não renderiza.
+
+    Bug reportado 2026-06-08: Claude respondeu com ``<br />`` literal,
+    aparecendo cru pro lead no WhatsApp. Esse helper é hard-guarantee:
+    independente do que o modelo gerar, o que sai pro lead é texto puro
+    com quebras de linha reais.
+    """
+    if not text:
+        return text
+    out = _BR_TAG_RE.sub("\n", text)
+    out = _P_OPEN_RE.sub("", out)
+    out = _P_CLOSE_RE.sub("\n\n", out)
+    out = _LI_OPEN_RE.sub("• ", out)
+    out = _LI_CLOSE_RE.sub("\n", out)
+    out = _ANY_TAG_RE.sub("", out)
+    out = _MULTI_NEWLINE_RE.sub("\n\n", out)
+    return out.strip()
 
 
 async def with_retry(
@@ -147,14 +183,18 @@ class JurichatClient:
 
         Pré-requisito: conversa em modo human-support. Veja
         ``start_human_support``.
+
+        ``text`` é saneado via ``_sanitize_for_whatsapp`` — remove HTML
+        que eventualmente vaza do Claude (ver helper).
         """
+        clean_text = _sanitize_for_whatsapp(text)
 
         async def op() -> dict[str, Any]:
             resp = await self._client.post(
                 f"{self._base_url}/conversation/send-message",
                 files={
                     "conversationId": (None, conversation_id),
-                    "message": (None, text),
+                    "message": (None, clean_text),
                     "type": (None, "text"),
                 },
             )

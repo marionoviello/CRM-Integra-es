@@ -6,10 +6,50 @@ import pytest
 from noviello_funil.outbound import (
     JurichatClient,
     OutboundError,
+    _sanitize_for_whatsapp,
     format_notification,
     notify_mario,
     with_retry,
 )
+
+
+# --- Sanitização HTML → WhatsApp -----------------------------------------
+
+def test_sanitize_converts_br_to_newline():
+    """Bug reportado 2026-06-08: Claude gerou ``<br />`` que aparece
+    literal no WhatsApp. Sanitização deve converter pra ``\\n``."""
+    src = "Linha 1<br />Linha 2<br/>Linha 3<br>Linha 4"
+    assert _sanitize_for_whatsapp(src) == "Linha 1\nLinha 2\nLinha 3\nLinha 4"
+
+
+def test_sanitize_collapses_consecutive_br_into_paragraph():
+    src = "Parágrafo 1<br /><br />Parágrafo 2"
+    out = _sanitize_for_whatsapp(src)
+    assert out == "Parágrafo 1\n\nParágrafo 2"
+
+
+def test_sanitize_converts_li_to_bullets():
+    src = "<ul><li>Um<li>Dois<li>Três</ul>"
+    out = _sanitize_for_whatsapp(src)
+    assert "• Um" in out
+    assert "• Dois" in out
+    assert "• Três" in out
+    assert "<" not in out and ">" not in out
+
+
+def test_sanitize_strips_unknown_tags():
+    src = "Texto <b>negrito</b> e <span style='x'>colorido</span>"
+    out = _sanitize_for_whatsapp(src)
+    assert out == "Texto negrito e colorido"
+
+
+def test_sanitize_passes_clean_text_unchanged():
+    src = "Olá Maria!\n\nQuantos imóveis estão envolvidos?"
+    assert _sanitize_for_whatsapp(src) == src
+
+
+def test_sanitize_handles_empty():
+    assert _sanitize_for_whatsapp("") == ""
 
 
 @pytest.mark.asyncio
