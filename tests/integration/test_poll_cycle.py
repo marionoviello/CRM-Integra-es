@@ -537,19 +537,20 @@ async def test_confirmar_horario_cria_evento_com_email_e_meet(db_conn):
 
 
 @pytest.mark.asyncio
-async def test_confirmar_horario_sem_email_remove_meet_placeholder(db_conn):
-    """Sem email → sem Meet link, placeholder removido pra não vazar literal."""
-    transcript = "Lead: 14h"
+async def test_confirmar_horario_sem_email_guardrail_pede_email(db_conn):
+    """Bug real (2026-06-08): Claude pulou turno 1 e foi direto pra
+    confirmar SEM email. Guardrail bloqueia e pede email manualmente."""
+    transcript = "Lead: 14h"  # sem email na transcrição
     _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
 
     jurichat = _make_jurichat(transcript)
-    calendar_client = _make_calendar(with_meet=False)
+    calendar_client = _make_calendar()
     triagem_fn = await _triagem_returning(
         Decisao(
             acao="confirmar_horario",
-            mensagem="Agendado pra {{HORARIO_CONFIRMADO}}. Meet: {{MEET_LINK}}",
+            mensagem="Agendado. O Mario vai te ligar.",  # texto problemático
             horario_escolhido_iso="2026-06-09T14:00:00-03:00",
-            lead_email=None,  # sem email
+            lead_email=None,  # ← guardrail trigger
             resumo_caso="caso x",
         )
     )
@@ -563,10 +564,19 @@ async def test_confirmar_horario_sem_email_remove_meet_placeholder(db_conn):
         calendar=_calendar_config(client=calendar_client),
     )
 
+    # Evento NÃO criado (guardrail bloqueou)
+    calendar_client.create_event.assert_not_awaited()
+    # Lead continua em_conversa (não foi pra aguardando_humano)
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA
+    # Bot pediu email manualmente
     sent_text = jurichat.send_message.call_args_list[0][0][1]
-    assert "{{MEET_LINK}}" not in sent_text  # placeholder não vaza
-    assert "meet.google.com" not in sent_text  # nenhum link Meet
-    assert "ter (09/jun) às 14h" in sent_text
+    assert "email" in sent_text.lower()
+    assert "videochamada" in sent_text.lower() or "meet" in sent_text.lower()
+    # NÃO mandou texto do Claude com "vai te ligar"
+    assert "vai te ligar" not in sent_text.lower()
+
+
 
 
 @pytest.mark.asyncio

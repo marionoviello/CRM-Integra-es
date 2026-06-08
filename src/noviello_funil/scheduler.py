@@ -248,6 +248,30 @@ async def _handle_confirmar_horario(
         schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
         return
 
+    # Guardrail: skill exige email pra criar Meet. Se Claude esqueceu de
+    # pedir/incluir, força pedir agora (mensagem direta pro lead) e
+    # bloqueia create_event. Próximo tick processa a resposta do lead.
+    if not decisao.lead_email or "@" not in decisao.lead_email:
+        logger.warning(
+            "confirmar_horario sem lead_email válido (lead=%s value=%r) — "
+            "forçando pedido de email", lead_id, decisao.lead_email,
+        )
+        msg = (
+            "Antes de confirmar, qual seu melhor email? Vou te enviar o "
+            "convite com o link da videochamada (Google Meet)."
+        )
+        try:
+            await jurichat.start_human_support(conv_id)
+            await jurichat.send_message(conv_id, msg)
+        except Exception as exc:
+            logger.exception(
+                "send_message(pedir_email_guardrail) failed lead=%s: %s",
+                lead_id, exc,
+            )
+        update_transcript_hash(conn, lead_id, new_hash)
+        schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
+        return
+
     try:
         start = datetime.datetime.fromisoformat(iso)
     except ValueError as exc:
