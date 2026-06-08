@@ -288,6 +288,29 @@ def register_error(
     )
 
 
+def get_transcript_hash(
+    conn: sqlite3.Connection, lead_id: int,
+) -> str | None:
+    """Return the hash of the last transcript the scheduler processed,
+    or None if no transcript has been recorded yet."""
+    row = conn.execute(
+        "SELECT ultimo_transcript_hash FROM leads WHERE id = ?", (lead_id,)
+    ).fetchone()
+    return row["ultimo_transcript_hash"] if row else None
+
+
+def update_transcript_hash(
+    conn: sqlite3.Connection, lead_id: int, transcript_hash: str,
+) -> None:
+    """Record the hash of the transcript we just processed. Used by the
+    polling scheduler to detect new messages on the next tick."""
+    conn.execute(
+        "UPDATE leads SET ultimo_transcript_hash = ?, atualizado_em = datetime('now') "
+        "WHERE id = ?",
+        (transcript_hash, lead_id),
+    )
+
+
 def list_leads_vencidos(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Leads whose proxima_acao_em has passed AND are in a non-terminal state."""
     active_states = (

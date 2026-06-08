@@ -1,14 +1,19 @@
-"""Integration tests for the webhook receiver."""
+"""Integration tests for the webhook receiver.
 
+After the polling refactor (R01), the webhook processor is just a thin
+"register-and-wake": it creates/updates the lead row and bumps the
+scheduler's next-action timestamp. All Claude logic lives in
+``scheduler.run_poll_cycle`` (tested separately).
+"""
+
+import datetime
 import hashlib
 import hmac
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from noviello_funil.brain import Decisao
 from noviello_funil.db import connect, run_migrations
 from noviello_funil.state import (
     Estado,
@@ -37,7 +42,7 @@ def app():
         fastapi_app,
         get_db=lambda: conn,
         webhook_secret="whsec-test",
-        process_lead_message=lambda payload: None,  # no-op in this test
+        process_lead_message=lambda payload: None,  # no-op for HMAC/dedupe tests
     )
     return fastapi_app
 
@@ -49,6 +54,9 @@ def client(app):
 
 def _sign(secret: str, body: bytes) -> str:
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+# --- HMAC + idempotency tests (transport layer) ----------------------------
 
 
 def test_webhook_returns_401_on_invalid_signature(client):
@@ -98,7 +106,7 @@ def test_webhook_uses_jurichat_delivery_header_for_idempotency(client):
     )
     r2 = client.post(
         "/webhooks/jurichat",
-        content=body2,  # different body, same delivery id
+        content=body2,
         headers={
             "X-JuriChat-Signature": sig2,
             "X-JuriChat-Delivery": delivery,
@@ -136,9 +144,6 @@ def test_webhook_duplicate_event_returns_200_idempotently(client):
 
 def test_webhook_responds_fast_with_background_processing():
     """The handler must respond before the background task runs."""
-    from noviello_funil.db import connect, run_migrations
-    from noviello_funil.webhooks import register_webhooks
-
     called = {"n": 0}
 
     def spy_processor(payload):
@@ -168,177 +173,124 @@ def test_webhook_responds_fast_with_background_processing():
     assert called["n"] == 1
 
 
-# --- Processor (Cenário A) tests -------------------------------------------
+# --- Register-and-wake processor tests -------------------------------------
 
 
-def _payload(conversation_id="C-1", lead_id="L-1", from_lead=True, text="oi"):
-    """Build a webhook payload matching what Jurichat sends.
-
-    Schema is provisional — adjust when spec §15.6 is validated against
-    a real webhook capture. Currently assumes:
-      - 'conversation_id' identifies the conversation
-      - 'lead_id' identifies the CRM lead
-      - 'from_me' is True when the atendente (Mario) sent the message
+def _payload(
+    *,
+    conversation_id="cmq4ljg3t872iqn07n969t7df",
+    person_id="cmntckrc40866qt0i9ih9al1q",
+    person_name="Mario eu",
+    person_phone="5511992046888",
+    status="ROBOT_INTERACTIVE",
+    previous_status="INACTIVE",
+    event="chat.conversation.updated",
+):
+    """Build a Jurichat webhook payload matching the real shape captured
+    from a test event on 2026-06-07.
     """
     return {
-        "event": "chat.conversation.updated",
-        "id": f"evt-{lead_id}-{text[:3]}",
-        "conversation_id": conversation_id,
-        "lead_id": lead_id,
-        "contact": {"phone": "5511999999999", "name": "Maria"},
-        "message": {"text": text, "from_me": not from_lead},
+        "event": event,
+        "data": {
+            "status": status,
+            "previousStatus": previous_status,
+            "inboxId": "cmhphehs612ucpp0ilvlf0cv9v",
+            "personId": person_id,
+            "inboxName": "Canal Inicial",
+            "personName": person_name,
+            "personPhone": person_phone,
+            "conversationId": conversation_id,
+        },
+        "timestamp": "2026-06-08T02:33:36.201Z",
     }
 
 
 @pytest.mark.asyncio
-async def test_processor_creates_lead_and_responds(db_conn):
-    fake_jurichat = MagicMock()
-    fake_jurichat.get_conversation = AsyncMock(return_value={
-        "transcription": "Lead: oi", "summary": "",
-    })
-    fake_jurichat.send_message = AsyncMock(return_value={"id": "msg-out"})
+async def test_processor_creates_lead_with_immediate_poll(db_conn):
+    """A brand-new conversation webhook creates the lead in em_conversa
+    AND schedules an immediate poll (proxima_acao_em <= now)."""
+    processor = build_lead_message_processor(get_db=lambda: db_conn)
 
-    async def fake_triagem(**kwargs):
-        return Decisao(acao="responder", mensagem="Olá Maria, como posso ajudar?")
+    await processor(_payload())
 
-    processor = build_lead_message_processor(
-        get_db=lambda: db_conn,
-        jurichat=fake_jurichat,
-        mario_conversation_id="C-MARIO",
-        triagem_fn=fake_triagem,
-        max_turnos=20,
-        followup_horas=48,
-    )
-
-    await processor(_payload(text="oi"))
-
-    lead = get_lead_by_conversation(db_conn, "C-1")
+    lead = get_lead_by_conversation(db_conn, "cmq4ljg3t872iqn07n969t7df")
     assert lead is not None
     assert lead["estado"] == Estado.EM_CONVERSA
-    assert lead["turnos"] == 1
-    fake_jurichat.send_message.assert_awaited_once()
-    args, kwargs = fake_jurichat.send_message.call_args
-    # send_message(conversation_id, text)
-    assert (args[0] if args else kwargs.get("conversation_id")) == "C-1"
-
-
-@pytest.mark.asyncio
-async def test_processor_propor_transitions_to_aguardando_humano(db_conn):
-    fake_jurichat = MagicMock()
-    fake_jurichat.get_conversation = AsyncMock(return_value={
-        "transcription": "Lead: quanto custa?", "summary": "",
-    })
-    fake_jurichat.send_message = AsyncMock(return_value={"id": "x"})
-
-    async def fake_triagem(**kwargs):
-        return Decisao(
-            acao="propor",
-            mensagem="Nossa proposta é...",
-            resumo_caso="Plano negou bariátrica",
-        )
-
-    processor = build_lead_message_processor(
-        get_db=lambda: db_conn,
-        jurichat=fake_jurichat,
-        mario_conversation_id="C-MARIO",
-        triagem_fn=fake_triagem,
-        max_turnos=20,
-        followup_horas=48,
+    assert lead["turnos"] == 0  # turn counting is the scheduler's job now
+    assert lead["contato_nome"] == "Mario eu"
+    assert lead["contato_telefone"] == "5511992046888"
+    # proxima_acao_em should be set (poll request)
+    assert lead["proxima_acao_em"] is not None
+    # And it should be "now or in the past" so the next tick picks it up
+    proxima = datetime.datetime.strptime(
+        lead["proxima_acao_em"], "%Y-%m-%d %H:%M:%S"
     )
-
-    await processor(_payload(text="quanto custa?"))
-
-    lead = get_lead_by_conversation(db_conn, "C-1")
-    assert lead["estado"] == Estado.AGUARDANDO_HUMANO
-    # Two sends: one to lead, one notification to Mario
-    assert fake_jurichat.send_message.await_count == 2
+    assert proxima <= datetime.datetime.utcnow() + datetime.timedelta(seconds=5)
 
 
 @pytest.mark.asyncio
-async def test_processor_from_mario_skips_claude(db_conn):
-    create_lead_if_absent(db_conn, "L-1", "C-1", "5511...", "Maria")
-    fake_jurichat = MagicMock()
-    fake_jurichat.get_conversation = AsyncMock()
-    fake_jurichat.send_message = AsyncMock()
+async def test_processor_is_idempotent_on_repeated_webhook(db_conn):
+    """Same person_id arriving twice doesn't create two leads — just
+    bumps the existing one's schedule."""
+    processor = build_lead_message_processor(get_db=lambda: db_conn)
 
-    triagem_calls = {"n": 0}
+    await processor(_payload())
+    await processor(_payload())
 
-    async def fake_triagem(**kwargs):
-        triagem_calls["n"] += 1
-        return Decisao(acao="responder", mensagem="x")
+    rows = db_conn.execute("SELECT COUNT(*) AS n FROM leads").fetchone()
+    assert rows["n"] == 1
 
-    processor = build_lead_message_processor(
-        get_db=lambda: db_conn,
-        jurichat=fake_jurichat,
-        mario_conversation_id="C-MARIO",
-        triagem_fn=fake_triagem,
-        max_turnos=20,
-        followup_horas=48,
+
+@pytest.mark.asyncio
+async def test_processor_skips_lead_in_aguardando_humano(db_conn):
+    """If Mario already took the lead, the webhook must not re-wake it."""
+    create_lead_if_absent(
+        db_conn,
+        jurichat_lead_id="cmntckrc40866qt0i9ih9al1q",
+        jurichat_conversation_id="cmq4ljg3t872iqn07n969t7df",
+        contato_telefone="5511992046888",
+        contato_nome="Mario eu",
     )
-
-    await processor(_payload(from_lead=False, text="vou cuidar daqui"))
-
-    lead = get_lead_by_conversation(db_conn, "C-1")
-    assert lead["estado"] == Estado.AGUARDANDO_HUMANO
-    assert triagem_calls["n"] == 0
-    fake_jurichat.send_message.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_processor_ignores_lead_msg_when_aguardando_humano(db_conn):
-    create_lead_if_absent(db_conn, "L-1", "C-1", "5511...", "Maria")
-    lead = get_lead_by_conversation(db_conn, "C-1")
+    lead = get_lead_by_conversation(db_conn, "cmq4ljg3t872iqn07n969t7df")
     transicao(db_conn, lead["id"], Estado.AGUARDANDO_HUMANO, motivo="setup")
 
-    fake_jurichat = MagicMock()
-    fake_jurichat.send_message = AsyncMock()
+    processor = build_lead_message_processor(get_db=lambda: db_conn)
+    await processor(_payload())
 
-    async def fake_triagem(**kwargs):
-        return Decisao(acao="responder", mensagem="x")
-
-    processor = build_lead_message_processor(
-        get_db=lambda: db_conn,
-        jurichat=fake_jurichat,
-        mario_conversation_id="C-MARIO",
-        triagem_fn=fake_triagem,
-        max_turnos=20,
-        followup_horas=48,
-    )
-
-    await processor(_payload(text="oi de novo"))
-
-    fake_jurichat.send_message.assert_not_awaited()
+    after = get_lead_by_conversation(db_conn, "cmq4ljg3t872iqn07n969t7df")
+    assert after["estado"] == Estado.AGUARDANDO_HUMANO  # unchanged
+    assert after["proxima_acao_em"] is None  # NOT re-scheduled for polling
 
 
 @pytest.mark.asyncio
-async def test_processor_max_turnos_triggers_handoff(db_conn):
-    create_lead_if_absent(db_conn, "L-1", "C-1", "5511...", "Maria")
-    lead = get_lead_by_conversation(db_conn, "C-1")
-    # Pre-load turnos to 19; one more message tips over to 20
-    db_conn.execute("UPDATE leads SET turnos = 19 WHERE id = ?", (lead["id"],))
-
-    fake_jurichat = MagicMock()
-    fake_jurichat.get_conversation = AsyncMock(return_value={
-        "transcription": "...",
-    })
-    fake_jurichat.send_message = AsyncMock(return_value={"id": "x"})
-
-    async def fake_triagem(**kwargs):
-        return Decisao(acao="responder", mensagem="continuo")
-
-    processor = build_lead_message_processor(
-        get_db=lambda: db_conn,
-        jurichat=fake_jurichat,
-        mario_conversation_id="C-MARIO",
-        triagem_fn=fake_triagem,
-        max_turnos=20,
-        followup_horas=48,
+async def test_processor_reopens_lead_from_encerrado(db_conn):
+    """A lead that was closed (encerrado_sem_resposta) reopens on the
+    next webhook — back to em_conversa + scheduled for polling."""
+    create_lead_if_absent(
+        db_conn,
+        jurichat_lead_id="cmntckrc40866qt0i9ih9al1q",
+        jurichat_conversation_id="cmq4ljg3t872iqn07n969t7df",
+        contato_telefone="5511992046888",
+        contato_nome="Mario eu",
     )
+    lead = get_lead_by_conversation(db_conn, "cmq4ljg3t872iqn07n969t7df")
+    transicao(db_conn, lead["id"], Estado.ENCERRADO_SEM_RESPOSTA, motivo="timer")
 
-    await processor(_payload(text="msg 20"))
+    processor = build_lead_message_processor(get_db=lambda: db_conn)
+    await processor(_payload())
 
-    after = get_lead_by_conversation(db_conn, "C-1")
-    assert after["estado"] == Estado.AGUARDANDO_HUMANO
-    # Notification to Mario, but NO reply sent to lead at turn cap
-    # (one send_message call for the Mario notification)
-    assert fake_jurichat.send_message.await_count == 1
+    after = get_lead_by_conversation(db_conn, "cmq4ljg3t872iqn07n969t7df")
+    assert after["estado"] == Estado.EM_CONVERSA
+    assert after["proxima_acao_em"] is not None
+
+
+@pytest.mark.asyncio
+async def test_processor_ignores_payload_without_ids(db_conn):
+    """Malformed payloads (missing conversationId/personId) log a warning
+    and exit cleanly — no crash, no lead created."""
+    processor = build_lead_message_processor(get_db=lambda: db_conn)
+
+    await processor({"event": "chat.conversation.updated", "data": {}})
+
+    rows = db_conn.execute("SELECT COUNT(*) AS n FROM leads").fetchone()
+    assert rows["n"] == 0

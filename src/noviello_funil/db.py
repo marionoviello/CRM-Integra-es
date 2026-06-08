@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS leads (
     ultima_msg_lead_em       TEXT,
     proxima_acao_em          TEXT,
     erro_atual               TEXT,
+    ultimo_transcript_hash   TEXT,
     criado_em                TEXT NOT NULL DEFAULT (datetime('now')),
     atualizado_em            TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -69,5 +70,22 @@ def connect(database_path: str) -> sqlite3.Connection:
 
 
 def run_migrations(conn: sqlite3.Connection) -> None:
-    """Apply schema. Idempotent — uses IF NOT EXISTS everywhere."""
+    """Apply schema. Idempotent — uses IF NOT EXISTS everywhere.
+
+    Extra step: handle column additions on existing tables. SQLite has no
+    `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so we use try/except to
+    make these idempotent.
+    """
     conn.executescript(SCHEMA)
+    _ensure_column(conn, "leads", "ultimo_transcript_hash", "TEXT")
+
+
+def _ensure_column(
+    conn: sqlite3.Connection, table: str, column: str, type_: str,
+) -> None:
+    """Idempotent ADD COLUMN — no-ops if column already exists."""
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {type_}")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
+            raise
