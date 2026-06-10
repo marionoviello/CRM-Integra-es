@@ -24,6 +24,7 @@ from noviello_funil.scheduler import (
     CalendarConfig,
     run_followup_cycle,
     run_poll_cycle,
+    sync_jurichat_conversations,
 )
 from noviello_funil.state import Estado, get_lead_by_conversation
 
@@ -757,3 +758,37 @@ async def test_confirmar_horario_sem_iso_registra_erro(db_conn):
     lead = get_lead_by_conversation(db_conn, "C-1")
     assert lead["erro_atual"] == "claude_horario_iso_ausente"
     assert lead["estado"] == Estado.EM_CONVERSA  # não progrediu
+
+
+# --- sync: canal de alertas do Mario --------------------------------------
+
+@pytest.mark.asyncio
+async def test_sync_ignora_conversa_de_alertas_do_mario(db_conn):
+    """A conversa do MARIO_CONVERSATION_ID nunca vira lead — senão o bot
+    responderia as próprias notificações que envia pro Mario."""
+    # DB precisa ter >=1 lead pra não cair no baseline da primeira execução.
+    _insert_lead_due_for_poll(db_conn, jurichat_lead_id="L-0",
+                              conversation_id="C-0")
+
+    fake = MagicMock()
+    fake.list_active_conversations = AsyncMock(return_value=[
+        {
+            "id": "C-MARIO-ALERTAS",
+            "person": {"id": "P-MARIO", "phoneNumber": "5511000000000",
+                       "name": "Mario"},
+            "isArchived": False, "isGroup": False,
+            "responsables": [],
+        },
+    ])
+    fake.get_lead_tags = AsyncMock(return_value=[])
+
+    stats = await sync_jurichat_conversations(
+        get_db=lambda: db_conn,
+        jurichat=fake,
+        inbox_id="inbox-1",
+        mario_conversation_id="C-MARIO-ALERTAS",
+    )
+
+    # Conversa do Mario NÃO virou lead.
+    assert get_lead_by_conversation(db_conn, "C-MARIO-ALERTAS") is None
+    assert stats["novos"] == 0

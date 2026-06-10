@@ -552,6 +552,7 @@ async def sync_jurichat_conversations(
     get_db: Callable[[], Any],
     jurichat: JurichatClient,
     inbox_id: str,
+    mario_conversation_id: str = "",
 ) -> dict[str, int]:
     """Sincroniza conversas Jurichat → leads no nosso DB.
 
@@ -601,6 +602,12 @@ async def sync_jurichat_conversations(
             continue
 
         conv_id = conv.get("id")
+
+        # Canal de alertas do Mario — NUNCA tratar como lead. Sem esse
+        # skip, o bot responderia as próprias notificações que envia
+        # (ou qualificaria o Mario como lead de inventário 😅).
+        if mario_conversation_id and conv_id == mario_conversation_id:
+            continue
         person = conv.get("person") or {}
         person_id = person.get("id")
         if not conv_id or not person_id:
@@ -1292,6 +1299,7 @@ def main() -> int:
             get_db=lambda: conn,
             jurichat=jurichat,
             inbox_id=settings.jurichat_inbox_id,
+            mario_conversation_id=settings.mario_conversation_id,
         )
         # 2. Poll cycle drives Claude on em_conversa leads (including
         #    the ones we just synced — they were scheduled for now).
