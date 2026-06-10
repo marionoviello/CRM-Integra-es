@@ -414,3 +414,42 @@ async def test_notify_mario_sends_to_configured_number(respx_mock):
         )
     finally:
         await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_start_human_support_com_bot_user_id_usa_selectedUserId(respx_mock):
+    """Com bot_user_id setado, atribui pro BOT IA — não sorteia humano."""
+    route = respx_mock.post(
+        "https://api.jurichat.com/conversation/start-human-support"
+    ).mock(return_value=httpx.Response(200, json={"success": True}))
+
+    client = JurichatClient(
+        "jk-test", "https://api.jurichat.com", bot_user_id="USR-BOT-IA",
+    )
+    try:
+        await client.start_human_support("C-1")
+    finally:
+        await client.aclose()
+
+    import json as _json
+    body = _json.loads(route.calls.last.request.read())
+    assert body == {"conversationId": "C-1", "selectedUserId": "USR-BOT-IA"}
+    assert "isRandom" not in body
+
+
+@pytest.mark.asyncio
+async def test_start_human_support_sem_bot_user_id_usa_isRandom(respx_mock):
+    """Sem bot_user_id → comportamento legado isRandom."""
+    route = respx_mock.post(
+        "https://api.jurichat.com/conversation/start-human-support"
+    ).mock(return_value=httpx.Response(200, json={"success": True}))
+
+    client = JurichatClient("jk-test", "https://api.jurichat.com")
+    try:
+        await client.start_human_support("C-1")
+    finally:
+        await client.aclose()
+
+    import json as _json
+    body = _json.loads(route.calls.last.request.read())
+    assert body == {"conversationId": "C-1", "isRandom": True}

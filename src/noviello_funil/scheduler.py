@@ -700,6 +700,7 @@ async def run_poll_cycle(
     max_turnos: int,
     poll_interval_seconds: int = DEFAULT_POLL_INTERVAL_SECONDS,
     calendar: CalendarConfig | None = None,
+    bot_user_id: str = "",
 ) -> None:
     """Process all em_conversa leads whose poll tick is due."""
     conn = get_db()
@@ -724,6 +725,29 @@ async def run_poll_cycle(
         transcript = conv.get("transcription", "") or ""
         new_hash = _compute_hash(transcript)
         old_hash = lead["ultimo_transcript_hash"]
+
+        # Signal 0 (2026-06-10): atendente HUMANO assumiu a conversa.
+        # O campo ``user`` da conversa identifica o responsável atual.
+        # Quando o bot tem identidade própria (bot_user_id setado via
+        # JURICHAT_BOT_USER_ID) e o responsável é OUTRO usuário, um
+        # humano assumiu pelo painel → bot se pausa na hora, antes de
+        # qualquer chamada ao Claude. Roda ANTES do hash-check: mesmo
+        # sem mensagem nova, conversa assumida sai do polling.
+        conv_user = conv.get("user") or {}
+        conv_user_id = conv_user.get("id") if isinstance(conv_user, dict) else None
+        if bot_user_id and conv_user_id and conv_user_id != bot_user_id:
+            logger.info(
+                "lead=%s: humano %r assumiu a conversa — bot pausado",
+                lead_id, conv_user.get("name"),
+            )
+            transicao(
+                conn, lead_id, Estado.AGUARDANDO_HUMANO,
+                motivo="humano_assumiu_conversa",
+                payload={"user": dict(conv_user)},
+                proxima_acao_horas=CLEAR_PROXIMA_ACAO,
+            )
+            update_transcript_hash(conn, lead_id, new_hash)
+            continue
 
         # Nothing new since the last poll → just reschedule.
         if new_hash == old_hash:
@@ -1244,6 +1268,7 @@ def main() -> int:
     jurichat = JurichatClient(
         api_key=settings.jurichat_api_key,
         base_url=settings.jurichat_base_url,
+        bot_user_id=settings.jurichat_bot_user_id,
     )
     anthropic_client = AsyncAnthropic(api_key=settings.anthropic_api_key)
 
@@ -1310,6 +1335,7 @@ def main() -> int:
             mario_conversation_id=settings.mario_conversation_id,
             max_turnos=settings.max_turnos_por_lead,
             calendar=calendar_config,
+            bot_user_id=settings.jurichat_bot_user_id,
         )
         # 3. Reminder cycle envia lembretes 24h/2h/30min antes de
         #    cada reunião agendada.

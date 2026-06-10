@@ -136,9 +136,15 @@ class JurichatClient:
         base_url: str,
         *,
         client: httpx.AsyncClient | None = None,
+        bot_user_id: str = "",
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
+        # Quando setado, start_human_support atribui as conversas a esse
+        # usuário Jurichat ("BOT IA") via selectedUserId em vez de sortear
+        # um humano com isRandom. Permite detectar "humano assumiu" pelo
+        # campo ``user`` da conversa (ver scheduler Signal 0).
+        self._bot_user_id = bot_user_id
         self._client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(10.0, connect=5.0),
             headers={"x-jurichat-api-key": api_key},
@@ -163,16 +169,26 @@ class JurichatClient:
         Confirmado idempotente: chamar várias vezes na mesma conversa
         retorna sempre {"success": true} sem efeito colateral.
 
-        ``is_random=True`` deixa o Jurichat escolher qualquer atendente
-        (não precisamos especificar selectedUserId).
+        Atribuição (validado 2026-06-10): se ``bot_user_id`` foi setado no
+        client, envia ``selectedUserId`` (CUID do usuário "BOT IA") — a
+        conversa fica atribuída ao bot e o campo ``user`` da conversa
+        identifica quem é o dono. Sem bot_user_id, fallback legado
+        ``isRandom=True`` (Jurichat sorteia um atendente humano).
 
         Confirmado 2026-06-08 via curl: STATUS 200 + {"success": true}.
         """
 
         async def op() -> dict[str, Any]:
+            if self._bot_user_id:
+                body: dict[str, Any] = {
+                    "conversationId": conversation_id,
+                    "selectedUserId": self._bot_user_id,
+                }
+            else:
+                body = {"conversationId": conversation_id, "isRandom": is_random}
             resp = await self._client.post(
                 f"{self._base_url}/conversation/start-human-support",
-                json={"conversationId": conversation_id, "isRandom": is_random},
+                json=body,
             )
             if resp.status_code >= 400:
                 logger.error(

@@ -792,3 +792,98 @@ async def test_sync_ignora_conversa_de_alertas_do_mario(db_conn):
     # Conversa do Mario NÃO virou lead.
     assert get_lead_by_conversation(db_conn, "C-MARIO-ALERTAS") is None
     assert stats["novos"] == 0
+
+
+# --- Signal 0: humano assumiu a conversa -----------------------------------
+
+@pytest.mark.asyncio
+async def test_humano_assumiu_conversa_pausa_bot_sem_chamar_claude(db_conn):
+    """user da conversa != BOT IA → pausa imediata, Claude nem é chamado."""
+    transcript = "Lead: e aí, novidades?"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = MagicMock()
+    jurichat.get_conversation = AsyncMock(return_value={
+        "transcription": transcript,
+        "user": {"id": "USR-HUMANO-MARIO", "name": "Mario Noviello"},
+    })
+    jurichat.send_message = AsyncMock()
+    jurichat.start_human_support = AsyncMock()
+    triagem_fn = AsyncMock(side_effect=AssertionError("must not call Claude"))
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        bot_user_id="USR-BOT-IA",
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.AGUARDANDO_HUMANO
+    triagem_fn.assert_not_called()
+    jurichat.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_conversa_atribuida_ao_bot_segue_normal(db_conn):
+    """user da conversa == BOT IA → fluxo normal (Claude responde)."""
+    transcript = "Lead: quero saber mais"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = MagicMock()
+    jurichat.get_conversation = AsyncMock(return_value={
+        "transcription": transcript,
+        "user": {"id": "USR-BOT-IA", "name": "BOT IA"},
+    })
+    jurichat.send_message = AsyncMock(return_value={"id": "m"})
+    jurichat.start_human_support = AsyncMock(return_value={"success": True})
+    triagem_fn = await _triagem_returning(
+        Decisao(acao="responder", mensagem="Claro!")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        bot_user_id="USR-BOT-IA",
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA
+    jurichat.send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sem_bot_user_id_ignora_user_da_conversa(db_conn):
+    """Backwards-compat: sem JURICHAT_BOT_USER_ID, user humano na
+    conversa NÃO pausa (comportamento legado pré-feature)."""
+    transcript = "Lead: oi"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = MagicMock()
+    jurichat.get_conversation = AsyncMock(return_value={
+        "transcription": transcript,
+        "user": {"id": "USR-QUALQUER", "name": "THS - Midia"},
+    })
+    jurichat.send_message = AsyncMock(return_value={"id": "m"})
+    jurichat.start_human_support = AsyncMock(return_value={"success": True})
+    triagem_fn = await _triagem_returning(
+        Decisao(acao="responder", mensagem="Olá!")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        # bot_user_id NÃO passado (default "")
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA  # não pausou
+    jurichat.send_message.assert_awaited_once()

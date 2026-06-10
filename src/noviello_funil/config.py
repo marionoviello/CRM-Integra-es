@@ -75,3 +75,12 @@ class Settings(BaseSettings):
     # Se o serviço parar de pingar (timer travado, API key expirada,
     # crash em loop), o healthchecks alerta Mario por email. Vazio = off.
     healthcheck_ping_url: str = ""
+
+    # CUID do usuário "BOT IA" no Jurichat. Quando setado:
+    #   1. start_human_support atribui conversas a ele (selectedUserId)
+    #      em vez de sortear humano (isRandom) — conserta atribuição
+    #      indevida pro "THS - Midia".
+    #   2. Poll cycle pausa o bot (aguardando_humano) quando o ``user``
+    #      da conversa é OUTRO — humano assumiu, bot não atropela.
+    # Vazio = comportamento legado (isRandom, sem detecção).
+    jurichat_bot_user_id: str = ""
