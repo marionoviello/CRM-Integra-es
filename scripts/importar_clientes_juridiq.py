@@ -41,18 +41,49 @@ THROTTLE_S = 0.3
 
 # --- Normalização ----------------------------------------------------------
 
+def _valida_cpf(cpf: str) -> bool:
+    """Valida CPF pelos 2 dígitos verificadores."""
+    if len(cpf) != 11 or len(set(cpf)) == 1:
+        return False
+    for i in (9, 10):
+        soma = sum(int(cpf[n]) * ((i + 1) - n) for n in range(i))
+        dig = (soma * 10) % 11
+        dig = 0 if dig == 10 else dig
+        if dig != int(cpf[i]):
+            return False
+    return True
+
+
 def _norm_doc(raw: object) -> str:
-    """'41107268834.0' → '41107268834'; zero-pad CPF(11)/CNPJ(14)."""
+    """Normaliza CPF/CNPJ. Trata sujeira do export do CRM antigo.
+
+    Casos cobertos (validado 2026-06-10 contra 284 clientes):
+      - '41107268834.0'  → tira sufixo .0 do Excel
+      - 11 dígitos       → CPF OK
+      - 14 dígitos       → CNPJ OK
+      - 9-10 dígitos     → CPF que perdeu zeros à esquerda → zfill(11)
+      - 12-13 dígitos    → AMBÍGUO. O CRM antigo exportou 198 CPFs com
+                           um dígito EXTRA no fim ('549979658040' →
+                           '54997965804'). Se truncar pro fim vira CPF
+                           VÁLIDO (dígito verificador), é CPF; senão,
+                           trata como CNPJ que perdeu zeros (zfill 14).
+    """
     s = str(raw).strip()
     if s.endswith(".0"):
         s = s[:-2]
     digits = re.sub(r"\D", "", s)
     if not digits:
         return ""
+    if len(digits) == 11:
+        return digits
+    if len(digits) == 14:
+        return digits
     if len(digits) in (9, 10):       # CPF que perdeu zeros à esquerda
-        digits = digits.zfill(11)
-    elif len(digits) in (12, 13):    # CNPJ idem
-        digits = digits.zfill(14)
+        return digits.zfill(11)
+    if len(digits) in (12, 13):      # CPF com dígito extra OU CNPJ truncado
+        if _valida_cpf(digits[:11]):
+            return digits[:11]       # era CPF com lixo no fim
+        return digits.zfill(14)      # CNPJ que perdeu zeros
     return digits
 
 

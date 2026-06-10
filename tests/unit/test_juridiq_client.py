@@ -1,9 +1,17 @@
 """Tests for the Juridiq client + intake helper."""
 
+import os
+import sys
+
 import httpx
 import pytest
 
 from noviello_funil.juridiq_client import JuridiqClient, intake_lead_agendado
+
+# Os testes de _norm_doc importam do script de migração em scripts/.
+sys.path.insert(
+    0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts")
+)
 
 
 @pytest.mark.asyncio
@@ -156,3 +164,35 @@ async def test_intake_nunca_levanta_em_falha(respx_mock, caplog):
 
     assert pid is None
     assert any("intake juridiq falhou" in r.message for r in caplog.records)
+
+
+# --- _norm_doc: correção de CPF do CRM antigo (2026-06-10) ----------------
+
+def test_norm_doc_cpf_11_digitos_intacto():
+    from importar_clientes_juridiq import _norm_doc
+    assert _norm_doc("07561830815") == "07561830815"
+
+
+def test_norm_doc_cpf_12_digitos_com_lixo_no_fim():
+    """CRM antigo exportou CPF com 1 dígito extra. Trunca pro CPF válido."""
+    from importar_clientes_juridiq import _norm_doc
+    # 549979658040 → 54997965804 (CPF com dígito verificador correto)
+    assert _norm_doc("549979658040") == "54997965804"
+    assert _norm_doc("236989238230") == "23698923823"
+
+
+def test_norm_doc_remove_sufixo_excel():
+    from importar_clientes_juridiq import _norm_doc
+    assert _norm_doc("41107268834.0") == "41107268834"
+
+
+def test_norm_doc_cnpj_14_intacto():
+    from importar_clientes_juridiq import _norm_doc
+    assert _norm_doc("27340554000194") == "27340554000194"
+
+
+def test_norm_doc_12_digitos_nao_cpf_vira_cnpj():
+    """12 dígitos que NÃO validam como CPF → CNPJ que perdeu zeros."""
+    from importar_clientes_juridiq import _norm_doc
+    # 000000000000 não é CPF válido → zfill 14
+    assert _norm_doc("123456789012") == "00123456789012"
