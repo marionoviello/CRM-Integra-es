@@ -887,3 +887,31 @@ async def test_sem_bot_user_id_ignora_user_da_conversa(db_conn):
     lead = get_lead_by_conversation(db_conn, "C-1")
     assert lead["estado"] == Estado.EM_CONVERSA  # não pausou
     jurichat.send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_poll_neutraliza_lead_da_conversa_de_alertas(db_conn):
+    """Lead pré-existente da conversa de alertas (criado antes do
+    guardrail do sync) é pausado no poll sem chamar a API."""
+    _insert_lead_due_for_poll(
+        db_conn, conversation_id="C-ALERTAS-MARIO", transcript_hash="stale",
+    )
+
+    jurichat = MagicMock()
+    jurichat.get_conversation = AsyncMock(
+        side_effect=AssertionError("must not fetch alert channel"),
+    )
+    triagem_fn = AsyncMock(side_effect=AssertionError("must not call Claude"))
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="C-ALERTAS-MARIO",
+        max_turnos=20,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-ALERTAS-MARIO")
+    assert lead["estado"] == Estado.AGUARDANDO_HUMANO
+    assert lead["proxima_acao_em"] is None
+    jurichat.get_conversation.assert_not_awaited()

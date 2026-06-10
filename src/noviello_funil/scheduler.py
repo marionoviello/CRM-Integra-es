@@ -711,6 +711,18 @@ async def run_poll_cycle(
         lead_id = lead["id"]
         conv_id = lead["jurichat_conversation_id"]
 
+        # Canal de alertas do Mario registrado como lead ANTES do
+        # guardrail do sync existir (2026-06-10) — neutraliza de vez.
+        # Sem isso, o bot tentaria qualificar o próprio Mario quando a
+        # conversa de alertas tiver mensagem nova.
+        if mario_conversation_id and conv_id == mario_conversation_id:
+            transicao(
+                conn, lead_id, Estado.AGUARDANDO_HUMANO,
+                motivo="canal_alertas_mario",
+                proxima_acao_horas=CLEAR_PROXIMA_ACAO,
+            )
+            continue
+
         try:
             conv = await jurichat.get_conversation(conv_id)
         except Exception as exc:
