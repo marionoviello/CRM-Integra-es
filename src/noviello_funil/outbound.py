@@ -38,6 +38,18 @@ _ANY_TAG_RE = re.compile(r"<[^>]+>")
 # Colapsar 3+ quebras em só 2 (parágrafo).
 _MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
 
+# Bug em campo (2026-06-09): Claude diz "Dr. Mario Noviello", "Mario
+# vai entrar em contato", "vou passar pro Mario". Mario quer SEMPRE
+# coletivo ("nossa equipe"). Skill instrui mas Claude desliza —
+# sanitizamos antes de mandar pro lead como defesa em profundidade.
+# Cobre: "Dr. Mario Noviello", "Mario Noviello", "Dr. Mario",
+# "(o|O) Mario", "Mario" standalone. Word boundary protege "Marina",
+# "Mariolândia" etc.
+_NOME_INDIVIDUAL_RE = re.compile(
+    r"\b(?:[oa]\s+)?(?:Dr\.?\s+|Dra\.?\s+)?Mario(?:\s+Noviello)?\b",
+    re.IGNORECASE,
+)
+
 
 def _sanitize_for_whatsapp(text: str) -> str:
     """Remove HTML que Claude eventualmente gera e que WhatsApp não renderiza.
@@ -46,6 +58,11 @@ def _sanitize_for_whatsapp(text: str) -> str:
     aparecendo cru pro lead no WhatsApp. Esse helper é hard-guarantee:
     independente do que o modelo gerar, o que sai pro lead é texto puro
     com quebras de linha reais.
+
+    Bug reportado 2026-06-09: Claude diz "Dr. Mario Noviello" etc.
+    Substituímos por "nossa equipe" — texto pode ficar levemente off
+    gramaticalmente ("pra nossa equipe" em vez de "pro Mario"), mas
+    a regra de marca é mais importante.
     """
     if not text:
         return text
@@ -55,6 +72,7 @@ def _sanitize_for_whatsapp(text: str) -> str:
     out = _LI_OPEN_RE.sub("• ", out)
     out = _LI_CLOSE_RE.sub("\n", out)
     out = _ANY_TAG_RE.sub("", out)
+    out = _NOME_INDIVIDUAL_RE.sub("nossa equipe", out)
     out = _MULTI_NEWLINE_RE.sub("\n\n", out)
     return out.strip()
 

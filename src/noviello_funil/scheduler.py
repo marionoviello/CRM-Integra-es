@@ -20,9 +20,18 @@ import asyncio
 import datetime
 import hashlib
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
+
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+
+
+def _extrair_email(transcript: str) -> str | None:
+    """Extrai primeiro email válido da transcrição. None se não houver."""
+    m = _EMAIL_RE.search(transcript or "")
+    return m.group(0) if m else None
 
 from noviello_funil.brain import Decisao, DecisaoInvalida
 from noviello_funil.calendar_client import (
@@ -799,7 +808,55 @@ async def run_poll_cycle(
             schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
 
         elif decisao.acao == "propor":
-            # Send the closing message, then hand off.
+            # Guardrail (bug 2026-06-09): Claude usa "propor" pra leads
+            # prontos pra fechar em vez de oferecer agendamento direto.
+            # Se temos calendar configurado, REDIRECIONAMOS pra fluxo
+            # de agendamento: se já tem email na transcrição, oferece
+            # horários direto; senão pede email primeiro.
+            if calendar is not None and calendar.client is not None:
+                email_na_transcricao = _extrair_email(transcript)
+                if email_na_transcricao:
+                    # Reusa handler de oferecer_horarios — substitui a
+                    # mensagem do Claude por template com placeholder.
+                    decisao_oferta = Decisao(
+                        acao="oferecer_horarios",
+                        mensagem=(
+                            "Que ótimo! Pra avançarmos, nossa equipe pode "
+                            "te atender por videochamada (Google Meet). "
+                            "Tenho esses horários disponíveis:\n\n"
+                            "{{HORARIOS}}\n\nQual prefere?"
+                        ),
+                    )
+                    await _handle_oferecer_horarios(
+                        conn=conn, lead=lead, decisao=decisao_oferta,
+                        transcript=transcript, new_hash=new_hash,
+                        jurichat=jurichat, calendar=calendar,
+                        mario_conversation_id=mario_conversation_id,
+                        poll_interval_seconds=poll_interval_seconds,
+                    )
+                else:
+                    # Falta email — pede primeiro.
+                    msg_email = (
+                        "Que ótimo! Pra avançarmos, posso agendar uma "
+                        "videochamada (Google Meet) com nossa equipe. "
+                        "Qual seu melhor email pra eu te enviar o convite?"
+                    )
+                    try:
+                        await jurichat.start_human_support(conv_id)
+                        await jurichat.send_message(conv_id, msg_email)
+                    except Exception as exc:
+                        logger.exception(
+                            "send_message(propor_pede_email) lead=%s: %s",
+                            lead_id, exc,
+                        )
+                        register_error(conn, lead_id, "jurichat_send_failed")
+                    update_transcript_hash(conn, lead_id, new_hash)
+                    schedule_next_action_seconds(
+                        conn, lead_id, poll_interval_seconds,
+                    )
+                continue
+
+            # Sem calendar configurado — fallback antigo (handoff humano).
             try:
                 await jurichat.start_human_support(conv_id)
                 await jurichat.send_message(conv_id, decisao.mensagem)

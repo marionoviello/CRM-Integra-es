@@ -542,6 +542,89 @@ async def test_confirmar_horario_cria_evento_com_email_e_meet(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_propor_com_calendar_e_email_redireciona_pra_oferecer_horarios(db_conn):
+    """Bug em campo (2026-06-09): Claude usou 'propor' pra lead pronto
+    pra fechar, virou 'vou encaminhar pro Dr. Mario'. Guardrail força
+    agendamento direto se calendar está disponível + email já existe."""
+    transcript = (
+        "Atendente: Como funciona?\n"
+        "Lead: Meu email é joao@exemplo.com. Quanto custa?"
+    )
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    tz = ZoneInfo("America/Sao_Paulo")
+    slots = [
+        Slot(start=datetime.datetime(2026, 6, 9, 14, 0, tzinfo=tz), duration_min=30),
+        Slot(start=datetime.datetime(2026, 6, 9, 14, 30, tzinfo=tz), duration_min=30),
+        Slot(start=datetime.datetime(2026, 6, 10, 15, 0, tzinfo=tz), duration_min=30),
+    ]
+
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar(slots)
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="propor",
+            mensagem="Vou encaminhar pro Dr. Mario Noviello.",
+            resumo_caso="Inventário SP",
+        )
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )
+
+    # Não foi pra aguardando_humano — agendamento foi disparado.
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA
+    # Mensagem ofereceu horários (não a do Claude com "Dr. Mario")
+    sent_text = jurichat.send_message.call_args_list[0][0][1]
+    assert "Dr. Mario" not in sent_text
+    assert "Mario Noviello" not in sent_text
+    assert "ter (09/jun) às 14h" in sent_text
+    assert "nossa equipe" in sent_text.lower() or "videochamada" in sent_text.lower()
+
+
+@pytest.mark.asyncio
+async def test_propor_com_calendar_sem_email_pede_email(db_conn):
+    """Lead pronto pra fechar SEM email na transcrição → bot pede email
+    primeiro (em vez de handoff humano)."""
+    transcript = "Lead: Quanto custa pra fazer o inventário?"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar()
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="propor",
+            mensagem="Vou encaminhar pro Mario.",
+            resumo_caso="x",
+        )
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA  # não foi aguardando_humano
+    calendar_client.create_event.assert_not_awaited()
+    sent_text = jurichat.send_message.call_args_list[0][0][1]
+    assert "email" in sent_text.lower()
+    assert "videochamada" in sent_text.lower() or "meet" in sent_text.lower()
+    assert "Mario" not in sent_text  # nada de "passar pro Mario"
+
+
+@pytest.mark.asyncio
 async def test_remarcar_reuniao_cancela_evento_e_oferece_novos(db_conn):
     """Lead pediu remarcação → bot cancela evento antigo, limpa DB,
     oferece novos horários."""

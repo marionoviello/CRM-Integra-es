@@ -52,6 +52,32 @@ def test_sanitize_handles_empty():
     assert _sanitize_for_whatsapp("") == ""
 
 
+def test_sanitize_substitui_mario_individual_por_equipe():
+    """Bug em campo (2026-06-09): Claude disse 'Dr. Mario Noviello'.
+    Sanitizador força 'nossa equipe'."""
+    cases = [
+        ("Vou encaminhar pro Dr. Mario Noviello.",
+         "Vou encaminhar pro nossa equipe."),
+        ("O Mario vai te retornar.",
+         "nossa equipe vai te retornar."),
+        ("Falo com Mario Noviello hoje.",
+         "Falo com nossa equipe hoje."),
+        ("o Mario é especialista.",
+         "nossa equipe é especialista."),
+        ("Dr. Mario te atenderá.",
+         "nossa equipe te atenderá."),
+    ]
+    for entrada, esperado in cases:
+        assert _sanitize_for_whatsapp(entrada) == esperado, \
+            f"falhou pra: {entrada!r}"
+
+
+def test_sanitize_nao_quebra_palavras_parecidas():
+    """Word boundary protege Marina, Mariolândia, etc."""
+    src = "Marina vai te atender em Mariolândia."
+    assert _sanitize_for_whatsapp(src) == src
+
+
 @pytest.mark.asyncio
 async def test_with_retry_succeeds_first_attempt():
     calls = {"n": 0}
