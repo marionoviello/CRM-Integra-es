@@ -1,0 +1,12 @@
+[Unit]
+Description=Noviello Funil Saude - Backup diario do SQLite (03h BRT)
+
+[Timer]
+# 06:00 UTC = 03:00 America/Sao_Paulo. Persistent=true garante que se o
+# VPS estava desligado/reiniciando às 06h, o backup roda assim que subir.
+OnCalendar=*-*-* 06:00:00
+Persistent=true
+Unit=noviello-backup.service
+
+[Install]
+WantedBy=timers.target

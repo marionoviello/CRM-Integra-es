@@ -25,6 +25,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
+
 from noviello_funil.brain import Decisao, DecisaoInvalida
 from noviello_funil.calendar_client import (
     GoogleCalendarClient,
@@ -64,6 +66,21 @@ def _extrair_email(transcript: str) -> str | None:
     """Extrai primeiro email válido da transcrição. None se não houver."""
     m = _EMAIL_RE.search(transcript or "")
     return m.group(0) if m else None
+
+
+async def ping_healthcheck(url: str) -> None:
+    """Dead-man's switch: GET no healthchecks.io (ou similar).
+
+    Fire-and-forget — falha de ping NUNCA derruba o ciclo (loga warning
+    e segue). URL vazio = feature desligada, no-op silencioso.
+    """
+    if not url:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.get(url)
+    except Exception as exc:
+        logger.warning("healthcheck ping falhou: %s", exc)
 
 
 OPT_IN_TAGS = frozenset({"Fazer Follow up", "Proposta enviada"})
@@ -1311,6 +1328,10 @@ def main() -> int:
         """
         try:
             await _full_cycle()
+            # Dead-man's switch: ping SÓ em ciclo bem-sucedido. Se o
+            # serviço travar/crashar em loop, o healthchecks.io detecta
+            # a ausência de pings e alerta Mario por email.
+            await ping_healthcheck(settings.healthcheck_ping_url)
             return 0
         except Exception:
             logger.exception("scheduler cycle failed")

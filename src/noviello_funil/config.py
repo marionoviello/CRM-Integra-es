@@ -69,3 +69,9 @@ class Settings(BaseSettings):
     calendar_buffer_min: int = Field(default=0, ge=0, le=60)
     calendar_lookahead_days: int = Field(default=5, ge=1, le=30)
     calendar_num_slots: int = Field(default=3, ge=1, le=10)
+
+    # Dead-man's switch (healthchecks.io ou similar). Se preenchido, o
+    # scheduler faz GET nesse URL ao fim de cada ciclo BEM-SUCEDIDO.
+    # Se o serviço parar de pingar (timer travado, API key expirada,
+    # crash em loop), o healthchecks alerta Mario por email. Vazio = off.
+    healthcheck_ping_url: str = ""

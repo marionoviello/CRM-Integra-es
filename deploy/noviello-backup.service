@@ -1,0 +1,14 @@
+[Unit]
+Description=Noviello Funil Saude - Backup diario do SQLite
+After=network.target
+
+[Service]
+Type=oneshot
+User=noviello
+Group=noviello
+WorkingDirectory=/opt/noviello-funil-saude
+ExecStart=/bin/bash /opt/noviello-funil-saude/scripts/backup_db.sh
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
