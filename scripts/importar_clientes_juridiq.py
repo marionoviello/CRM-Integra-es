@@ -105,26 +105,88 @@ def _parse_date(cell_value: object, datemode: int) -> str:
 # --- Leitura das planilhas --------------------------------------------------
 
 def ler_planilhas(paths: list[str]) -> list[dict]:
+    """Lê .xls (xlrd, BIFF imperfeito do CRM antigo) e .xlsx (openpyxl,
+    incluindo o template padrão template_importacao_juridiq.xlsx)."""
     registros = []
     for path in paths:
-        wb = xlrd.open_workbook(path, ignore_workbook_corruption=True)
-        sh = wb.sheets()[0]
-        header = [str(sh.cell_value(0, c)).strip() for c in range(sh.ncols)]
-        for r in range(1, sh.nrows):
-            row = dict(zip(header, (sh.cell_value(r, c) for c in range(sh.ncols))))
-            row["_origem"] = f"{os.path.basename(path)}:{r + 1}"
-            row["_datemode"] = wb.datemode
-            registros.append(row)
+        if path.lower().endswith(".xlsx"):
+            from openpyxl import load_workbook
+            wb = load_workbook(path, data_only=True)
+            sh = wb["Clientes"] if "Clientes" in wb.sheetnames else wb.active
+            rows = list(sh.iter_rows(values_only=True))
+            header = [str(c or "").strip() for c in rows[0]]
+            for i, valores in enumerate(rows[1:], start=2):
+                row = dict(zip(header, ("" if v is None else v for v in valores)))
+                row["_origem"] = f"{os.path.basename(path)}:{i}"
+                row["_datemode"] = 0
+                registros.append(row)
+        else:
+            wb = xlrd.open_workbook(path, ignore_workbook_corruption=True)
+            sh = wb.sheets()[0]
+            header = [str(sh.cell_value(0, c)).strip() for c in range(sh.ncols)]
+            for r in range(1, sh.nrows):
+                row = dict(zip(header, (sh.cell_value(r, c) for c in range(sh.ncols))))
+                row["_origem"] = f"{os.path.basename(path)}:{r + 1}"
+                row["_datemode"] = wb.datemode
+                registros.append(row)
     return registros
 
 
+# Campos aceitos no formato PADRÃO (template_importacao_juridiq.xlsx —
+# headers = nomes técnicos da API).
+_CAMPOS_PADRAO = [
+    "name", "personType", "personOrigin", "email", "phone", "document",
+    "rg", "birthDate", "maritalStatus", "nationality", "profession",
+    "zipCode", "state", "city", "neighborhood", "streetAndNumber",
+    "addressComplement", "clientDiscoverOffice", "annotation", "code",
+    "isPrivate",
+]
+
+
+def _montar_payload_padrao(row: dict) -> dict:
+    """Template padrão: headers já são os campos da API — passa direto,
+    normalizando phone/document/email."""
+    body: dict = {}
+    for campo in _CAMPOS_PADRAO:
+        v = str(row.get(campo, "") or "").strip()
+        if not v or v in ("-", "--"):
+            continue
+        if campo == "phone":
+            v, _ = _norm_phone(v)
+        elif campo == "document":
+            v = _norm_doc(v)
+        elif campo == "email":
+            v = v.lower()
+        elif campo == "isPrivate":
+            body[campo] = v.upper() in ("TRUE", "1", "SIM", "VERDADEIRO")
+            continue
+        if v:
+            body[campo] = v
+    body.setdefault("personOrigin", "Cliente")
+    body.setdefault("personType", "física")
+    return body
+
+
 def montar_payload(row: dict) -> dict:
-    """Linha da planilha → body do POST /person/."""
-    col = lambda *names: next(  # noqa: E731 — acha coluna por prefixo
-        (str(row[k]).strip() for k in row
-         if any(str(k).startswith(n) for n in names) and str(row[k]).strip()),
-        "",
-    )
+    """Linha da planilha → body do POST /person/.
+
+    Detecta o formato: header 'name' = template padrão (campos da API
+    direto); senão, formato do CRM antigo (colunas em português).
+    """
+    if "name" in row:
+        return _montar_payload_padrao(row)
+
+    def col(*names: str) -> str:
+        """Valor da primeira coluna cujo nome começa com um dos prefixos.
+
+        Valores-placeholder do CRM antigo ('-', '--') contam como vazio.
+        """
+        for k in row:
+            if any(str(k).startswith(n) for n in names):
+                v = str(row[k]).strip()
+                if v and v not in ("-", "--"):
+                    return v
+        return ""
 
     tipo = col("Tipo")
     phone, outros_tels = _norm_phone(col("Telefone"))
@@ -144,6 +206,8 @@ def montar_payload(row: dict) -> dict:
 
     logradouro = col("Logradouro")
     numero = col("Número", "Numero", "Número")
+    if numero.endswith(".0"):  # número de rua veio como float do Excel
+        numero = numero[:-2]
     street = f"{logradouro}, {numero}" if logradouro and numero else logradouro
 
     notas = ["Importado do CRM anterior (10/06/2026)."]
