@@ -499,6 +499,88 @@ async def _handle_remarcar_reuniao(
     )
 
 
+async def _handle_cancelar_reuniao(
+    *,
+    conn: Any,
+    lead: dict[str, Any],
+    decisao: Decisao,
+    new_hash: str,
+    jurichat: JurichatClient,
+    calendar: CalendarConfig,
+    mario_conversation_id: str,
+    poll_interval_seconds: int,
+) -> None:
+    """Lead DESMARCOU sem remarcar (pedido Mario 2026-06-10).
+
+    Diferente de remarcar: não oferece novos horários. Cancela o evento
+    no Calendar, limpa a reunião, envia a confirmação do Claude ao lead
+    e — o ponto do pedido — AVISA O MARIO IMEDIATAMENTE no WhatsApp.
+
+    Lead segue em_conversa (pode voltar a marcar depois).
+    """
+    lead_id = lead["id"]
+    conv_id = lead["jurichat_conversation_id"]
+
+    horario_humano = ""
+    if lead["reuniao_em"]:
+        try:
+            reuniao_dt = datetime.datetime.fromisoformat(lead["reuniao_em"])
+            horario_humano = _format_reuniao_human(
+                reuniao_dt.astimezone(datetime.UTC)
+            )
+        except (ValueError, TypeError):
+            horario_humano = lead["reuniao_em"]
+
+    event_id = lead["reuniao_event_id"]
+    if calendar.client is not None and event_id:
+        try:
+            await calendar.client.cancel_event(event_id)
+        except Exception as exc:
+            logger.warning(
+                "cancel_event(desmarcar) lead=%s event=%s: %s — segue",
+                lead_id, event_id, exc,
+            )
+
+    clear_reuniao(conn, lead_id)
+
+    # Confirmação pro lead (mensagem do Claude, sem placeholders).
+    try:
+        await jurichat.start_human_support(conv_id)
+        await jurichat.send_message(conv_id, decisao.mensagem)
+    except Exception as exc:
+        logger.exception(
+            "send_message(cancelar) failed lead=%s: %s", lead_id, exc,
+        )
+
+    schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
+    update_transcript_hash(conn, lead_id, new_hash)
+    transicao(
+        conn, lead_id, Estado.EM_CONVERSA,
+        motivo="claude_cancelar_reuniao",
+        payload={"horario_cancelado": lead["reuniao_em"]},
+    )
+
+    # AVISO IMEDIATO PRO MARIO.
+    try:
+        quando = f" de {horario_humano}" if horario_humano else ""
+        await notify_mario(
+            jurichat,
+            mario_conversation_id=mario_conversation_id,
+            mensagem=(
+                f"❌ *Reunião DESMARCADA pelo lead*\n\n"
+                f"Lead: {lead['contato_nome']}\n"
+                f"Tel: {lead['contato_telefone']}\n"
+                f"Reunião{quando} foi cancelada.\n\n"
+                f"Evento removido do seu Calendar. O lead não pediu "
+                f"novo horário — segue em atendimento."
+            ),
+        )
+    except Exception as exc:
+        logger.exception(
+            "notify_mario(desmarcar) failed lead=%s: %s", lead_id, exc,
+        )
+
+
 async def _handoff_sem_calendar(
     *,
     conn: Any,
@@ -1029,6 +1111,20 @@ async def run_poll_cycle(
             await _handle_remarcar_reuniao(
                 conn=conn, lead=lead, decisao=decisao,
                 transcript=transcript, new_hash=new_hash,
+                jurichat=jurichat,
+                calendar=calendar or CalendarConfig(
+                    client=None, business_hours_start=14,
+                    business_hours_end=19, slot_min=30, buffer_min=0,
+                    lookahead_days=5, num_slots=4,
+                ),
+                mario_conversation_id=mario_conversation_id,
+                poll_interval_seconds=poll_interval_seconds,
+            )
+
+        elif decisao.acao == "cancelar_reuniao":
+            await _handle_cancelar_reuniao(
+                conn=conn, lead=lead, decisao=decisao,
+                new_hash=new_hash,
                 jurichat=jurichat,
                 calendar=calendar or CalendarConfig(
                     client=None, business_hours_start=14,

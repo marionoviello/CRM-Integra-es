@@ -685,6 +685,61 @@ async def test_remarcar_reuniao_cancela_evento_e_oferece_novos(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_cancelar_reuniao_avisa_mario_e_nao_oferece_horarios(db_conn):
+    """Lead DESMARCOU sem remarcar (pedido Mario 2026-06-10): bot cancela
+    evento, NÃO oferece novos horários, e avisa o Mario na hora."""
+    transcript = "Lead: Pode desmarcar a reunião, alguns não vão participar"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+    db_conn.execute(
+        """UPDATE leads SET
+           reuniao_em='2026-06-10T17:00:00-03:00',
+           reuniao_event_id='evt-cancelar',
+           reuniao_meet_link='https://meet.google.com/x',
+           lembrete_24h_enviado_em=datetime('now')
+           WHERE jurichat_conversation_id='C-1'"""
+    )
+
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar()
+    calendar_client.cancel_event = AsyncMock(return_value=None)
+
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="cancelar_reuniao",
+            mensagem="Entendido! Vou desmarcar. Quando quiser retomar, é só chamar.",
+        )
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )
+
+    # Evento cancelado no Calendar
+    calendar_client.cancel_event.assert_awaited_once_with("evt-cancelar")
+    # DB limpo
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["reuniao_em"] is None
+    assert lead["reuniao_event_id"] is None
+    assert lead["lembrete_24h_enviado_em"] is None
+    assert lead["estado"] == Estado.EM_CONVERSA
+    # NÃO ofereceu novos horários
+    calendar_client.find_available_slots.assert_not_awaited()
+    # 2 sends: confirmação ao lead + AVISO ao Mario
+    enviados = jurichat.send_message.call_args_list
+    destinos = [c[0][0] for c in enviados]
+    assert "C-1" in destinos        # confirmação ao lead
+    assert "mario-conv" in destinos  # aviso ao Mario
+    aviso = next(c[0][1] for c in enviados if c[0][0] == "mario-conv")
+    assert "DESMARCADA" in aviso
+    assert lead["contato_nome"] in aviso
+
+
+@pytest.mark.asyncio
 async def test_confirmar_horario_sem_email_guardrail_pede_email(db_conn):
     """Bug real (2026-06-08): Claude pulou turno 1 e foi direto pra
     confirmar SEM email. Guardrail bloqueia e pede email manualmente."""

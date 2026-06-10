@@ -274,15 +274,15 @@ lead, NÃO retorne `confirmar_horario` — retorne `responder` pedindo email.
 
 ### acao = "remarcar_reuniao"
 
-Use quando o lead respondeu a um lembrete pedindo pra remarcar ou
-cancelar a reunião agendada. Sinais:
-- "Não vou poder no horário marcado"
+Use quando o lead tem reunião marcada e quer MUDAR PARA OUTRO HORÁRIO
+(quer continuar com o atendimento, só em outra data). Sinais:
 - "Preciso remarcar"
-- "Surgiu um imprevisto"
 - "Pode mudar pra outro dia?"
+- "Não vou poder nesse horário, tem outro?"
+- "Surgiu um imprevisto, dá pra adiar?"
 
 A `mensagem` deve conter o placeholder `{{HORARIOS}}` — o sistema vai
-cancelar o evento antigo no Google Calendar e oferecer 3 novos horários.
+cancelar o evento antigo no Google Calendar e oferecer novos horários.
 
 Exemplo:
 
@@ -293,6 +293,28 @@ Exemplo:
 NÃO peça email de novo se já temos (já está na transcrição da reunião
 anterior). O fluxo continua direto com `confirmar_horario` no próximo
 turno (lead escolhe novo horário).
+
+### acao = "cancelar_reuniao"
+
+Use quando o lead tem reunião marcada e quer DESMARCAR sem pedir novo
+horário — não quer remarcar agora. Sinais:
+- "Pode desmarcar a reunião"
+- "Não vou mais poder, cancela por favor"
+- "Vamos deixar pra depois / por agora não"
+- "Alguns não vão participar, melhor desmarcar"
+
+DISTINÇÃO CRÍTICA: se o lead quer OUTRO horário → `remarcar_reuniao`.
+Se o lead só quer CANCELAR (sem novo horário agora) → `cancelar_reuniao`.
+
+A `mensagem` é a confirmação pro lead (SEM placeholder). Seja cordial e
+deixe a porta aberta. Exemplo:
+
+```
+"Entendido! Vou desmarcar a reunião então. Se quiserem retomar mais pra frente, é só me chamar — estamos à disposição."
+```
+
+O sistema cancela o evento no Calendar, remove os lembretes e avisa
+nossa equipe na hora. NÃO ofereça novos horários (o lead não pediu).
 
 ---
 
@@ -342,7 +364,7 @@ markdown:
 
 ```json
 {
-  "acao": "responder" | "propor" | "handoff" | "oferecer_horarios" | "confirmar_horario" | "remarcar_reuniao",
+  "acao": "responder" | "propor" | "handoff" | "oferecer_horarios" | "confirmar_horario" | "remarcar_reuniao" | "cancelar_reuniao",
   "mensagem": "<texto a enviar ao lead>",
   "resumo_caso": "<presente em propor e confirmar_horario; 1-2 linhas>",
   "motivo_handoff": "<presente apenas se acao=handoff; 1 linha>",
