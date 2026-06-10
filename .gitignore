@@ -39,3 +39,9 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# arquivos temporários de debug de API
+*.tmp.json
+o.json
+p1.json
+pid.txt
