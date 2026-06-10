@@ -1,0 +1,12 @@
+[Unit]
+Description=Noviello Funil Saude - Relatorio semanal (segunda 08h BRT)
+
+[Timer]
+# Mon 11:00 UTC = segunda 08:00 America/Sao_Paulo. Persistent=true:
+# se o VPS estava fora do ar no horário, dispara assim que subir.
+OnCalendar=Mon *-*-* 11:00:00
+Persistent=true
+Unit=noviello-relatorio.service
+
+[Install]
+WantedBy=timers.target
