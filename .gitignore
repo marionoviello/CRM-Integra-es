@@ -45,3 +45,7 @@ logs/
 o.json
 p1.json
 pid.txt
+
+# planilhas com PII de clientes — NUNCA versionar
+cowork_clientes.xlsx
+*clientes*.xls*
