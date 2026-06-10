@@ -12,7 +12,6 @@ from noviello_funil.outbound import (
     with_retry,
 )
 
-
 # --- Sanitização HTML → WhatsApp -----------------------------------------
 
 def test_sanitize_converts_br_to_newline():

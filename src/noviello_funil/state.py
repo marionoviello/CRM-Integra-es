@@ -9,7 +9,7 @@ import contextlib
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 
@@ -392,10 +392,9 @@ def set_reuniao(
     confusão. Ex: reunião marcada pra daqui a 90 min → lembrete 24h não
     faz sentido, marca como enviado.
     """
-    from datetime import timezone as _tz
-    now = datetime.now(_tz.utc)
+    now = datetime.now(UTC)
     try:
-        reuniao_dt = datetime.fromisoformat(reuniao_em_iso).astimezone(_tz.utc)
+        reuniao_dt = datetime.fromisoformat(reuniao_em_iso).astimezone(UTC)
     except ValueError:
         reuniao_dt = now  # parse falhou — vamos depender do reminder_cycle pra logar
     delta = reuniao_dt - now

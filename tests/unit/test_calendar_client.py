@@ -12,7 +12,6 @@ from noviello_funil.calendar_client import (
     _overlaps_any,
 )
 
-
 TZ = ZoneInfo("America/Sao_Paulo")
 
 

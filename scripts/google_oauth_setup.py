@@ -38,7 +38,6 @@ from typing import Any
 
 import httpx
 
-
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 SCOPE = "https://www.googleapis.com/auth/calendar"
@@ -67,7 +66,7 @@ class _CodeHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(
                 "<h1>Autorização recebida</h1>"
                 "<p>Pode fechar esta aba e voltar pro terminal.</p>"
-                .encode("utf-8")
+                .encode()
             )
         elif "error" in params:
             _CodeHandler.received["error"] = params["error"][0]

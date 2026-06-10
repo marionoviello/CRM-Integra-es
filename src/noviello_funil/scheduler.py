@@ -25,14 +25,6 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
-
-
-def _extrair_email(transcript: str) -> str | None:
-    """Extrai primeiro email válido da transcrição. None se não houver."""
-    m = _EMAIL_RE.search(transcript or "")
-    return m.group(0) if m else None
-
 from noviello_funil.brain import Decisao, DecisaoInvalida
 from noviello_funil.calendar_client import (
     GoogleCalendarClient,
@@ -64,6 +56,15 @@ from noviello_funil.state import (
 )
 
 logger = logging.getLogger(__name__)
+
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+
+
+def _extrair_email(transcript: str) -> str | None:
+    """Extrai primeiro email válido da transcrição. None se não houver."""
+    m = _EMAIL_RE.search(transcript or "")
+    return m.group(0) if m else None
+
 
 OPT_IN_TAGS = frozenset({"Fazer Follow up", "Proposta enviada"})
 
@@ -416,7 +417,6 @@ async def _handle_remarcar_reuniao(
 ) -> None:
     """Cancela evento atual, oferece novos horários."""
     lead_id = lead["id"]
-    conv_id = lead["jurichat_conversation_id"]
 
     event_id = lead["reuniao_event_id"]
     # Sempre tenta cancelar o evento se temos id+client. Sem id, segue
@@ -988,17 +988,16 @@ async def run_reminder_cycle(
     poderia mandar 2h e 30min em sequência se nenhum foi marcado, mas o
     set_reuniao já pré-marca os "perdidos" como enviados).
     """
-    from datetime import timezone as _tz
     conn = get_db()
     leads = list_leads_com_reuniao_futura(conn)
     logger.info("reminder tick: %d leads com reuniao futura", len(leads))
 
-    now = datetime.datetime.now(_tz.utc)
+    now = datetime.datetime.now(datetime.UTC)
     for lead in leads:
         try:
             reuniao_dt = datetime.datetime.fromisoformat(
                 lead["reuniao_em"]
-            ).astimezone(_tz.utc)
+            ).astimezone(datetime.UTC)
         except (ValueError, TypeError) as exc:
             logger.warning(
                 "lead=%s reuniao_em inválido %r: %s",
