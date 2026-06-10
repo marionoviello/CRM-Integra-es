@@ -984,3 +984,84 @@ async def test_sync_lead_ignorado_nao_notifica(db_conn):
 
     assert stats["ignoradas"] == 1
     fake.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_confirmar_horario_faz_intake_juridiq(db_conn):
+    """Lead agendou → intake cria Pessoa no Juridiq com a qualificação."""
+    transcript = (
+        "Lead: jose@exemplo.com\n"
+        "Atendente: Tenho ter 14h\n"
+        "Lead: fechado 14h"
+    )
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar()
+    juridiq = MagicMock()
+    juridiq.search_person_by_phone = AsyncMock(return_value=None)
+    juridiq.create_person = AsyncMock(return_value={"id": "P-NOVO"})
+
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="confirmar_horario",
+            mensagem="Agendado pra {{HORARIO_CONFIRMADO}}! {{MEET_LINK}}",
+            horario_escolhido_iso="2026-06-09T14:00:00-03:00",
+            lead_email="jose@exemplo.com",
+            resumo_caso="Inventário SP, 3 herdeiros",
+        )
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+        juridiq=juridiq,
+    )
+
+    # Intake rodou: buscou por telefone e criou a pessoa
+    juridiq.search_person_by_phone.assert_awaited_once_with("5511999999999")
+    juridiq.create_person.assert_awaited_once()
+    kwargs = juridiq.create_person.call_args.kwargs
+    assert kwargs["name"] == "Maria"
+    assert kwargs["email"] == "jose@exemplo.com"
+    assert "Inventário SP" in kwargs["annotation"]
+    # Notificação pro Mario menciona a ficha criada
+    notify_text = jurichat.send_message.call_args_list[-1][0][1]
+    assert "Juridiq" in notify_text
+
+
+@pytest.mark.asyncio
+async def test_confirmar_horario_sem_juridiq_segue_normal(db_conn):
+    """Sem JURIDIQ_API_KEY (juridiq=None) → agendamento normal, sem intake."""
+    transcript = "Lead: maria@x.com\nLead: 14h"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar()
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="confirmar_horario",
+            mensagem="Agendado {{HORARIO_CONFIRMADO}} {{MEET_LINK}}",
+            horario_escolhido_iso="2026-06-09T14:00:00-03:00",
+            lead_email="maria@x.com",
+            resumo_caso="caso y",
+        )
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+        juridiq=None,
+    )
+
+    calendar_client.create_event.assert_awaited_once()
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["reuniao_em"] is not None  # agendamento intacto

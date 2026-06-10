@@ -33,6 +33,7 @@ from noviello_funil.calendar_client import (
     GoogleCalendarError,
     Slot,
 )
+from noviello_funil.juridiq_client import JuridiqClient, intake_lead_agendado
 from noviello_funil.outbound import (
     JurichatClient,
     format_notification,
@@ -257,6 +258,7 @@ async def _handle_confirmar_horario(
     calendar: CalendarConfig,
     mario_conversation_id: str,
     poll_interval_seconds: int,
+    juridiq: JuridiqClient | None = None,
 ) -> None:
     """Valida horário escolhido, cria evento, handoff, notifica Mario."""
     lead_id = lead["id"]
@@ -394,6 +396,21 @@ async def _handle_confirmar_horario(
         },
     )
 
+    # Intake Juridiq (2026-06-10): lead agendou → cria a Pessoa no
+    # Juridiq com a qualificação completa. Fire-and-forget — o helper
+    # nunca levanta; falha vira log e o agendamento segue intacto.
+    juridiq_person_id: str | None = None
+    if juridiq is not None:
+        juridiq_person_id = await intake_lead_agendado(
+            juridiq,
+            nome=lead["contato_nome"] or "Lead sem nome",
+            telefone=lead["contato_telefone"] or "",
+            email=decisao.lead_email,
+            resumo_caso=decisao.resumo_caso or "(sem resumo)",
+            horario_humano=horario_humano,
+            meet_link=meet_link,
+        )
+
     try:
         notify_text = (
             f"📅 *Agendado via bot*\n\n"
@@ -409,6 +426,8 @@ async def _handle_confirmar_horario(
         )
         if meet_link:
             notify_text += f"\nMeet: {meet_link}"
+        if juridiq_person_id:
+            notify_text += "\nFicha criada no Juridiq ✅"
         await notify_mario(
             jurichat,
             mario_conversation_id=mario_conversation_id,
@@ -724,6 +743,7 @@ async def run_poll_cycle(
     poll_interval_seconds: int = DEFAULT_POLL_INTERVAL_SECONDS,
     calendar: CalendarConfig | None = None,
     bot_user_id: str = "",
+    juridiq: JuridiqClient | None = None,
 ) -> None:
     """Process all em_conversa leads whose poll tick is due."""
     conn = get_db()
@@ -1002,6 +1022,7 @@ async def run_poll_cycle(
                 ),
                 mario_conversation_id=mario_conversation_id,
                 poll_interval_seconds=poll_interval_seconds,
+                juridiq=juridiq,
             )
 
         elif decisao.acao == "remarcar_reuniao":
@@ -1334,6 +1355,14 @@ def main() -> int:
         )
     else:
         calendar_client = None
+
+    # Juridiq é opcional — sem chave, intake automático desligado.
+    juridiq_client: JuridiqClient | None = None
+    if settings.juridiq_api_key:
+        juridiq_client = JuridiqClient(
+            api_key=settings.juridiq_api_key,
+            base_url=settings.juridiq_base_url,
+        )
     # Multi-vertical prompt (imobiliário + sucessório + saúde). Substitui
     # o saude_suplementar.md anterior — vê src/noviello_funil/skills/.
     skill = load_skill("atendente_geral")
@@ -1371,6 +1400,7 @@ def main() -> int:
             max_turnos=settings.max_turnos_por_lead,
             calendar=calendar_config,
             bot_user_id=settings.jurichat_bot_user_id,
+            juridiq=juridiq_client,
         )
         # 3. Reminder cycle envia lembretes 24h/2h/30min antes de
         #    cada reunião agendada.
@@ -1409,6 +1439,8 @@ def main() -> int:
             await jurichat.aclose()
             if calendar_client is not None:
                 await calendar_client.aclose()
+            if juridiq_client is not None:
+                await juridiq_client.aclose()
 
     try:
         return asyncio.run(_full_cycle_with_cleanup())

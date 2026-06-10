@@ -76,6 +76,13 @@ class Settings(BaseSettings):
     # crash em loop), o healthchecks alerta Mario por email. Vazio = off.
     healthcheck_ping_url: str = ""
 
+    # Juridiq (gestão de processos) — intake automático. Quando o lead
+    # agenda reunião via bot, cria a Pessoa no Juridiq com a
+    # qualificação (nome, telefone, email, resumo, Meet). Chave criada
+    # no painel do Juridiq. Vazio = feature off.
+    juridiq_api_key: str = ""
+    juridiq_base_url: str = "https://api.juridiq.com.br"
+
     # CUID do usuário "BOT IA" no Jurichat. Quando setado:
     #   1. start_human_support atribui conversas a ele (selectedUserId)
     #      em vez de sortear humano (isRandom) — conserta atribuição
