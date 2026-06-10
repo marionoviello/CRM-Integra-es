@@ -230,7 +230,7 @@ na transcrição: `texto@dominio.tld`).
 Se ainda não tem email, volte ao Turno 1 (use `responder`).
 
 A `mensagem` deve conter o placeholder literal `{{HORARIOS}}` — o
-sistema vai substituir pelos 3 horários reais da agenda da equipe.
+sistema vai substituir pelos horários reais da agenda da equipe.
 Exemplo:
 
 ```

@@ -68,7 +68,9 @@ class Settings(BaseSettings):
     calendar_slot_min: int = Field(default=30, ge=15, le=180)
     calendar_buffer_min: int = Field(default=0, ge=0, le=60)
     calendar_lookahead_days: int = Field(default=5, ge=1, le=30)
-    calendar_num_slots: int = Field(default=3, ge=1, le=10)
+    # Teto de slots oferecidos. Estratégia "escassez" (2 do primeiro dia
+    # + 1 do seguinte + 1 do próximo) produz até 4.
+    calendar_num_slots: int = Field(default=4, ge=1, le=10)
 
     # Dead-man's switch (healthchecks.io ou similar). Se preenchido, o
     # scheduler faz GET nesse URL ao fim de cada ciclo BEM-SUCEDIDO.

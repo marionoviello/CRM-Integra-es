@@ -121,7 +121,10 @@ async def test_authed_request_retries_on_401(respx_mock):
 # --- find_available_slots -------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_find_slots_returns_first_n_when_calendar_empty(respx_mock):
+async def test_find_slots_estrategia_escassez_2_1_1(respx_mock):
+    """Estratégia escassez (Mario 2026-06-10): 2 slots do primeiro dia
+    (primeiro + último), 1 do dia seguinte, 1 do próximo — em vez de
+    N consecutivos que parecem agenda vazia."""
     respx_mock.post("https://oauth2.googleapis.com/token").mock(
         return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600}),
     )
@@ -138,16 +141,52 @@ async def test_find_slots_returns_first_n_when_calendar_empty(respx_mock):
         slots = await client.find_available_slots(
             business_hours_start=14, business_hours_end=19,
             slot_min=30, buffer_min=0,
-            lookahead_days=5, num_slots=3, now=now,
+            lookahead_days=5, num_slots=4, now=now,
         )
     finally:
         await client.aclose()
 
-    # Calendar vazio + agora 10h → primeiros 3 slots de hoje: 14h, 14h30, 15h
-    assert len(slots) == 3
+    # Calendar vazio: ter 14h (primeiro) + ter 18h30 (último do dia)
+    # + qua 14h + qui 14h
+    assert len(slots) == 4
     assert slots[0].start == _dt(2026, 6, 9, 14, 0)
-    assert slots[1].start == _dt(2026, 6, 9, 14, 30)
-    assert slots[2].start == _dt(2026, 6, 9, 15, 0)
+    assert slots[1].start == _dt(2026, 6, 9, 18, 30)
+    assert slots[2].start == _dt(2026, 6, 10, 14, 0)
+    assert slots[3].start == _dt(2026, 6, 11, 14, 0)
+
+
+@pytest.mark.asyncio
+async def test_find_slots_escassez_dia1_com_um_slot_so(respx_mock):
+    """Dia 1 quase lotado (1 slot livre) → oferece esse 1 + dias seguintes."""
+    respx_mock.post("https://oauth2.googleapis.com/token").mock(
+        return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600}),
+    )
+    # Terça ocupada das 14h às 18h30 — sobra só o slot 18h30-19h
+    respx_mock.post(
+        "https://www.googleapis.com/calendar/v3/freeBusy",
+    ).mock(return_value=httpx.Response(
+        200, json={"calendars": {"primary": {"busy": [
+            {"start": "2026-06-09T14:00:00-03:00",
+             "end":   "2026-06-09T18:30:00-03:00"},
+        ]}}},
+    ))
+
+    now = _dt(2026, 6, 9, 10, 0)
+    client = GoogleCalendarClient(client_id="c", client_secret="s", refresh_token="r")
+    try:
+        slots = await client.find_available_slots(
+            business_hours_start=14, business_hours_end=19,
+            slot_min=30, buffer_min=0,
+            lookahead_days=5, num_slots=4, now=now,
+        )
+    finally:
+        await client.aclose()
+
+    # Dia 1 contribui 1 só (sem duplicar) + qua 14h + qui 14h
+    assert len(slots) == 3
+    assert slots[0].start == _dt(2026, 6, 9, 18, 30)
+    assert slots[1].start == _dt(2026, 6, 10, 14, 0)
+    assert slots[2].start == _dt(2026, 6, 11, 14, 0)
 
 
 @pytest.mark.asyncio

@@ -169,7 +169,7 @@ def _last_lead_message(transcript: str) -> str:
 # --- Calendar handlers --------------------------------------------------
 
 def _format_slots_human(slots: list[Slot]) -> str:
-    """Formata 3 slots como bullet list pro WhatsApp."""
+    """Formata slots como bullet list pro WhatsApp."""
     return "\n".join(f"• {s.format_human()}" for s in slots)
 
 
@@ -1004,7 +1004,7 @@ async def run_poll_cycle(
                 calendar=calendar or CalendarConfig(
                     client=None, business_hours_start=14,
                     business_hours_end=19, slot_min=30, buffer_min=0,
-                    lookahead_days=5, num_slots=3,
+                    lookahead_days=5, num_slots=4,
                 ),
                 mario_conversation_id=mario_conversation_id,
                 poll_interval_seconds=poll_interval_seconds,
@@ -1018,7 +1018,7 @@ async def run_poll_cycle(
                 calendar=calendar or CalendarConfig(
                     client=None, business_hours_start=14,
                     business_hours_end=19, slot_min=30, buffer_min=0,
-                    lookahead_days=5, num_slots=3,
+                    lookahead_days=5, num_slots=4,
                 ),
                 mario_conversation_id=mario_conversation_id,
                 poll_interval_seconds=poll_interval_seconds,
@@ -1033,7 +1033,7 @@ async def run_poll_cycle(
                 calendar=calendar or CalendarConfig(
                     client=None, business_hours_start=14,
                     business_hours_end=19, slot_min=30, buffer_min=0,
-                    lookahead_days=5, num_slots=3,
+                    lookahead_days=5, num_slots=4,
                 ),
                 mario_conversation_id=mario_conversation_id,
                 poll_interval_seconds=poll_interval_seconds,

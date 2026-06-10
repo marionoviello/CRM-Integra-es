@@ -179,11 +179,22 @@ class GoogleCalendarClient:
         num_slots: int,
         now: datetime.datetime | None = None,
     ) -> list[Slot]:
-        """Devolve até ``num_slots`` slots livres nos próximos
-        ``lookahead_days`` dias úteis, dentro do horário comercial.
+        """Slots livres com estratégia de ESCASSEZ (decisão Mario 2026-06-10).
+
+        Em vez dos N primeiros slots consecutivos ("14h, 14h30, 15h" —
+        parece agenda vazia), oferecemos horários espalhados:
+
+          - 2 do primeiro dia útil disponível (primeiro E último livres)
+          - 1 do dia útil seguinte com vaga (primeiro livre)
+          - 1 do dia útil seguinte a esse (primeiro livre)
+
+        Lead percebe agenda concorrida. ``num_slots`` atua como teto
+        (default 4). Com menos dias disponíveis, degrada graciosamente
+        (2+1, ou só 2).
 
         ``now`` é injetável pra testes; default = ``datetime.now(tz)``.
-        Pula sábado, domingo e horários já passados de hoje.
+        Pula sábado, domingo e horários já passados de hoje (com 30 min
+        de antecedência mínima).
         """
         tz = self._tz
         now = (now or datetime.datetime.now(tz)).astimezone(tz)
@@ -194,18 +205,22 @@ class GoogleCalendarClient:
 
         busy = await self._fetch_busy_intervals(start=now, end=end_window)
 
-        # Gerar candidatos: dia a dia, hora a hora dentro do horário comercial.
-        slots: list[Slot] = []
+        # 1. Coleta slots livres AGRUPADOS POR DIA (até 3 dias com vaga).
+        dias_com_vagas: list[list[Slot]] = []
         cursor_day = now.date()
         max_day = end_window.date()
         dias_uteis_visitados = 0
-        while cursor_day <= max_day and dias_uteis_visitados < lookahead_days:
-            # Pula fim de semana.
-            if cursor_day.weekday() >= 5:
+        while (
+            cursor_day <= max_day
+            and dias_uteis_visitados < lookahead_days
+            and len(dias_com_vagas) < 3
+        ):
+            if cursor_day.weekday() >= 5:  # pula fim de semana
                 cursor_day += datetime.timedelta(days=1)
                 continue
             dias_uteis_visitados += 1
 
+            do_dia: list[Slot] = []
             slot_start = datetime.datetime.combine(
                 cursor_day,
                 datetime.time(business_hours_start, 0),
@@ -218,19 +233,30 @@ class GoogleCalendarClient:
             )
             while slot_start + datetime.timedelta(minutes=slot_min) <= day_end:
                 slot_end = slot_start + datetime.timedelta(minutes=slot_min)
-                # Slot só vale se for futuro (com 30 min de antecedência mínima
-                # pra Mario receber notify e estar presente)
                 if slot_start <= now + datetime.timedelta(minutes=30):
                     slot_start = slot_end + datetime.timedelta(minutes=buffer_min)
                     continue
                 if not _overlaps_any(slot_start, slot_end, busy):
-                    slots.append(Slot(start=slot_start, duration_min=slot_min))
-                    if len(slots) >= num_slots:
-                        return slots
+                    do_dia.append(Slot(start=slot_start, duration_min=slot_min))
                 slot_start = slot_end + datetime.timedelta(minutes=buffer_min)
+
+            if do_dia:
+                dias_com_vagas.append(do_dia)
             cursor_day += datetime.timedelta(days=1)
 
-        return slots
+        # 2. Padrão 2+1+1: dia1 primeiro+último, dia2 primeiro, dia3 primeiro.
+        slots: list[Slot] = []
+        if dias_com_vagas:
+            dia1 = dias_com_vagas[0]
+            slots.append(dia1[0])
+            if len(dia1) > 1:
+                slots.append(dia1[-1])
+        if len(dias_com_vagas) > 1:
+            slots.append(dias_com_vagas[1][0])
+        if len(dias_com_vagas) > 2:
+            slots.append(dias_com_vagas[2][0])
+
+        return slots[:num_slots]
 
     async def _fetch_busy_intervals(
         self,
