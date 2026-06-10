@@ -676,6 +676,29 @@ async def sync_jurichat_conversations(
         schedule_next_action_seconds(conn, lead["id"], 0)
         stats["novos"] += 1
 
+        # Alerta de lead novo pro Mario (pedido 2026-06-10). Fire-and-
+        # forget: falha de notificação nunca impede o lead de ser
+        # atendido.
+        if mario_conversation_id:
+            nome = person.get("name") or "(sem nome)"
+            telefone = person.get("phoneNumber") or "?"
+            try:
+                await notify_mario(
+                    jurichat,
+                    mario_conversation_id=mario_conversation_id,
+                    mensagem=(
+                        f"🆕 *Lead novo no funil*\n\n"
+                        f"Nome: {nome}\n"
+                        f"Tel: {telefone}\n\n"
+                        f"O bot (Julia) já está atendendo. Você recebe "
+                        f"novo alerta quando ele agendar ou pedir humano."
+                    ),
+                )
+            except Exception as exc:
+                logger.exception(
+                    "notify_mario(lead_novo) falhou pra %s: %s", nome, exc,
+                )
+
     if is_first_sync:
         logger.info(
             "sync_jurichat_conversations: PRIMEIRA EXECUCAO — %d conversas "
