@@ -18,14 +18,14 @@ sys.path.insert(
 async def test_search_person_encontrada(respx_mock):
     respx_mock.get("https://api.juridiq.com.br/person/search").mock(
         return_value=httpx.Response(200, json={
-            "id": "P-1", "name": "Franklin Crespo",
-            "phone": "5514991817005",
+            "id": "P-1", "name": "Fulano Teste",
+            "phone": "5500000000001",
         }),
     )
 
     client = JuridiqClient("jq-test")
     try:
-        person = await client.search_person_by_phone("5514991817005")
+        person = await client.search_person_by_phone("5500000000001")
     finally:
         await client.aclose()
 
@@ -98,9 +98,9 @@ async def test_intake_cria_pessoa_nova(respx_mock):
     try:
         pid = await intake_lead_agendado(
             client,
-            nome="Franklin Crespo",
-            telefone="5514991817005",
-            email="franklin@gmail.com",
+            nome="Fulano Teste",
+            telefone="5500000000001",
+            email="fulano@exemplo.com",
             resumo_caso="Inventário extrajudicial SP, ~R$800k",
             horario_humano="qua (10/jun) às 14h",
             meet_link="https://meet.google.com/qzf-nzef-aex",
@@ -123,7 +123,7 @@ async def test_intake_idempotente_pessoa_ja_existe(respx_mock):
     """Telefone já cadastrado → NÃO duplica, retorna id existente."""
     respx_mock.get("https://api.juridiq.com.br/person/search").mock(
         return_value=httpx.Response(200, json={
-            "id": "P-EXISTENTE", "name": "Franklin",
+            "id": "P-EXISTENTE", "name": "Fulano",
         }),
     )
     create_route = respx_mock.post("https://api.juridiq.com.br/person/").mock(
@@ -134,7 +134,7 @@ async def test_intake_idempotente_pessoa_ja_existe(respx_mock):
     try:
         pid = await intake_lead_agendado(
             client,
-            nome="Franklin", telefone="5514991817005", email=None,
+            nome="Fulano", telefone="5500000000001", email=None,
             resumo_caso="x", horario_humano="x", meet_link="",
         )
     finally:
