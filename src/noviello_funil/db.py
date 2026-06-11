@@ -50,6 +50,15 @@ CREATE TABLE IF NOT EXISTS webhooks_recebidos (
     recebido_em     TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(fonte, evento_id)
 );
+
+-- Emails de aniversário enviados (idempotência: re-rodar o job no
+-- mesmo dia não duplica o parabéns).
+CREATE TABLE IF NOT EXISTS emails_aniversario (
+    person_id   TEXT NOT NULL,
+    enviado_em  TEXT NOT NULL,
+    email       TEXT,
+    UNIQUE(person_id, enviado_em)
+);
 """
 
 

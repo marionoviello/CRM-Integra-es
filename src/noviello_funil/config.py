@@ -72,6 +72,16 @@ class Settings(BaseSettings):
     # + 1 do seguinte + 1 do próximo) produz até 4.
     calendar_num_slots: int = Field(default=4, ge=1, le=10)
 
+    # SMTP (Google Workspace) — disparo de email de aniversário aos
+    # clientes. smtp_password é uma SENHA DE APP do Google (não a senha
+    # da conta; gerar em myaccount.google.com/apppasswords, exige 2FA).
+    # Vazio = emails desligados (só o alerta WhatsApp pro Mario).
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from_name: str = "Mario Noviello | Noviello Advocacia"
+
     # Dead-man's switch (healthchecks.io ou similar). Se preenchido, o
     # scheduler faz GET nesse URL ao fim de cada ciclo BEM-SUCEDIDO.
     # Se o serviço parar de pingar (timer travado, API key expirada,

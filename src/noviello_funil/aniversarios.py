@@ -19,7 +19,11 @@ vez por dia, de madrugada. Batch burro e robusto > cache esperto.
 import asyncio
 import datetime
 import logging
+import smtplib
 import time
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.utils import formataddr
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -106,8 +110,93 @@ _MESES = [
 ]
 
 
+# --- Email de parabéns -------------------------------------------------------
+#
+# Conteúdo 100% RELACIONAMENTO, zero captação/CTA comercial — email de
+# aniversário com oferta de serviço violaria o tom do Provimento
+# 205/2021 da OAB (publicidade sóbria, sem mercantilização).
+
+def montar_email_parabens(nome: str) -> tuple[str, str, str]:
+    """Retorna (assunto, corpo_texto, corpo_html) do parabéns."""
+    primeiro_nome = nome.strip().split()[0].title() if nome.strip() else "amigo(a)"
+    assunto = f"Feliz aniversário, {primeiro_nome}! 🎉"
+    texto = (
+        f"Olá, {primeiro_nome}!\n\n"
+        "Hoje é um dia especial e não poderíamos deixar passar em "
+        "branco: feliz aniversário!\n\n"
+        "Que este novo ciclo venha cheio de saúde, conquistas e bons "
+        "momentos ao lado de quem você ama.\n\n"
+        "Um grande abraço,\n\n"
+        "Mario Noviello\n"
+        "Noviello Advocacia\n"
+        "www.noviello.adv.br"
+    )
+    html = f"""\
+<html>
+  <body style="font-family: Georgia, 'Times New Roman', serif; color: #2b2b2b;
+               max-width: 560px; margin: 0 auto; padding: 24px;">
+    <div style="border-top: 4px solid #68192E; padding-top: 24px;">
+      <p style="font-size: 17px;">Olá, <strong>{primeiro_nome}</strong>!</p>
+      <p style="font-size: 16px; line-height: 1.6;">
+        Hoje é um dia especial e não poderíamos deixar passar em branco:
+        <strong>feliz aniversário!</strong> 🎉
+      </p>
+      <p style="font-size: 16px; line-height: 1.6;">
+        Que este novo ciclo venha cheio de saúde, conquistas e bons
+        momentos ao lado de quem você ama.
+      </p>
+      <p style="font-size: 16px;">Um grande abraço,</p>
+      <p style="margin-top: 28px; font-size: 15px;">
+        <strong style="color: #68192E;">Mario Noviello</strong><br>
+        Noviello Advocacia<br>
+        <a href="https://www.noviello.adv.br"
+           style="color: #68192E;">www.noviello.adv.br</a>
+      </p>
+    </div>
+  </body>
+</html>"""
+    return assunto, texto, html
+
+
+def enviar_email_parabens(
+    *,
+    smtp_host: str,
+    smtp_port: int,
+    smtp_user: str,
+    smtp_password: str,
+    from_name: str,
+    destinatario: str,
+    nome: str,
+) -> bool:
+    """Envia o email via SMTP (STARTTLS). True só se aceito pelo servidor."""
+    assunto, texto, html = montar_email_parabens(nome)
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = assunto
+    msg["From"] = formataddr((from_name, smtp_user))
+    msg["To"] = destinatario
+    msg.attach(MIMEText(texto, "plain", "utf-8"))
+    msg.attach(MIMEText(html, "html", "utf-8"))
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.sendmail(smtp_user, [destinatario], msg.as_string())
+        logger.info("email de parabéns enviado pra %s <%s>", nome, destinatario)
+        return True
+    except Exception as exc:
+        logger.exception(
+            "email de parabéns FALHOU pra %s <%s>: %s", nome, destinatario, exc,
+        )
+        return False
+
+
 def montar_mensagem(aniversariantes: list[dict], hoje: datetime.date) -> str:
-    """Mensagem WhatsApp-ready pro canal de alertas do Mario."""
+    """Mensagem WhatsApp-ready pro canal de alertas do Mario.
+
+    Itens com ``email_enviado=True`` ganham a marca 📧 — Mario sabe
+    quem já foi coberto pelo email automático e prioriza o WhatsApp
+    pessoal pros demais.
+    """
     cab = (
         f"🎂 *Aniversariantes de hoje* "
         f"({_DIAS[hoje.weekday()]}, {hoje.day:02d}/{_MESES[hoje.month - 1]})\n"
@@ -118,15 +207,19 @@ def montar_mensagem(aniversariantes: list[dict], hoje: datetime.date) -> str:
         contato = f"https://wa.me/{digits}" if digits else (
             a["email"] or "sem contato cadastrado"
         )
-        linhas.append(f"• {a['nome']} — {contato}")
+        marca = " 📧✅" if a.get("email_enviado") else ""
+        linhas.append(f"• {a['nome']} — {contato}{marca}")
 
+    rodape = ""
+    if any(a.get("email_enviado") for a in aniversariantes):
+        rodape = "\n📧✅ = já recebeu email de parabéns automático\n"
     sugestao = (
         "\nSugestão pra colar (toque no link do cliente):\n"
         "_Olá, [nome]! Aqui é o Mario, da Noviello Advocacia. Passando "
         "pra te desejar um feliz aniversário! 🎉 Que seja um ano de "
         "muitas conquistas. Um abraço!_"
     )
-    return cab + "\n" + "\n".join(linhas) + "\n" + sugestao
+    return cab + "\n" + "\n".join(linhas) + "\n" + rodape + sugestao
 
 
 def main() -> int:
@@ -166,6 +259,48 @@ def main() -> int:
     )
     if not aniversariantes:
         return 0
+
+    # Disparo de EMAIL de parabéns (se SMTP configurado). Idempotente
+    # por (person_id, data) — re-rodar o job no mesmo dia não duplica.
+    if settings.smtp_user and settings.smtp_password:
+        from noviello_funil.db import connect, run_migrations
+
+        conn = connect(settings.database_path)
+        run_migrations(conn)
+        try:
+            hoje_str = hoje.isoformat()
+            for a in aniversariantes:
+                if not a["email"]:
+                    continue
+                ja = conn.execute(
+                    "SELECT 1 FROM emails_aniversario "
+                    "WHERE person_id = ? AND enviado_em = ?",
+                    (a["person_id"], hoje_str),
+                ).fetchone()
+                if ja:
+                    a["email_enviado"] = True
+                    continue
+                ok = enviar_email_parabens(
+                    smtp_host=settings.smtp_host,
+                    smtp_port=settings.smtp_port,
+                    smtp_user=settings.smtp_user,
+                    smtp_password=settings.smtp_password,
+                    from_name=settings.smtp_from_name,
+                    destinatario=a["email"],
+                    nome=a["nome"],
+                )
+                if ok:
+                    a["email_enviado"] = True
+                    conn.execute(
+                        "INSERT OR IGNORE INTO emails_aniversario "
+                        "(person_id, enviado_em, email) VALUES (?, ?, ?)",
+                        (a["person_id"], hoje_str, a["email"]),
+                    )
+                time.sleep(1.0)  # gentileza com o SMTP do Google
+        finally:
+            conn.close()
+    else:
+        logger.info("aniversarios: SMTP não configurado — sem email automático")
 
     texto = montar_mensagem(aniversariantes, hoje)
     logger.info("aniversarios:\n%s", texto)

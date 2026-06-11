@@ -95,3 +95,78 @@ async def test_buscar_filtra_pelo_birthdate(respx_mock):
     assert len(result) == 1
     assert result[0]["nome"] == "Aniversariante"
     assert result[0]["telefone"] == "5511911112222"
+
+
+# --- Email de parabéns -------------------------------------------------------
+
+def test_email_parabens_assunto_e_corpo():
+    from noviello_funil.aniversarios import montar_email_parabens
+    assunto, texto, html = montar_email_parabens("cátia de lourdes masullo")
+    assert assunto == "Feliz aniversário, Cátia! 🎉"
+    assert "Cátia" in texto
+    assert "Noviello Advocacia" in texto
+    assert "#68192E" in html  # claret da marca
+    # Relacionamento puro — sem CTA comercial (OAB)
+    for proibido in ("contrat", "consulta grátis", "desconto", "promoç"):
+        assert proibido not in texto.lower()
+
+
+def test_email_parabens_nome_vazio_nao_quebra():
+    from noviello_funil.aniversarios import montar_email_parabens
+    assunto, texto, _ = montar_email_parabens("")
+    assert "amigo(a)" in assunto or "amigo(a)" in texto
+
+
+def test_enviar_email_sucesso_e_falha(monkeypatch):
+    from noviello_funil import aniversarios as mod
+
+    enviados = []
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout=None):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def starttls(self):
+            pass
+        def login(self, u, p):
+            pass
+        def sendmail(self, de, para, corpo):
+            enviados.append((de, para))
+
+    monkeypatch.setattr(mod.smtplib, "SMTP", FakeSMTP)
+    ok = mod.enviar_email_parabens(
+        smtp_host="smtp.gmail.com", smtp_port=587,
+        smtp_user="mario@noviello.adv.br", smtp_password="app-pass",
+        from_name="Mario", destinatario="cliente@x.com", nome="Cliente",
+    )
+    assert ok is True
+    assert enviados == [("mario@noviello.adv.br", ["cliente@x.com"])]
+
+    class BrokenSMTP(FakeSMTP):
+        def login(self, u, p):
+            raise RuntimeError("auth failed")
+
+    monkeypatch.setattr(mod.smtplib, "SMTP", BrokenSMTP)
+    ok = mod.enviar_email_parabens(
+        smtp_host="x", smtp_port=587, smtp_user="u", smtp_password="p",
+        from_name="M", destinatario="c@x.com", nome="C",
+    )  # MUST NOT raise
+    assert ok is False
+
+
+def test_mensagem_marca_quem_recebeu_email():
+    msg = montar_mensagem(
+        [
+            {"nome": "Com Email", "telefone": "5511911112222",
+             "email": "a@x.com", "person_id": "P1", "email_enviado": True},
+            {"nome": "Sem Email", "telefone": "5511933334444",
+             "email": "", "person_id": "P2"},
+        ],
+        datetime.date(2026, 6, 11),
+    )
+    assert "Com Email — https://wa.me/5511911112222 📧✅" in msg
+    assert "Sem Email — https://wa.me/5511933334444" in msg
+    assert "já recebeu email" in msg
