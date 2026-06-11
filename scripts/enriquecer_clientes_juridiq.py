@@ -99,8 +99,10 @@ def main() -> int:
         body = montar_payload(row)
         doc = body.get("document", "")
         pid = indice.get(doc) if doc else None
+        match_por_nome = False
         if not pid:
             pid = indice.get(_norm_name(body["name"]))
+            match_por_nome = pid is not None
         if not pid:
             nao_encontrados.append(body["name"])
             continue
@@ -116,8 +118,26 @@ def main() -> int:
         atual = resp.json()
         atual = atual.get("data", atual)
 
+        # Guarda contra HOMÔNIMO (auditoria 2026-06-11): match por NOME
+        # é fraco — duas pessoas com o mesmo nome são comuns. Nesse
+        # caso: (a) se o alvo tem documento DIFERENTE do da planilha,
+        # é outra pessoa → pula; (b) nunca gravar dados identitários
+        # (document/rg/birthDate) via match por nome.
+        campos_permitidos = list(CAMPOS)
+        if match_por_nome:
+            doc_alvo = str(atual.get("document") or "").strip()
+            if doc and doc_alvo and doc_alvo != doc:
+                print(
+                    f"  AVISO: {body['name']!r} — homônimo com documento "
+                    f"divergente no Juridiq, pulando"
+                )
+                continue
+            campos_permitidos = [
+                c for c in CAMPOS if c not in ("document", "rg", "birthDate")
+            ]
+
         patch = {}
-        for campo in CAMPOS:
+        for campo in campos_permitidos:
             novo = body.get(campo)
             existente = atual.get(campo)
             if novo and not (existente and str(existente).strip()):

@@ -148,22 +148,24 @@ def main() -> int:
         dj_data, dj_status = consultar_datajud(dj, pn)
         jq_data = s.get("lastMovementDate")
 
-        jq_dt = None
-        if jq_data:
+        def _parse_aware(raw: object) -> datetime.datetime | None:
+            """ISO → datetime AWARE (naive assume UTC). Sem isso,
+            comparar lastMovementDate naive do Juridiq com dataHora
+            aware do DataJud estoura TypeError (auditoria 2026-06-11)."""
+            if not raw:
+                return None
             try:
-                jq_dt = datetime.datetime.fromisoformat(
-                    str(jq_data).replace("Z", "+00:00")
+                dt = datetime.datetime.fromisoformat(
+                    str(raw).replace("Z", "+00:00")
                 )
             except ValueError:
-                pass
-        dj_dt = None
-        if dj_data:
-            try:
-                dj_dt = datetime.datetime.fromisoformat(
-                    str(dj_data).replace("Z", "+00:00")
-                )
-            except ValueError:
-                pass
+                return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.UTC)
+            return dt
+
+        jq_dt = _parse_aware(jq_data)
+        dj_dt = _parse_aware(dj_data)
 
         linha = {
             "processo": pn,
