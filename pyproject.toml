@@ -27,6 +27,7 @@ dev = [
 [project.scripts]
 noviello-followup = "noviello_funil.scheduler:main"
 noviello-relatorio = "noviello_funil.relatorio:main"
+noviello-aniversarios = "noviello_funil.aniversarios:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,0 +1,13 @@
+[Unit]
+Description=Noviello Funil Saude - Aniversariantes do dia (08h BRT)
+
+[Timer]
+# 11:00 UTC = 08:00 America/Sao_Paulo. Persistent=true: VPS desligado
+# no horário → roda assim que subir. Substitui o email diário das 05h
+# do Juridiq por alerta acionável no WhatsApp do Mario.
+OnCalendar=*-*-* 11:00:00
+Persistent=true
+Unit=noviello-aniversarios.service
+
+[Install]
+WantedBy=timers.target
