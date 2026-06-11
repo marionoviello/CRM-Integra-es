@@ -42,12 +42,12 @@ from noviello_funil.outbound import (
 from noviello_funil.state import (
     CLEAR_PROXIMA_ACAO,
     Estado,
-    clear_next_action,
     clear_reuniao,
     create_lead_if_absent,
     get_lead_by_conversation,
     list_leads_com_reuniao_futura,
     list_leads_para_polling,
+    list_leads_para_reativacao,
     list_leads_vencidos,
     mark_lead_activity_now,
     mark_lembrete_enviado,
@@ -914,6 +914,49 @@ async def run_poll_cycle(
 ) -> None:
     """Process all em_conversa leads whose poll tick is due."""
     conn = get_db()
+
+    # FASE 0 — REATIVAÇÃO (auditoria 2026-06-11, HIGH): leads em
+    # FU1/FU2/encerrado que RESPONDERAM voltam pra em_conversa. Antes,
+    # o polling era estritamente em_conversa: a resposta do lead ao
+    # follow-up era invisível e ele ainda levava FU2 + encerramento.
+    # Não atualizamos o hash na reativação — o tick seguinte detecta a
+    # mudança e faz a triagem normal da mensagem nova.
+    for lead in list_leads_para_reativacao(conn):
+        if (
+            mario_conversation_id
+            and lead["jurichat_conversation_id"] == mario_conversation_id
+        ):
+            continue
+        try:
+            conv = await jurichat.get_conversation(
+                lead["jurichat_conversation_id"]
+            )
+        except Exception as exc:
+            logger.warning(
+                "reativacao: get_conversation falhou lead=%s: %s",
+                lead["id"], exc,
+            )
+            continue
+        transcript = conv.get("transcription", "") or ""
+        new_hash = _compute_hash(transcript)
+        if new_hash == lead["ultimo_transcript_hash"]:
+            continue
+        if _last_line_from_atendente(transcript):
+            # Mudança veio do NOSSO próprio follow-up (ou humano) —
+            # registra o hash pra não re-checar, sem reativar.
+            update_transcript_hash(conn, lead["id"], new_hash)
+            continue
+        logger.info(
+            "lead=%s respondeu em estado %s — reativando pra em_conversa",
+            lead["id"], lead["estado"],
+        )
+        mark_lead_activity_now(conn, lead["id"])
+        transicao(
+            conn, lead["id"], Estado.EM_CONVERSA,
+            motivo="lead_respondeu_reativacao",
+        )
+        schedule_next_action_seconds(conn, lead["id"], 0)
+
     leads = list_leads_para_polling(conn)
     logger.info("poll tick: %d leads em_conversa due", len(leads))
 
@@ -1400,10 +1443,11 @@ async def run_followup_cycle(
     gerar_followup_msg: Callable[..., Awaitable[str]],
     followup_2_apos_horas: int,
     encerramento_apos_horas: int,
+    followup_1_apos_horas: int = 48,
 ) -> None:
     """Process all due leads in a single pass."""
     conn = get_db()
-    vencidos = list_leads_vencidos(conn)
+    vencidos = list_leads_vencidos(conn, fu1_apos_horas=followup_1_apos_horas)
     logger.info("scheduler tick: %d leads vencidos", len(vencidos))
 
     for lead in vencidos:
@@ -1415,8 +1459,17 @@ async def run_followup_cycle(
             continue
 
         if not is_eligible_for_followup(tags):
+            # Tag de exclusão (Cliente Ativo etc.) = humano cuida.
+            # Transiciona pra AGUARDANDO_HUMANO — antes só limpava
+            # proxima_acao_em, o que com o critério novo (ultima_msg)
+            # faria o lead ser re-avaliado a cada tick pra sempre.
             register_error(conn, lead["id"], "excluido_followup_etiqueta")
-            clear_next_action(conn, lead["id"])
+            transicao(
+                conn, lead["id"], Estado.AGUARDANDO_HUMANO,
+                motivo="excluido_followup_etiqueta",
+                payload={"tags": list(tags)},
+                proxima_acao_horas=CLEAR_PROXIMA_ACAO,
+            )
             continue
 
         estado = lead["estado"]
@@ -1597,6 +1650,7 @@ def main() -> int:
             gerar_followup_msg=bound_followup,
             followup_2_apos_horas=settings.followup_2_apos_horas,
             encerramento_apos_horas=settings.encerramento_apos_horas,
+            followup_1_apos_horas=settings.followup_1_apos_horas,
         )
 
     async def _full_cycle_with_cleanup() -> int:

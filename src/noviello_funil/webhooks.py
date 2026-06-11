@@ -214,6 +214,16 @@ def build_lead_message_processor(
         if lead["estado"] == Estado.AGUARDANDO_HUMANO:
             return
 
+        # Leads em FU1/FU2: NÃO adiantar proxima_acao_em — esse relógio
+        # agenda o PRÓXIMO follow-up, e zerá-lo dispararia FU2/encerra-
+        # mento imediato (auditoria 2026-06-11). A reativação por
+        # resposta do lead é detectada pelo poll cycle (fase 0) via
+        # hash do transcript.
+        if lead["estado"] in (
+            Estado.FOLLOW_UP_1_ENVIADO, Estado.FOLLOW_UP_2_ENVIADO,
+        ):
+            return
+
         # Wake the poller: set proxima_acao_em = now (1s ahead to avoid
         # racing the current tick).
         # Using horas=0 with a positive seconds offset isn't supported by

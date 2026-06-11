@@ -416,14 +416,23 @@ async def test_active_em_conversa_picked_by_poll_not_by_followup(db_conn):
 
 @pytest.mark.asyncio
 async def test_idle_em_conversa_still_picked_by_followup(db_conn):
-    """Sanity check the other side of the carve-out: a lead in em_conversa
-    that has been idle > 24h (or has no recorded activity) IS picked up
-    by the follow-up cycle."""
-    # No ultima_msg_lead_em recorded → counts as idle → follow-up picks it.
+    """Contrato novo (auditoria 2026-06-11): em_conversa ocioso ha mais
+    de fu1_apos_horas (COALESCE(ultima_msg, criado_em)) vence pro
+    follow-up MESMO com proxima_acao_em reagendada pelo poll (fix
+    starvation). E lead recem-criado sem msg NAO vence."""
     _insert_lead_due_for_poll(db_conn, ultima_msg_lead_em=None)
+    db_conn.execute(
+        "UPDATE leads SET criado_em = datetime('now', '-50 hours') "
+        "WHERE jurichat_conversation_id = 'C-1'"
+    )
 
     from noviello_funil.state import list_leads_vencidos
-    assert len(list_leads_vencidos(db_conn)) == 1
+    assert len(list_leads_vencidos(db_conn, fu1_apos_horas=48)) == 1
+    db_conn.execute(
+        "UPDATE leads SET criado_em = datetime('now') "
+        "WHERE jurichat_conversation_id = 'C-1'"
+    )
+    assert len(list_leads_vencidos(db_conn, fu1_apos_horas=48)) == 0
 
 
 @pytest.mark.asyncio
@@ -1336,3 +1345,89 @@ async def test_confirmar_segunda_reuniao_cancela_evento_antigo(db_conn):
     calendar_client.create_event.assert_awaited_once()
     lead = get_lead_by_conversation(db_conn, "C-1")
     assert lead["reuniao_event_id"] == "evt-1"  # o novo (mock retorna evt-1)
+
+
+# --- Auditoria 2026-06-11: reativação de leads (Grupo A) ------------------
+
+def _insert_lead_estado(conn, estado, *, conv="C-1", hash_=None):
+    conn.execute(
+        """INSERT INTO leads
+           (jurichat_lead_id, jurichat_conversation_id, contato_telefone,
+            contato_nome, estado, ultimo_transcript_hash)
+           VALUES ('L-1', ?, '5511999999999', 'Maria', ?, ?)""",
+        (conv, estado, hash_),
+    )
+
+
+@pytest.mark.asyncio
+async def test_lead_em_fu1_que_responde_eh_reativado(db_conn):
+    """HIGH da auditoria: resposta de lead em FU1 era invisível (polling
+    só olhava em_conversa) e ele ainda levava FU2 + encerramento."""
+    transcript = "Atendente: Oi! Conseguiu ver?\nLead: sim! quero continuar"
+    _insert_lead_estado(db_conn, Estado.FOLLOW_UP_1_ENVIADO, hash_="stale")
+
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = await _triagem_returning(
+        Decisao(acao="responder", mensagem="Que bom!")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA
+    assert lead["proxima_acao_em"] is not None  # de volta no polling
+
+
+@pytest.mark.asyncio
+async def test_lead_encerrado_que_volta_eh_reativado(db_conn):
+    """HIGH da auditoria: lead que mandava mensagem após o encerramento
+    silencioso ficava invisível pra sempre."""
+    transcript = "Lead: oi, voltei! ainda dá pra fazer o inventário?"
+    _insert_lead_estado(db_conn, Estado.ENCERRADO_SEM_RESPOSTA, hash_="stale")
+
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = await _triagem_returning(
+        Decisao(acao="responder", mensagem="Claro!")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA
+
+
+@pytest.mark.asyncio
+async def test_fu_proprio_nao_reativa_lead(db_conn):
+    """O hash muda quando NOSSO follow-up entra na transcrição — isso
+    não pode reativar (loop infinito FU→reativa→FU)."""
+    transcript = "Lead: oi\nAtendente: Oi! Conseguiu ver aquilo?"  # FU nosso
+    _insert_lead_estado(db_conn, Estado.FOLLOW_UP_1_ENVIADO, hash_="stale")
+
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = AsyncMock(side_effect=AssertionError("não deve triagem"))
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.FOLLOW_UP_1_ENVIADO  # não reativou
+    # hash registrado pra não re-checar a mesma mudança todo tick
+    assert lead["ultimo_transcript_hash"] is not None
+    assert lead["ultimo_transcript_hash"] != "stale"

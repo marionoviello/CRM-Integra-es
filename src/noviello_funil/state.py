@@ -339,37 +339,77 @@ def update_transcript_hash(
     )
 
 
-def list_leads_vencidos(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """For the follow-up cycle: leads whose proxima_acao_em has passed AND
-    are in a non-terminal state.
+def list_leads_vencidos(
+    conn: sqlite3.Connection, *, fu1_apos_horas: int = 48,
+) -> list[sqlite3.Row]:
+    """For the follow-up cycle.
 
-    Carve-out: em_conversa leads with activity in the last 24h are EXCLUDED
-    here — they are owned by the polling cycle (which reschedules
-    proxima_acao_em every minute). Without this exclusion the follow-up
-    cycle would fire immediately for every active polled conversation.
+    Auditoria 2026-06-11 — dois HIGHs corrigidos nesta query:
 
-    em_conversa leads with NO recorded activity (ultima_msg_lead_em IS NULL)
-    or last activity > 24h ago ARE included — those are genuinely idle and
-    should receive a follow-up nudge.
+    1. STARVATION do FU1: o critério antigo pra em_conversa era
+       ``proxima_acao_em < now`` — mas o poll cycle REAGENDA
+       proxima_acao_em a cada tick (+60s), então o follow-up só via o
+       lead na janela de corrida intra-tick. Lead idle podia ficar
+       semanas sem FU1. Agora em_conversa usa um relógio próprio:
+       ``ultima_msg_lead_em`` (ou criado_em, se nunca houve msg) mais
+       velho que ``fu1_apos_horas``.
+
+    2. Lead com REUNIÃO MARCADA entrava no funil de follow-up
+       ("percebi que talvez não seja o momento...") enquanto o
+       reminder cycle mandava lembretes da reunião — mensagens
+       contraditórias pra lead convertido. ``reuniao_em IS NULL`` em
+       todos os ramos.
+
+    FU1/FU2 continuam pelo relógio próprio (proxima_acao_em, setado
+    na transição com +72h/+24h).
     """
+    horas = int(fu1_apos_horas)
     return conn.execute(
-        """
+        f"""
         SELECT * FROM leads
-        WHERE proxima_acao_em IS NOT NULL
-          AND proxima_acao_em < datetime('now')
-          AND estado IN (?, ?, ?)
+        WHERE reuniao_em IS NULL
           AND (
-              estado != ?
-              OR ultima_msg_lead_em IS NULL
-              OR ultima_msg_lead_em < datetime('now', '-24 hours')
+            (
+              estado = ?
+              AND COALESCE(ultima_msg_lead_em, criado_em)
+                  < datetime('now', '-{horas} hours')
+            )
+            OR (
+              estado IN (?, ?)
+              AND proxima_acao_em IS NOT NULL
+              AND proxima_acao_em < datetime('now')
+            )
           )
-        ORDER BY proxima_acao_em ASC
+        ORDER BY atualizado_em ASC
         """,
         (
             Estado.EM_CONVERSA,
             Estado.FOLLOW_UP_1_ENVIADO,
             Estado.FOLLOW_UP_2_ENVIADO,
-            Estado.EM_CONVERSA,
+        ),
+    ).fetchall()
+
+
+def list_leads_para_reativacao(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Leads em FU1/FU2/encerrado — candidatos a REATIVAÇÃO.
+
+    Auditoria 2026-06-11 (HIGH): o polling era estritamente em_conversa,
+    então lead que RESPONDIA ao follow-up (ou voltava depois do
+    encerramento) era invisível — e ainda levava FU2/encerramento em
+    cima da resposta. O poll cycle agora varre esses estados a cada
+    tick comparando o hash do transcript; mensagem nova do lead →
+    volta pra em_conversa.
+    """
+    return conn.execute(
+        """
+        SELECT * FROM leads
+        WHERE estado IN (?, ?, ?)
+        ORDER BY atualizado_em ASC
+        """,
+        (
+            Estado.FOLLOW_UP_1_ENVIADO,
+            Estado.FOLLOW_UP_2_ENVIADO,
+            Estado.ENCERRADO_SEM_RESPOSTA,
         ),
     ).fetchall()
 

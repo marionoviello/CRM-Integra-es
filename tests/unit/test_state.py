@@ -130,8 +130,19 @@ def test_register_error_sets_flag(db_conn):
 
 
 def test_list_leads_vencidos_returns_only_due_and_active(db_conn):
+    """Contrato novo (auditoria 2026-06-11): em_conversa vence pelo
+    relógio de OCIOSIDADE (ultima_msg_lead_em/criado_em > fu1_apos_horas
+    atrás) e NUNCA com reunião marcada; FU1/FU2 vencem por
+    proxima_acao_em."""
     import datetime
 
+    conn = db_conn
+    idle_50h = (datetime.datetime.utcnow() - datetime.timedelta(hours=50)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    recente = (datetime.datetime.utcnow() - datetime.timedelta(hours=2)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
     past = (datetime.datetime.utcnow() - datetime.timedelta(hours=1)).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
@@ -139,31 +150,30 @@ def test_list_leads_vencidos_returns_only_due_and_active(db_conn):
         "%Y-%m-%d %H:%M:%S"
     )
 
-    # Lead 1: due, em_conversa → should appear
-    conn = db_conn
-    conn.execute(
-        """INSERT INTO leads (jurichat_lead_id, jurichat_conversation_id,
-                              contato_telefone, estado, proxima_acao_em)
-           VALUES (?, ?, ?, ?, ?)""",
-        ("L-due", "C-due", "5511...", Estado.EM_CONVERSA, past),
-    )
-    # Lead 2: not yet due
-    conn.execute(
-        """INSERT INTO leads (jurichat_lead_id, jurichat_conversation_id,
-                              contato_telefone, estado, proxima_acao_em)
-           VALUES (?, ?, ?, ?, ?)""",
-        ("L-future", "C-future", "5511...", Estado.EM_CONVERSA, future),
-    )
-    # Lead 3: due but in terminal state → should NOT appear
-    conn.execute(
-        """INSERT INTO leads (jurichat_lead_id, jurichat_conversation_id,
-                              contato_telefone, estado, proxima_acao_em)
-           VALUES (?, ?, ?, ?, ?)""",
-        ("L-handed", "C-handed", "5511...", Estado.AGUARDANDO_HUMANO, past),
-    )
+    def ins(lid, estado, *, ultima=None, proxima=None, reuniao=None):
+        conn.execute(
+            """INSERT INTO leads (jurichat_lead_id, jurichat_conversation_id,
+                                  contato_telefone, estado, ultima_msg_lead_em,
+                                  proxima_acao_em, reuniao_em)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (lid, f"C-{lid}", "5511...", estado, ultima, proxima, reuniao),
+        )
 
-    vencidos = list_leads_vencidos(conn)
+    # em_conversa ocioso 50h, MESMO com proxima_acao_em no futuro
+    # (poll reagendando) → DEVE vencer (fix starvation)
+    ins("L-idle", Estado.EM_CONVERSA, ultima=idle_50h, proxima=future)
+    # em_conversa ativo (msg há 2h) → não vence
+    ins("L-ativo", Estado.EM_CONVERSA, ultima=recente, proxima=past)
+    # em_conversa ocioso COM REUNIÃO marcada → não vence (carve-out)
+    ins("L-reuniao", Estado.EM_CONVERSA, ultima=idle_50h,
+        reuniao="2027-06-15T15:00:00-03:00")
+    # FU1 com relógio vencido → vence
+    ins("L-fu1", Estado.FOLLOW_UP_1_ENVIADO, proxima=past)
+    # FU1 com relógio no futuro → não vence
+    ins("L-fu1-fut", Estado.FOLLOW_UP_1_ENVIADO, proxima=future)
+    # terminal → nunca
+    ins("L-handed", Estado.AGUARDANDO_HUMANO, ultima=idle_50h, proxima=past)
+
+    vencidos = list_leads_vencidos(conn, fu1_apos_horas=48)
     ids = {row["jurichat_lead_id"] for row in vencidos}
-    assert "L-due" in ids
-    assert "L-future" not in ids
-    assert "L-handed" not in ids
+    assert ids == {"L-idle", "L-fu1"}
