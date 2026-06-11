@@ -277,7 +277,13 @@ class JurichatClient:
         # "Lead: <texto>\nAtendente: <texto>\n..."
         lines: list[str] = []
         for msg in messages:
-            content = (msg.get("content") or "").strip()
+            # Achata whitespace interno (incl. newlines) — o poll cycle
+            # assume "1 mensagem = 1 linha" (_last_line_from_atendente,
+            # _count_lead_lines, _last_lead_message em scheduler.py).
+            # Newline preservado numa msg OUTBOUND multi-linha (ex.:
+            # bullets do oferecer_horarios) fura o Signal 1 e re-invoca
+            # o Claude sobre a própria resposta do bot.
+            content = " ".join((msg.get("content") or "").split())
             if not content:
                 continue
             direction = msg.get("direction", "")

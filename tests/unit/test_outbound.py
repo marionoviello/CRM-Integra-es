@@ -179,6 +179,50 @@ async def test_jurichat_get_conversation_returns_transcript(respx_mock):
 
 
 @pytest.mark.asyncio
+async def test_jurichat_get_conversation_flattens_multiline_messages(respx_mock):
+    """Mensagem multi-linha (ex.: bullets do oferecer_horarios) vira UMA
+    linha física no transcript sintético. O poll cycle assume o contrato
+    "1 mensagem = 1 linha" (_last_line_from_atendente, _count_lead_lines,
+    _last_lead_message em scheduler.py) — newline interno preservado faz
+    o Signal 1 furar e o Claude ser re-invocado sobre a própria resposta."""
+    respx_mock.get(
+        "https://api.jurichat.com/conversation/C-1"
+    ).mock(return_value=httpx.Response(
+        200, json={
+            "data": {
+                "id": "C-1",
+                "person": {"name": "Maria"},
+                "messages": [
+                    {
+                        "content": "quero agendar\npode ser de manhã?",
+                        "direction": "INBOUND", "type": "text",
+                    },
+                    {
+                        "content": (
+                            "Tenho estes horários:\n• ter 14h00\n"
+                            "• qua 10h00\nQual prefere?"
+                        ),
+                        "direction": "OUTBOUND", "type": "text",
+                    },
+                ],
+            },
+        },
+    ))
+
+    client = JurichatClient("jk-test", "https://api.jurichat.com")
+    try:
+        result = await client.get_conversation("C-1")
+    finally:
+        await client.aclose()
+
+    lines = result["transcription"].splitlines()
+    assert lines == [
+        "Lead: quero agendar pode ser de manhã?",
+        "Atendente: Tenho estes horários: • ter 14h00 • qua 10h00 Qual prefere?",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_jurichat_get_lead_tags_returns_list(respx_mock):
     respx_mock.get(
         "https://api.jurichat.com/crm/lead/L-1"

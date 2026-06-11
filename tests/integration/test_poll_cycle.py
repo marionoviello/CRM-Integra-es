@@ -16,10 +16,12 @@ import hashlib
 from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 
 from noviello_funil.brain import Decisao, DecisaoInvalida
 from noviello_funil.calendar_client import Slot
+from noviello_funil.outbound import JurichatClient
 from noviello_funil.scheduler import (
     CalendarConfig,
     run_followup_cycle,
@@ -231,6 +233,64 @@ async def test_last_line_outbound_does_not_handoff_just_reschedules(db_conn):
     triagem_fn.assert_not_called()
     # Nada foi enviado pra ninguém.
     jurichat.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_outbound_multiline_last_message_does_not_reinvoke_claude(
+    db_conn, respx_mock,
+):
+    """Regressão: resposta multi-linha do PRÓPRIO BOT (ex.: bullets do
+    oferecer_horarios terminando em "Qual prefere?") não pode furar o
+    Signal 1. Usa o get_conversation REAL (via respx) porque o bug morava
+    no builder do transcript: newline interno preservado fazia a última
+    linha física não começar com "Atendente:", o Signal 1 falhava e o
+    Claude era re-invocado sobre a própria mensagem do bot (custo de API
+    + risco de resposta duplicada ao lead)."""
+    respx_mock.get("https://api.jurichat.com/conversation/C-1").mock(
+        return_value=httpx.Response(200, json={
+            "data": {
+                "id": "C-1",
+                "person": {"name": "Maria"},
+                "messages": [
+                    {
+                        "content": "quero agendar",
+                        "direction": "INBOUND", "type": "text",
+                    },
+                    {
+                        "content": (
+                            "Tenho estes horários:\n• ter 14h00\n"
+                            "• qua 10h00\nQual prefere?"
+                        ),
+                        "direction": "OUTBOUND", "type": "text",
+                    },
+                ],
+            },
+        })
+    )
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = JurichatClient("jk-test", "https://api.jurichat.com")
+    triagem_fn = AsyncMock(side_effect=AssertionError("must not call Claude"))
+    try:
+        await run_poll_cycle(
+            get_db=lambda: db_conn,
+            jurichat=jurichat,
+            triagem_fn=triagem_fn,
+            mario_conversation_id="mario-conv",
+            max_turnos=20,
+        )
+    finally:
+        await jurichat.aclose()
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    # Última mensagem é do bot → só atualiza hash e reschedule.
+    assert lead["estado"] == Estado.EM_CONVERSA
+    assert lead["proxima_acao_em"] is not None
+    assert lead["ultimo_transcript_hash"] == _sha(
+        "Lead: quero agendar\n"
+        "Atendente: Tenho estes horários: • ter 14h00 • qua 10h00 Qual prefere?"
+    )
+    triagem_fn.assert_not_called()
 
 
 @pytest.mark.asyncio
