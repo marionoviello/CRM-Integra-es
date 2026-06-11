@@ -43,15 +43,15 @@ _MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
 # coletivo ("nossa equipe"). Skill instrui mas Claude desliza —
 # sanitizamos antes de mandar pro lead como defesa em profundidade.
 # Cobre: "Dr. Mario Noviello", "Mario Noviello", "Dr. Mario",
-# "(o|O) Mario", "Mario" standalone. Word boundary protege "Marina",
-# "Mariolândia" etc.
+# "(o|O) Mario", "Mario" standalone — COM ou SEM acento ("Mário",
+# auditoria 2026-06-11). Word boundary protege "Marina", "Mariolândia".
 _NOME_INDIVIDUAL_RE = re.compile(
-    r"\b(?:[oa]\s+)?(?:Dr\.?\s+|Dra\.?\s+)?Mario(?:\s+Noviello)?\b",
+    r"\b(?:[oa]\s+)?(?:Dr\.?\s+|Dra\.?\s+)?M[aá]rio(?:\s+Noviello)?\b",
     re.IGNORECASE,
 )
 
 
-def _sanitize_for_whatsapp(text: str) -> str:
+def _sanitize_for_whatsapp(text: str, *, brand: bool = True) -> str:
     """Remove HTML que Claude eventualmente gera e que WhatsApp não renderiza.
 
     Bug reportado 2026-06-08: Claude respondeu com ``<br />`` literal,
@@ -61,8 +61,11 @@ def _sanitize_for_whatsapp(text: str) -> str:
 
     Bug reportado 2026-06-09: Claude diz "Dr. Mario Noviello" etc.
     Substituímos por "nossa equipe" — texto pode ficar levemente off
-    gramaticalmente ("pra nossa equipe" em vez de "pro Mario"), mas
-    a regra de marca é mais importante.
+    gramaticalmente, mas a regra de marca é mais importante.
+
+    ``brand=False`` desliga só a substituição de nome (auditoria
+    2026-06-11): notificações INTERNAS pro Mario continham nomes de
+    leads chamados Mario que viravam "nossa equipe" — alerta ilegível.
     """
     if not text:
         return text
@@ -72,7 +75,8 @@ def _sanitize_for_whatsapp(text: str) -> str:
     out = _LI_OPEN_RE.sub("• ", out)
     out = _LI_CLOSE_RE.sub("\n", out)
     out = _ANY_TAG_RE.sub("", out)
-    out = _NOME_INDIVIDUAL_RE.sub("nossa equipe", out)
+    if brand:
+        out = _NOME_INDIVIDUAL_RE.sub("nossa equipe", out)
     out = _MULTI_NEWLINE_RE.sub("\n\n", out)
     return out.strip()
 
@@ -206,6 +210,7 @@ class JurichatClient:
         text: str,
         *,
         base_delay: float = 1.0,
+        brand_sanitize: bool = True,
     ) -> dict[str, Any]:
         """POST /conversation/send-message (multipart/form-data).
 
@@ -221,7 +226,7 @@ class JurichatClient:
         ``text`` é saneado via ``_sanitize_for_whatsapp`` — remove HTML
         que eventualmente vaza do Claude (ver helper).
         """
-        clean_text = _sanitize_for_whatsapp(text)
+        clean_text = _sanitize_for_whatsapp(text, brand=brand_sanitize)
 
         async def op() -> dict[str, Any]:
             resp = await self._client.post(
@@ -440,6 +445,11 @@ async def notify_mario(
         # Pré-requisito: a conversa do Mario também precisa estar em
         # human-support mode. Idempotente.
         await client.start_human_support(mario_conversation_id)
-        await client.send_message(mario_conversation_id, mensagem)
+        # brand_sanitize=False: notificação INTERNA — nome de lead
+        # chamado "Mario" não pode virar "nossa equipe" no alerta
+        # (auditoria 2026-06-11).
+        await client.send_message(
+            mario_conversation_id, mensagem, brand_sanitize=False,
+        )
     except (OutboundError, httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.error("notify_mario failed: %s", exc)

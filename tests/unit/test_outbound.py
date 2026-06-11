@@ -422,8 +422,8 @@ async def test_notify_mario_swallows_outbound_error_silently(respx_mock, caplog)
         # uses default 1s base. To keep test fast we patch via a wrapper:
         original = client.send_message
 
-        async def fast_send(conv, txt, *, base_delay=0.001):
-            return await original(conv, txt, base_delay=base_delay)
+        async def fast_send(conv, txt, *, base_delay=0.001, **kw):
+            return await original(conv, txt, base_delay=base_delay, **kw)
 
         client.send_message = fast_send  # type: ignore[method-assign]
         await notify_mario(
@@ -497,3 +497,43 @@ async def test_start_human_support_sem_bot_user_id_usa_isRandom(respx_mock):
     import json as _json
     body = _json.loads(route.calls.last.request.read())
     assert body == {"conversationId": "C-1", "isRandom": True}
+
+
+def test_sanitize_pega_mario_com_acento():
+    """Auditoria 2026-06-11: 'Mário' acentuado furava a regra de marca."""
+    assert _sanitize_for_whatsapp("O Mário vai te atender.") == \
+        "nossa equipe vai te atender."
+    assert _sanitize_for_whatsapp("Dr. Mário Noviello analisa seu caso.") == \
+        "nossa equipe analisa seu caso."
+
+
+def test_sanitize_brand_false_preserva_nome():
+    """Notificação interna: nome de lead 'Mario' não vira 'nossa equipe'."""
+    msg = "🆕 Lead novo\nNome: Mario Cardoso\nTel: 5511988887777"
+    assert _sanitize_for_whatsapp(msg, brand=False) == msg
+
+
+@pytest.mark.asyncio
+async def test_notify_mario_nao_sanitiza_nome_de_lead(respx_mock):
+    """notify_mario envia com brand_sanitize=False — alerta legível
+    mesmo pra lead chamado Mario."""
+    respx_mock.post(
+        "https://api.jurichat.com/conversation/start-human-support"
+    ).mock(return_value=httpx.Response(200, json={"success": True}))
+    route = respx_mock.post(
+        "https://api.jurichat.com/conversation/send-message"
+    ).mock(return_value=httpx.Response(200, json={"id": "m"}))
+
+    client = JurichatClient("jk-test", "https://api.jurichat.com")
+    try:
+        await notify_mario(
+            client,
+            mario_conversation_id="C-MARIO",
+            mensagem="🔥 Lead quente: Mario Cardoso quer fechar!",
+        )
+    finally:
+        await client.aclose()
+
+    body = route.calls.last.request.read().decode()
+    assert "Mario Cardoso" in body
+    assert "nossa equipe" not in body
