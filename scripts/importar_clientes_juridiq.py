@@ -25,7 +25,6 @@ Formato esperado (export do CRM anterior, 18 colunas):
 from __future__ import annotations
 
 import argparse
-import datetime
 import os
 import re
 import sys

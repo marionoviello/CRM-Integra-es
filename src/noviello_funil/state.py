@@ -394,7 +394,14 @@ def set_reuniao(
     """
     now = datetime.now(UTC)
     try:
-        reuniao_dt = datetime.fromisoformat(reuniao_em_iso).astimezone(UTC)
+        reuniao_dt = datetime.fromisoformat(reuniao_em_iso)
+        if reuniao_dt.tzinfo is None:
+            # ISO naive: interpreta como horário de Brasília (tz da
+            # agenda) — astimezone() direto em naive assumiria o tz do
+            # SO (UTC no VPS) e deslocaria os lembretes 3h.
+            from zoneinfo import ZoneInfo
+            reuniao_dt = reuniao_dt.replace(tzinfo=ZoneInfo("America/Sao_Paulo"))
+        reuniao_dt = reuniao_dt.astimezone(UTC)
     except ValueError:
         reuniao_dt = now  # parse falhou — vamos depender do reminder_cycle pra logar
     delta = reuniao_dt - now

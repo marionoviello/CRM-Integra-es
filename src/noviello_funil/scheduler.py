@@ -112,6 +112,10 @@ class CalendarConfig:
     buffer_min: int
     lookahead_days: int
     num_slots: int
+    # Timezone dos horários da agenda (e dos ISO vindos do Claude sem
+    # offset). Auditoria 2026-06-10: naive astimezone() assumia UTC do
+    # VPS — evento criado 3h errado.
+    timezone: str = "America/Sao_Paulo"
 
 
 def is_eligible_for_followup(tags: list[str]) -> bool:
@@ -167,6 +171,38 @@ def _last_lead_message(transcript: str) -> str:
 
 
 # --- Calendar handlers --------------------------------------------------
+
+def _parse_horario_confirmado(
+    iso: object, timezone: str,
+) -> tuple[datetime.datetime | None, str | None]:
+    """Parse SEGURO do horario_escolhido_iso vindo do LLM.
+
+    Auditoria 2026-06-10 — três bugs cobertos aqui:
+      - HIGH: ISO sem offset ('2026-06-12T15:00:00') virava naive e o
+        astimezone() downstream assumia UTC do VPS → evento criado 3h
+        errado (lead lia '15h' no WhatsApp, convite chegava 12h BRT).
+        Naive agora é interpretado no timezone da agenda.
+      - HIGH: horário no PASSADO era aceito (Claude extraindo data velha
+        de conversa retomada) → evento no passado + lembretes mortos.
+      - MEDIUM: valor não-string (int/dict do LLM) estourava TypeError
+        não tratado e envenenava o tick.
+
+    Retorna ``(datetime aware, None)`` ou ``(None, codigo_erro)``.
+    """
+    if not isinstance(iso, str):
+        return None, "claude_horario_iso_invalido"
+    try:
+        dt = datetime.datetime.fromisoformat(iso)
+    except ValueError:
+        return None, "claude_horario_iso_invalido"
+    if dt.tzinfo is None:
+        from zoneinfo import ZoneInfo
+        dt = dt.replace(tzinfo=ZoneInfo(timezone))
+    agora = datetime.datetime.now(datetime.UTC)
+    if dt <= agora + datetime.timedelta(minutes=5):
+        return None, "horario_no_passado"
+    return dt, None
+
 
 def _format_slots_human(slots: list[Slot]) -> str:
     """Formata slots como bullet list pro WhatsApp."""
@@ -305,15 +341,57 @@ async def _handle_confirmar_horario(
         schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
         return
 
-    try:
-        start = datetime.datetime.fromisoformat(iso)
-    except ValueError as exc:
+    start, erro = _parse_horario_confirmado(iso, calendar.timezone)
+    if erro == "horario_no_passado":
+        # Claude extraiu data velha da transcrição (conversa retomada
+        # dias depois). Pede pro lead re-escolher em vez de criar
+        # evento no passado.
+        logger.warning(
+            "horario confirmado no PASSADO %r (lead=%s) — pedindo novo",
+            iso, lead_id,
+        )
+        register_error(conn, lead_id, "horario_no_passado")
+        msg = (
+            "Esse horário já passou! Me diz qual dos horários que te "
+            "mandei funciona, ou me avisa que eu te mostro a agenda "
+            "atualizada."
+        )
+        try:
+            await jurichat.start_human_support(conv_id)
+            await jurichat.send_message(conv_id, msg)
+        except Exception as exc:
+            logger.exception(
+                "send_message(horario_passado) failed lead=%s: %s",
+                lead_id, exc,
+            )
+        update_transcript_hash(conn, lead_id, new_hash)
+        schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
+        return
+    if start is None:
         logger.error(
-            "horario_escolhido_iso inválido %r (lead=%s): %s", iso, lead_id, exc,
+            "horario_escolhido_iso inválido %r (lead=%s)", iso, lead_id,
         )
         register_error(conn, lead_id, "claude_horario_iso_invalido")
         schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
         return
+
+    # Lead JÁ TINHA reunião marcada e confirmou outra (remarcação que
+    # o Claude rotulou de confirmar em vez de remarcar): cancela o
+    # evento antigo antes de criar o novo — senão Mario fica com
+    # double-booking e o lead com 2 convites (auditoria 2026-06-10).
+    evento_antigo = lead["reuniao_event_id"]
+    if evento_antigo:
+        try:
+            await calendar.client.cancel_event(evento_antigo)
+            logger.info(
+                "lead=%s: evento antigo %s cancelado antes do novo",
+                lead_id, evento_antigo,
+            )
+        except Exception as exc:
+            logger.warning(
+                "cancel evento antigo %s falhou (lead=%s): %s — segue",
+                evento_antigo, lead_id, exc,
+            )
 
     # Criar o evento (a API do Google rejeita conflito hard se houver,
     # mas como freeBusy é eventualmente consistente, não validamos
@@ -346,9 +424,13 @@ async def _handle_confirmar_horario(
         )
         return
 
-    # Substitui placeholders no texto de confirmação.
+    # Substitui placeholders no texto de confirmação. Converte pro tz
+    # da agenda ANTES de formatar — o LLM pode mandar offset de outro
+    # fuso e o lead leria a hora errada.
+    from zoneinfo import ZoneInfo
+    start_local = start.astimezone(ZoneInfo(calendar.timezone))
     horario_humano = Slot(
-        start=start, duration_min=calendar.slot_min,
+        start=start_local, duration_min=calendar.slot_min,
     ).format_human()
     mensagem = decisao.mensagem
     if "{{HORARIO_CONFIRMADO}}" in mensagem:
@@ -378,9 +460,12 @@ async def _handle_confirmar_horario(
     # Salva reunião no DB pro reminder_cycle (lembretes 24h/2h/30min).
     # Lead PERMANECE em_conversa pra bot poder processar resposta do
     # lead a um lembrete (ex: "preciso remarcar").
+    # Persiste o ISO NORMALIZADO (aware, com offset) — nunca o cru do
+    # LLM, que pode vir naive e quebrar o reminder_cycle 3h.
+    iso_normalizado = start.isoformat()
     set_reuniao(
         conn, lead_id,
-        reuniao_em_iso=iso, event_id=event_id, meet_link=meet_link,
+        reuniao_em_iso=iso_normalizado, event_id=event_id, meet_link=meet_link,
     )
     schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
     update_transcript_hash(conn, lead_id, new_hash)
@@ -389,7 +474,7 @@ async def _handle_confirmar_horario(
         conn, lead_id, Estado.EM_CONVERSA,
         motivo="claude_confirmar_horario",
         payload={
-            "horario_iso": iso,
+            "horario_iso": iso_normalizado,
             "event_id": event_id,
             "meet_link": meet_link,
             "resumo_caso": decisao.resumo_caso,
@@ -1448,6 +1533,7 @@ def main() -> int:
             buffer_min=settings.calendar_buffer_min,
             lookahead_days=settings.calendar_lookahead_days,
             num_slots=settings.calendar_num_slots,
+            timezone=settings.calendar_timezone,
         )
     else:
         calendar_client = None

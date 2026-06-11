@@ -29,6 +29,7 @@ import time
 import httpx
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from enriquecer_clientes_juridiq import CAMPOS  # noqa: E402
 from importar_clientes_juridiq import (  # noqa: E402
     _norm_doc,
     _norm_name,
@@ -36,7 +37,6 @@ from importar_clientes_juridiq import (  # noqa: E402
     ler_planilhas,
     montar_payload,
 )
-from enriquecer_clientes_juridiq import CAMPOS  # noqa: E402
 
 BASE_URL = "https://api.juridiq.com.br"
 THROTTLE_S = 0.3

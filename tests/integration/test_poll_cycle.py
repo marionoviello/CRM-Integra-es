@@ -564,7 +564,7 @@ async def test_confirmar_horario_cria_evento_com_email_e_meet(db_conn):
                 "Perfeito! Agendado pra {{HORARIO_CONFIRMADO}}. "
                 "Link Meet: {{MEET_LINK}}"
             ),
-            horario_escolhido_iso="2026-06-09T14:00:00-03:00",
+            horario_escolhido_iso="2027-06-08T14:00:00-03:00",
             lead_email="jose@exemplo.com",
             resumo_caso="Inventário, pai faleceu 20 dias, 3 herdeiros, SP",
         )
@@ -590,7 +590,7 @@ async def test_confirmar_horario_cria_evento_com_email_e_meet(db_conn):
     lead = get_lead_by_conversation(db_conn, "C-1")
     assert lead["estado"] == Estado.EM_CONVERSA
     # Reunião salva no DB com event_id + meet_link pro reminder cycle.
-    assert lead["reuniao_em"] == "2026-06-09T14:00:00-03:00"
+    assert lead["reuniao_em"] == "2027-06-08T14:00:00-03:00"
     assert lead["reuniao_meet_link"] == "https://meet.google.com/xyz-test"
     assert lead["reuniao_event_id"] == "evt-1"
 
@@ -598,7 +598,7 @@ async def test_confirmar_horario_cria_evento_com_email_e_meet(db_conn):
     sent_text = jurichat.send_message.call_args_list[0][0][1]
     assert "{{HORARIO_CONFIRMADO}}" not in sent_text
     assert "{{MEET_LINK}}" not in sent_text
-    assert "ter (09/jun) às 14h" in sent_text
+    assert "ter (08/jun) às 14h" in sent_text
     assert "https://meet.google.com/xyz-test" in sent_text
 
 
@@ -812,7 +812,7 @@ async def test_confirmar_horario_sem_email_guardrail_pede_email(db_conn):
         Decisao(
             acao="confirmar_horario",
             mensagem="Agendado. O Mario vai te ligar.",  # texto problemático
-            horario_escolhido_iso="2026-06-09T14:00:00-03:00",
+            horario_escolhido_iso="2027-06-08T14:00:00-03:00",
             lead_email=None,  # ← guardrail trigger
             resumo_caso="caso x",
         )
@@ -1121,7 +1121,7 @@ async def test_confirmar_horario_faz_intake_juridiq(db_conn):
         Decisao(
             acao="confirmar_horario",
             mensagem="Agendado pra {{HORARIO_CONFIRMADO}}! {{MEET_LINK}}",
-            horario_escolhido_iso="2026-06-09T14:00:00-03:00",
+            horario_escolhido_iso="2027-06-08T14:00:00-03:00",
             lead_email="jose@exemplo.com",
             resumo_caso="Inventário SP, 3 herdeiros",
         )
@@ -1161,7 +1161,7 @@ async def test_confirmar_horario_sem_juridiq_segue_normal(db_conn):
         Decisao(
             acao="confirmar_horario",
             mensagem="Agendado {{HORARIO_CONFIRMADO}} {{MEET_LINK}}",
-            horario_escolhido_iso="2026-06-09T14:00:00-03:00",
+            horario_escolhido_iso="2027-06-08T14:00:00-03:00",
             lead_email="maria@x.com",
             resumo_caso="caso y",
         )
@@ -1180,3 +1180,159 @@ async def test_confirmar_horario_sem_juridiq_segue_normal(db_conn):
     calendar_client.create_event.assert_awaited_once()
     lead = get_lead_by_conversation(db_conn, "C-1")
     assert lead["reuniao_em"] is not None  # agendamento intacto
+
+
+# --- Auditoria 2026-06-10: timezone/agendamento (Grupo B) -----------------
+
+@pytest.mark.asyncio
+async def test_confirmar_horario_iso_naive_vira_horario_de_brasilia(db_conn):
+    """HIGH da auditoria: ISO sem offset era interpretado como UTC do VPS
+    → evento 3h errado. Naive agora = America/Sao_Paulo."""
+    transcript = "Lead: jose@x.com\nLead: 15h tá ótimo"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar()
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="confirmar_horario",
+            mensagem="Agendado {{HORARIO_CONFIRMADO}} {{MEET_LINK}}",
+            horario_escolhido_iso="2027-06-15T15:00:00",  # SEM offset!
+            lead_email="jose@x.com",
+            resumo_caso="caso",
+        )
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )
+
+    # Evento criado com datetime AWARE em America/Sao_Paulo (15h BRT,
+    # não 15h UTC = 12h BRT)
+    call = calendar_client.create_event.call_args.kwargs
+    start = call["start"]
+    assert start.tzinfo is not None
+    assert start.utcoffset() == datetime.timedelta(hours=-3)
+    assert start.hour == 15
+    # Mensagem formata 15h (hora local), e reuniao_em persiste COM offset
+    sent = jurichat.send_message.call_args_list[0][0][1]
+    assert "15h" in sent
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert "-03:00" in lead["reuniao_em"]
+
+
+@pytest.mark.asyncio
+async def test_confirmar_horario_no_passado_pede_novo_horario(db_conn):
+    """HIGH da auditoria: horário no passado era aceito (evento morto,
+    lead achando que agendou). Agora pede pro lead re-escolher."""
+    transcript = "Lead: maria@x.com\nLead: pode ser 14h"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar()
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="confirmar_horario",
+            mensagem="Agendado!",
+            horario_escolhido_iso="2020-01-01T14:00:00-03:00",  # PASSADO
+            lead_email="maria@x.com",
+            resumo_caso="caso",
+        )
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )
+
+    calendar_client.create_event.assert_not_awaited()
+    sent = jurichat.send_message.call_args_list[0][0][1]
+    assert "já passou" in sent
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["erro_atual"] == "horario_no_passado"
+    assert lead["reuniao_em"] is None
+
+
+@pytest.mark.asyncio
+async def test_confirmar_horario_nao_string_nao_crasha(db_conn):
+    """MEDIUM da auditoria: ISO não-string (int do LLM) estourava
+    TypeError e envenenava o tick."""
+    transcript = "Lead: x@x.com\nLead: 14h"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar()
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="confirmar_horario",
+            mensagem="ok",
+            horario_escolhido_iso=20260615,  # int!
+            lead_email="x@x.com",
+            resumo_caso="caso",
+        )
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )  # MUST NOT raise
+
+    calendar_client.create_event.assert_not_awaited()
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["erro_atual"] == "claude_horario_iso_invalido"
+
+
+@pytest.mark.asyncio
+async def test_confirmar_segunda_reuniao_cancela_evento_antigo(db_conn):
+    """HIGH da auditoria: confirmar nova reunião com uma já marcada
+    deixava o evento antigo órfão no Calendar (double-booking)."""
+    transcript = "Lead: jose@x.com\nLead: muda pra quinta 14h então"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+    db_conn.execute(
+        """UPDATE leads SET
+           reuniao_em='2027-06-15T15:00:00-03:00',
+           reuniao_event_id='evt-ANTIGO',
+           reuniao_meet_link='https://meet.google.com/velho'
+           WHERE jurichat_conversation_id='C-1'"""
+    )
+
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar()
+    calendar_client.cancel_event = AsyncMock(return_value=None)
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="confirmar_horario",
+            mensagem="Agendado {{HORARIO_CONFIRMADO}} {{MEET_LINK}}",
+            horario_escolhido_iso="2027-06-17T14:00:00-03:00",
+            lead_email="jose@x.com",
+            resumo_caso="caso",
+        )
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )
+
+    # Evento antigo cancelado ANTES do novo ser criado
+    calendar_client.cancel_event.assert_awaited_once_with("evt-ANTIGO")
+    calendar_client.create_event.assert_awaited_once()
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["reuniao_event_id"] == "evt-1"  # o novo (mock retorna evt-1)

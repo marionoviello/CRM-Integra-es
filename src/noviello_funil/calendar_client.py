@@ -318,6 +318,11 @@ class GoogleCalendarClient:
         Sem email, evento fica privado no calendar do Mario com
         nome+telefone no description.
         """
+        # Guarda contra datetime NAIVE: astimezone() em naive assume o
+        # tz do SO (UTC no VPS) e desloca o evento 3h. Naive aqui é
+        # interpretado como horário da agenda (self._tz).
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=self._tz)
         start_tz = start.astimezone(self._tz)
         end_tz = start_tz + datetime.timedelta(minutes=duration_min)
 
