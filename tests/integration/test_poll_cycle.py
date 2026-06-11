@@ -1052,8 +1052,8 @@ async def test_sync_lead_novo_notifica_mario(db_conn):
     fake.list_active_conversations = AsyncMock(return_value=[
         {
             "id": "C-NOVO",
-            "person": {"id": "P-NOVO", "phoneNumber": "5511888887777",
-                       "name": "Franklin Crespo"},
+            "person": {"id": "P-NOVO", "phoneNumber": "5500000000002",
+                       "name": "Fulano Teste"},
             "isArchived": False, "isGroup": False,
             "responsables": [],
         },
@@ -1075,8 +1075,8 @@ async def test_sync_lead_novo_notifica_mario(db_conn):
     conv_dest, texto = fake.send_message.call_args[0]
     assert conv_dest == "C-ALERTAS"
     assert "Lead novo" in texto
-    assert "Franklin Crespo" in texto
-    assert "5511888887777" in texto
+    assert "Fulano Teste" in texto
+    assert "5500000000002" in texto
 
 
 @pytest.mark.asyncio
