@@ -162,3 +162,38 @@ async def test_set_reuniao_premarca_lembretes_perdidos(db_conn):
     assert lead["lembrete_24h_enviado_em"] is not None
     assert lead["lembrete_2h_enviado_em"] is not None
     assert lead["lembrete_30min_enviado_em"] is not None
+
+
+@pytest.mark.asyncio
+async def test_lembrete_com_falha_de_envio_nao_marca_flag(db_conn):
+    """Auditoria 2026-06-11: flag era marcada mesmo com envio falho —
+    lembrete perdido pra sempre. Agora re-tenta no próximo tick."""
+    lead_id = _insert_lead(db_conn)
+    reuniao = datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=20)
+    db_conn.execute(
+        """UPDATE leads SET reuniao_em=?, reuniao_event_id='evt-1',
+           reuniao_meet_link='https://meet.google.com/x',
+           lembrete_24h_enviado_em=datetime('now', '-23 hours'),
+           lembrete_2h_enviado_em=datetime('now', '-2 hours')
+           WHERE id = ?""",
+        (reuniao.isoformat(), lead_id),
+    )
+
+    jurichat = MagicMock()
+    jurichat.start_human_support = AsyncMock(return_value={"success": True})
+    jurichat.send_message = AsyncMock(side_effect=RuntimeError("WhatsApp down"))
+
+    await run_reminder_cycle(get_db=lambda: db_conn, jurichat=jurichat)
+
+    lead = db_conn.execute(
+        "SELECT * FROM leads WHERE id = ?", (lead_id,)
+    ).fetchone()
+    assert lead["lembrete_30min_enviado_em"] is None  # NÃO marcado
+
+    # WhatsApp volta → próximo tick reenvia e marca
+    jurichat.send_message = AsyncMock(return_value={"id": "m"})
+    await run_reminder_cycle(get_db=lambda: db_conn, jurichat=jurichat)
+    lead = db_conn.execute(
+        "SELECT * FROM leads WHERE id = ?", (lead_id,)
+    ).fetchone()
+    assert lead["lembrete_30min_enviado_em"] is not None

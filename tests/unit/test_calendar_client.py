@@ -395,3 +395,32 @@ async def test_cancel_event_swallows_404(respx_mock):
         await client.cancel_event("evt-old")  # MUST NOT raise
     finally:
         await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_freebusy_com_errors_levanta_excecao(respx_mock):
+    """Auditoria 2026-06-11: bloco 'errors' do freeBusy era ignorado →
+    agenda lida como 100% livre → double-booking."""
+    from noviello_funil.calendar_client import GoogleCalendarError
+    respx_mock.post("https://oauth2.googleapis.com/token").mock(
+        return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600}),
+    )
+    respx_mock.post(
+        "https://www.googleapis.com/calendar/v3/freeBusy",
+    ).mock(return_value=httpx.Response(200, json={
+        "calendars": {"primary": {
+            "errors": [{"domain": "global", "reason": "notFound"}],
+            "busy": [],
+        }},
+    }))
+
+    client = GoogleCalendarClient(client_id="c", client_secret="s", refresh_token="r")
+    try:
+        with pytest.raises(GoogleCalendarError):
+            await client.find_available_slots(
+                business_hours_start=14, business_hours_end=19,
+                slot_min=30, buffer_min=0,
+                lookahead_days=5, num_slots=4,
+            )
+    finally:
+        await client.aclose()

@@ -447,15 +447,21 @@ async def _handle_confirmar_horario(
             # texto solto na mesma linha vira nada).
             mensagem = mensagem.replace("{{MEET_LINK}}", "").rstrip()
 
+    confirmacao_enviada = True
     try:
         await jurichat.start_human_support(conv_id)
         await jurichat.send_message(conv_id, mensagem)
     except Exception as exc:
+        # Evento já criado — segue o fluxo, mas o lead NÃO recebeu a
+        # confirmação/Meet link. O notify abaixo avisa o Mario pra
+        # confirmar manualmente (auditoria 2026-06-11: antes a falha
+        # era engolida em silêncio).
+        confirmacao_enviada = False
+        register_error(conn, lead_id, "jurichat_send_failed_confirmacao")
         logger.exception(
             "send_message(confirmar_horario) failed for lead=%s: %s",
             lead_id, exc,
         )
-        # Evento já criado — segue pra handoff de qualquer jeito.
 
     # Salva reunião no DB pro reminder_cycle (lembretes 24h/2h/30min).
     # Lead PERMANECE em_conversa pra bot poder processar resposta do
@@ -513,6 +519,11 @@ async def _handle_confirmar_horario(
             notify_text += f"\nMeet: {meet_link}"
         if juridiq_person_id:
             notify_text += "\nFicha criada no Juridiq ✅"
+        if not confirmacao_enviada:
+            notify_text += (
+                "\n\n⚠️ ATENÇÃO: a confirmação NÃO chegou no WhatsApp "
+                "do lead (falha de envio). Confirme com ele manualmente."
+            )
         await notify_mario(
             jurichat,
             mario_conversation_id=mario_conversation_id,
@@ -1352,24 +1363,24 @@ async def run_reminder_cycle(
         if delta <= datetime.timedelta(minutes=30):
             if lead["lembrete_30min_enviado_em"] is None:
                 msg = _msg_lembrete_30min(nome, horario_human, meet_link)
-                await _enviar_lembrete(
+                if await _enviar_lembrete(
                     jurichat, conv_id, msg, lead["id"], "30min",
-                )
-                mark_lembrete_enviado(conn, lead["id"], "30min")
+                ):
+                    mark_lembrete_enviado(conn, lead["id"], "30min")
         elif delta <= datetime.timedelta(hours=2):
             if lead["lembrete_2h_enviado_em"] is None:
                 msg = _msg_lembrete_2h(nome, horario_human, meet_link)
-                await _enviar_lembrete(
+                if await _enviar_lembrete(
                     jurichat, conv_id, msg, lead["id"], "2h",
-                )
-                mark_lembrete_enviado(conn, lead["id"], "2h")
+                ):
+                    mark_lembrete_enviado(conn, lead["id"], "2h")
         elif delta <= datetime.timedelta(hours=24):
             if lead["lembrete_24h_enviado_em"] is None:
                 msg = _msg_lembrete_24h(nome, horario_human, meet_link)
-                await _enviar_lembrete(
+                if await _enviar_lembrete(
                     jurichat, conv_id, msg, lead["id"], "24h",
-                )
-                mark_lembrete_enviado(conn, lead["id"], "24h")
+                ):
+                    mark_lembrete_enviado(conn, lead["id"], "24h")
 
 
 def _format_reuniao_human(dt: datetime.datetime) -> str:
@@ -1421,19 +1432,24 @@ def _msg_lembrete_30min(nome: str, horario: str, meet_link: str) -> str:
 async def _enviar_lembrete(
     jurichat: JurichatClient, conv_id: str, msg: str,
     lead_id: int, tag: str,
-) -> None:
-    """Envia lembrete com start_human_support + send_message. Loga erro
-    mas não levanta — falha de envio não deve travar o reminder cycle
-    inteiro (próximo tick reenviaria, mas como já marcamos enviado, vai
-    pular — esse é o trade-off conservador)."""
+) -> bool:
+    """Envia lembrete. Retorna True só se o envio CONFIRMOU.
+
+    Auditoria 2026-06-11: a flag era marcada mesmo com envio falho —
+    lembrete perdido pra sempre. Agora o caller só marca em sucesso;
+    falha → re-tenta no próximo tick (enquanto a janela durar).
+    """
     try:
         await jurichat.start_human_support(conv_id)
         await jurichat.send_message(conv_id, msg)
         logger.info("lembrete %s enviado pra lead=%s", tag, lead_id)
+        return True
     except Exception as exc:
         logger.exception(
-            "lembrete %s falhou pra lead=%s: %s", tag, lead_id, exc,
+            "lembrete %s falhou pra lead=%s: %s — re-tenta no próximo tick",
+            tag, lead_id, exc,
         )
+        return False
 
 
 async def run_followup_cycle(

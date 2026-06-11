@@ -287,6 +287,18 @@ class GoogleCalendarClient:
 
         data = resp.json()
         cal_data = data.get("calendars", {}).get(self._calendar_id, {})
+        # Auditoria 2026-06-11: o freeBusy retorna 200 com um bloco
+        # ``errors`` por calendário (ex: notFound). Ignorá-lo fazia a
+        # agenda parecer 100% livre → double-booking. Erro → exceção,
+        # que degrada pro handoff humano no scheduler.
+        if cal_data.get("errors"):
+            logger.error(
+                "freeBusy retornou errors pro calendário %s: %r",
+                self._calendar_id, cal_data["errors"],
+            )
+            raise GoogleCalendarError(
+                f"freeBusy errors: {cal_data['errors']}"
+            )
         busy_raw = cal_data.get("busy", [])
 
         intervals: list[tuple[datetime.datetime, datetime.datetime]] = []
