@@ -49,3 +49,4 @@ pid.txt
 # planilhas com PII de clientes — NUNCA versionar
 cowork_clientes.xlsx
 *clientes*.xls*
+relatorio_auditoria_processos.xlsx
