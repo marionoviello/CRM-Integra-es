@@ -32,7 +32,9 @@ class Settings(BaseSettings):
     notificacao_telefone: str
 
     # Mario's conversation ID inside Jurichat (the conversation the bot
-    # sends Mario's notifications to).
+    # sends Mario's notifications to). Aceita MÚLTIPLOS ids separados
+    # por vírgula ("id_mario,id_equipe") — todos recebem as notificações
+    # e todos ficam protegidos de virar lead (2026-06-12).
     mario_conversation_id: str
 
     # SQLite

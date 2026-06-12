@@ -1080,8 +1080,9 @@ async def test_sync_lead_novo_notifica_mario(db_conn):
 
 
 @pytest.mark.asyncio
-async def test_sync_lead_ignorado_nao_notifica(db_conn):
-    """Lead com responsável humano → ignorado E sem alerta."""
+async def test_sync_lead_com_responsavel_notifica_sem_atender(db_conn):
+    """Lead novo COM responsável → bot não atende, MAS Mario é avisado
+    (pedido 2026-06-12: todo lead novo gera alerta no WhatsApp)."""
     _insert_lead_due_for_poll(db_conn, jurichat_lead_id="L-0",
                               conversation_id="C-0")
 
@@ -1097,7 +1098,7 @@ async def test_sync_lead_ignorado_nao_notifica(db_conn):
     ])
     fake.get_lead_tags = AsyncMock(return_value=[])
     fake.start_human_support = AsyncMock(return_value={"success": True})
-    fake.send_message = AsyncMock()
+    fake.send_message = AsyncMock(return_value={"id": "m"})
 
     stats = await sync_jurichat_conversations(
         get_db=lambda: db_conn,
@@ -1107,6 +1108,107 @@ async def test_sync_lead_ignorado_nao_notifica(db_conn):
     )
 
     assert stats["ignoradas"] == 1
+    fake.send_message.assert_awaited_once()
+    conv_dest, texto = fake.send_message.call_args[0]
+    assert conv_dest == "C-ALERTAS"
+    assert "Lead novo" in texto
+    assert "Cliente Antigo" in texto
+    assert "NÃO vai atender" in texto
+
+
+@pytest.mark.asyncio
+async def test_sync_lead_com_tag_exclusao_notifica_sem_atender(db_conn):
+    """Lead novo com etiqueta de exclusão → bot não atende, Mario sabe."""
+    _insert_lead_due_for_poll(db_conn, jurichat_lead_id="L-0",
+                              conversation_id="C-0")
+
+    fake = MagicMock()
+    fake.list_active_conversations = AsyncMock(return_value=[
+        {
+            "id": "C-TAGUEADO",
+            "person": {"id": "P-T", "phoneNumber": "5511666665555",
+                       "name": "Adverso Teste"},
+            "isArchived": False, "isGroup": False,
+            "responsables": [],
+        },
+    ])
+    fake.get_lead_tags = AsyncMock(return_value=["Advogado adverso"])
+    fake.start_human_support = AsyncMock(return_value={"success": True})
+    fake.send_message = AsyncMock(return_value={"id": "m"})
+
+    stats = await sync_jurichat_conversations(
+        get_db=lambda: db_conn,
+        jurichat=fake,
+        inbox_id="inbox-1",
+        mario_conversation_id="C-ALERTAS",
+    )
+
+    assert stats["ignoradas"] == 1
+    fake.send_message.assert_awaited_once()
+    _, texto = fake.send_message.call_args[0]
+    assert "Advogado adverso" in texto
+    assert "NÃO vai atender" in texto
+
+
+@pytest.mark.asyncio
+async def test_sync_baseline_primeira_execucao_nao_notifica(db_conn):
+    """Primeira execução (DB vazio) registra baseline em silêncio —
+    alertar 230 conversas históricas de uma vez seria spam."""
+    fake = MagicMock()
+    fake.list_active_conversations = AsyncMock(return_value=[
+        {
+            "id": f"C-HIST-{i}",
+            "person": {"id": f"P-{i}", "phoneNumber": f"55110000000{i}",
+                       "name": f"Histórico {i}"},
+            "isArchived": False, "isGroup": False,
+            "responsables": [],
+        }
+        for i in range(3)
+    ])
+    fake.get_lead_tags = AsyncMock(return_value=[])
+    fake.start_human_support = AsyncMock(return_value={"success": True})
+    fake.send_message = AsyncMock()
+
+    stats = await sync_jurichat_conversations(
+        get_db=lambda: db_conn,
+        jurichat=fake,
+        inbox_id="inbox-1",
+        mario_conversation_id="C-ALERTAS",
+    )
+
+    assert stats["baseline"] == 3
+    fake.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_guard_csv_protege_todos_os_canais_de_alerta(db_conn):
+    """MARIO_CONVERSATION_ID com CSV: NENHUM dos canais vira lead."""
+    _insert_lead_due_for_poll(db_conn, jurichat_lead_id="L-0",
+                              conversation_id="C-0")
+
+    fake = MagicMock()
+    fake.list_active_conversations = AsyncMock(return_value=[
+        {
+            "id": "C-EQUIPE",
+            "person": {"id": "P-EQ", "phoneNumber": "5511999990000",
+                       "name": "Equipe"},
+            "isArchived": False, "isGroup": False,
+            "responsables": [],
+        },
+    ])
+    fake.get_lead_tags = AsyncMock(return_value=[])
+    fake.start_human_support = AsyncMock(return_value={"success": True})
+    fake.send_message = AsyncMock()
+
+    stats = await sync_jurichat_conversations(
+        get_db=lambda: db_conn,
+        jurichat=fake,
+        inbox_id="inbox-1",
+        mario_conversation_id="C-ALERTAS,C-EQUIPE",
+    )
+
+    assert get_lead_by_conversation(db_conn, "C-EQUIPE") is None
+    assert stats["novos"] == 0
     fake.send_message.assert_not_awaited()
 
 

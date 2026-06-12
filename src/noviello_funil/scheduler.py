@@ -38,6 +38,7 @@ from noviello_funil.outbound import (
     JurichatClient,
     format_notification,
     notify_mario,
+    split_conversation_ids,
 )
 from noviello_funil.state import (
     CLEAR_PROXIMA_ACAO,
@@ -790,6 +791,34 @@ async def sync_jurichat_conversations(
     )
 
     stats = {"baseline": 0, "novos": 0, "ignoradas": 0}
+    canais_alertas = set(split_conversation_ids(mario_conversation_id))
+
+    async def _alerta_lead_novo(person: dict, status: str) -> None:
+        """🆕 pro canal do Mario em TODO lead novo (pedido 2026-06-12).
+
+        Antes só o caminho "bot atende" alertava — lead que entrava com
+        responsável ou tag de exclusão passava em silêncio. Fire-and-
+        forget: falha de notificação nunca impede o processamento.
+        """
+        if not mario_conversation_id:
+            return
+        nome = person.get("name") or "(sem nome)"
+        telefone = person.get("phoneNumber") or "?"
+        try:
+            await notify_mario(
+                jurichat,
+                mario_conversation_id=mario_conversation_id,
+                mensagem=(
+                    f"🆕 *Lead novo no funil*\n\n"
+                    f"Nome: {nome}\n"
+                    f"Tel: {telefone}\n\n"
+                    f"{status}"
+                ),
+            )
+        except Exception as exc:
+            logger.exception(
+                "notify_mario(lead_novo) falhou pra %s: %s", nome, exc,
+            )
 
     for conv in conversations:
         # Pula arquivadas e grupos (lead individual é nosso caso).
@@ -800,10 +829,10 @@ async def sync_jurichat_conversations(
 
         conv_id = conv.get("id")
 
-        # Canal de alertas do Mario — NUNCA tratar como lead. Sem esse
-        # skip, o bot responderia as próprias notificações que envia
-        # (ou qualificaria o Mario como lead de inventário 😅).
-        if mario_conversation_id and conv_id == mario_conversation_id:
+        # Canais de alertas (Mario/equipe) — NUNCA tratar como lead.
+        # Sem esse skip, o bot responderia as próprias notificações que
+        # envia (ou qualificaria o Mario como lead de inventário 😅).
+        if conv_id in canais_alertas:
             continue
         person = conv.get("person") or {}
         person_id = person.get("id")
@@ -846,6 +875,11 @@ async def sync_jurichat_conversations(
                 proxima_acao_horas=CLEAR_PROXIMA_ACAO,
             )
             stats["ignoradas"] += 1
+            await _alerta_lead_novo(
+                person,
+                "⚠️ Já entrou com responsável atribuído — o bot NÃO vai "
+                "atender. Atendimento por sua conta.",
+            )
             continue
 
         # Filtro 2: tem tag de exclusão → não atende.
@@ -867,34 +901,22 @@ async def sync_jurichat_conversations(
                 proxima_acao_horas=CLEAR_PROXIMA_ACAO,
             )
             stats["ignoradas"] += 1
+            await _alerta_lead_novo(
+                person,
+                f"⚠️ Tem etiqueta de exclusão ({', '.join(tags)}) — o bot "
+                f"NÃO vai atender. Atendimento por sua conta.",
+            )
             continue
 
         # Passou nos 2 filtros — bot atende.
         schedule_next_action_seconds(conn, lead["id"], 0)
         stats["novos"] += 1
 
-        # Alerta de lead novo pro Mario (pedido 2026-06-10). Fire-and-
-        # forget: falha de notificação nunca impede o lead de ser
-        # atendido.
-        if mario_conversation_id:
-            nome = person.get("name") or "(sem nome)"
-            telefone = person.get("phoneNumber") or "?"
-            try:
-                await notify_mario(
-                    jurichat,
-                    mario_conversation_id=mario_conversation_id,
-                    mensagem=(
-                        f"🆕 *Lead novo no funil*\n\n"
-                        f"Nome: {nome}\n"
-                        f"Tel: {telefone}\n\n"
-                        f"O bot (Julia) já está atendendo. Você recebe "
-                        f"novo alerta quando ele agendar ou pedir humano."
-                    ),
-                )
-            except Exception as exc:
-                logger.exception(
-                    "notify_mario(lead_novo) falhou pra %s: %s", nome, exc,
-                )
+        await _alerta_lead_novo(
+            person,
+            "O bot (Julia) já está atendendo. Você recebe novo alerta "
+            "quando ele agendar ou pedir humano.",
+        )
 
     if is_first_sync:
         logger.info(
@@ -932,11 +954,9 @@ async def run_poll_cycle(
     # follow-up era invisível e ele ainda levava FU2 + encerramento.
     # Não atualizamos o hash na reativação — o tick seguinte detecta a
     # mudança e faz a triagem normal da mensagem nova.
+    canais_alertas = set(split_conversation_ids(mario_conversation_id))
     for lead in list_leads_para_reativacao(conn):
-        if (
-            mario_conversation_id
-            and lead["jurichat_conversation_id"] == mario_conversation_id
-        ):
+        if lead["jurichat_conversation_id"] in canais_alertas:
             continue
         try:
             conv = await jurichat.get_conversation(
@@ -979,7 +999,7 @@ async def run_poll_cycle(
         # guardrail do sync existir (2026-06-10) — neutraliza de vez.
         # Sem isso, o bot tentaria qualificar o próprio Mario quando a
         # conversa de alertas tiver mensagem nova.
-        if mario_conversation_id and conv_id == mario_conversation_id:
+        if conv_id in canais_alertas:
             transicao(
                 conn, lead_id, Estado.AGUARDANDO_HUMANO,
                 motivo="canal_alertas_mario",

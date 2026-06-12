@@ -358,7 +358,41 @@ class JurichatClient:
             raise OutboundError(
                 f"list_active_conversations falhou {exc.response.status_code}"
             ) from exc
-        return data.get("data", [])
+
+        # Paginação: a inbox real tem 230+ conversas (3 páginas de 100,
+        # verificado 2026-06-12). Sem varrer todas, conversas além da
+        # página 1 ficam invisíveis pro sync — lead novo não descoberto.
+        conversations = list(data.get("data", []))
+        total_pages = int(data.get("totalPages") or 1)
+        next_page = page + 1
+        while next_page <= total_pages:
+            page_num = next_page  # bind pro closure do op_page
+
+            async def op_page() -> dict[str, Any]:
+                resp = await self._client.get(
+                    f"{self._base_url}/conversation",
+                    params={
+                        "inboxId": inbox_id,
+                        "page": str(page_num),
+                        "limit": str(limit),
+                    },
+                )
+                resp.raise_for_status()
+                return resp.json()
+
+            try:
+                extra = await with_retry(op_page, attempts=3, base_delay=base_delay)
+            except httpx.HTTPStatusError as exc:
+                # Página extra falhou: devolve o que já temos em vez de
+                # derrubar o sync inteiro (degradação graciosa).
+                logger.error(
+                    "list_active_conversations página %d falhou: %s",
+                    page_num, exc,
+                )
+                break
+            conversations.extend(extra.get("data", []))
+            next_page += 1
+        return conversations
 
     async def get_lead_tags(
         self, lead_id: str, *, base_delay: float = 1.0,
@@ -425,6 +459,20 @@ def format_notification(
     return "\n".join(parts)
 
 
+def split_conversation_ids(raw: str) -> list[str]:
+    """``"id1, id2"`` → ``["id1", "id2"]`` (strip, sem vazios, dedupe).
+
+    Permite múltiplos destinatários de notificação no mesmo env var
+    (``MARIO_CONVERSATION_ID=id_mario,id_equipe``) sem mudar call sites.
+    """
+    vistos: list[str] = []
+    for parte in (raw or "").split(","):
+        cid = parte.strip()
+        if cid and cid not in vistos:
+            vistos.append(cid)
+    return vistos
+
+
 async def notify_mario(
     client: JurichatClient,
     *,
@@ -433,23 +481,25 @@ async def notify_mario(
 ) -> None:
     """Send notification message to Mario via Jurichat.
 
-    ``mario_conversation_id`` is a conversation with Mario's own number,
-    pre-configured. Failures are logged but NOT raised — notifications
-    are fire-and-forget per spec §9.
+    ``mario_conversation_id`` is one or more conversation ids (CSV) with
+    Mario's/the team's own numbers, pre-configured. Failures are logged
+    but NOT raised — notifications are fire-and-forget per spec §9, and
+    a failure on one recipient never blocks the others.
 
     Catches the full HTTP error surface (``OutboundError`` for exhausted
     retries, ``HTTPStatusError`` for non-retryable 4xx like a wrong
     ``MARIO_CONVERSATION_ID``, ``RequestError`` for transport failures).
     """
-    try:
-        # Pré-requisito: a conversa do Mario também precisa estar em
-        # human-support mode. Idempotente.
-        await client.start_human_support(mario_conversation_id)
-        # brand_sanitize=False: notificação INTERNA — nome de lead
-        # chamado "Mario" não pode virar "nossa equipe" no alerta
-        # (auditoria 2026-06-11).
-        await client.send_message(
-            mario_conversation_id, mensagem, brand_sanitize=False,
-        )
-    except (OutboundError, httpx.HTTPStatusError, httpx.RequestError) as exc:
-        logger.error("notify_mario failed: %s", exc)
+    for conv_id in split_conversation_ids(mario_conversation_id):
+        try:
+            # Pré-requisito: a conversa do destinatário também precisa
+            # estar em human-support mode. Idempotente.
+            await client.start_human_support(conv_id)
+            # brand_sanitize=False: notificação INTERNA — nome de lead
+            # chamado "Mario" não pode virar "nossa equipe" no alerta
+            # (auditoria 2026-06-11).
+            await client.send_message(
+                conv_id, mensagem, brand_sanitize=False,
+            )
+        except (OutboundError, httpx.HTTPStatusError, httpx.RequestError) as exc:
+            logger.error("notify_mario failed (%s): %s", conv_id, exc)

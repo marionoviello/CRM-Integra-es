@@ -537,3 +537,95 @@ async def test_notify_mario_nao_sanitiza_nome_de_lead(respx_mock):
     body = route.calls.last.request.read().decode()
     assert "Mario Cardoso" in body
     assert "nossa equipe" not in body
+
+
+# --- Multi-destinatário de notificações (CSV) + paginação ------------------
+
+def test_split_conversation_ids():
+    from noviello_funil.outbound import split_conversation_ids
+    assert split_conversation_ids("C-A,C-B") == ["C-A", "C-B"]
+    assert split_conversation_ids(" C-A , C-B ") == ["C-A", "C-B"]
+    assert split_conversation_ids("C-A,,C-A") == ["C-A"]  # dedupe + vazio
+    assert split_conversation_ids("C-A") == ["C-A"]
+    assert split_conversation_ids("") == []
+    assert split_conversation_ids(None) == []
+
+
+@pytest.mark.asyncio
+async def test_notify_mario_csv_envia_pra_todos(respx_mock):
+    respx_mock.post(
+        "https://api.jurichat.com/conversation/start-human-support"
+    ).mock(return_value=httpx.Response(200, json={"success": True}))
+    send = respx_mock.post(
+        "https://api.jurichat.com/conversation/send-message"
+    ).mock(return_value=httpx.Response(200, json={"id": "m"}))
+
+    client = JurichatClient("jk-test", "https://api.jurichat.com")
+    try:
+        await notify_mario(
+            client,
+            mario_conversation_id="C-MARIO, C-EQUIPE",
+            mensagem="🆕 Lead novo",
+        )
+    finally:
+        await client.aclose()
+
+    assert send.call_count == 2
+    corpos = b"".join(c.request.read() for c in send.calls)
+    assert b"C-MARIO" in corpos
+    assert b"C-EQUIPE" in corpos
+
+
+@pytest.mark.asyncio
+async def test_notify_mario_csv_falha_num_destino_nao_bloqueia_outro(respx_mock):
+    """4xx no primeiro destinatário não impede o segundo de receber."""
+    respx_mock.post(
+        "https://api.jurichat.com/conversation/start-human-support"
+    ).mock(side_effect=[
+        httpx.Response(400, json={"error": "conversa inválida"}),  # C-RUIM
+        httpx.Response(200, json={"success": True}),               # C-BOM
+    ])
+    send = respx_mock.post(
+        "https://api.jurichat.com/conversation/send-message"
+    ).mock(return_value=httpx.Response(200, json={"id": "m"}))
+
+    client = JurichatClient("jk-test", "https://api.jurichat.com")
+    try:
+        await notify_mario(
+            client,
+            mario_conversation_id="C-RUIM,C-BOM",
+            mensagem="alerta",
+        )  # MUST NOT raise
+    finally:
+        await client.aclose()
+
+    assert send.call_count == 1
+    assert b"C-BOM" in send.calls.last.request.read()
+
+
+@pytest.mark.asyncio
+async def test_list_active_conversations_pagina_todas(respx_mock):
+    """Inbox real tem 230+ conversas em 3 páginas (2026-06-12) — o sync
+    precisa enxergar TODAS, senão lead novo fica invisível."""
+    def responder(request):
+        page = request.url.params["page"]
+        paginas = {
+            "1": [{"id": "C-1"}, {"id": "C-2"}],
+            "2": [{"id": "C-3"}, {"id": "C-4"}],
+            "3": [{"id": "C-5"}],
+        }
+        return httpx.Response(200, json={
+            "data": paginas[page], "totalPages": 3, "totalResults": 5,
+        })
+
+    respx_mock.get("https://api.jurichat.com/conversation").mock(
+        side_effect=responder,
+    )
+
+    client = JurichatClient("jk-test", "https://api.jurichat.com")
+    try:
+        convs = await client.list_active_conversations(inbox_id="inbox-1")
+    finally:
+        await client.aclose()
+
+    assert [c["id"] for c in convs] == ["C-1", "C-2", "C-3", "C-4", "C-5"]
