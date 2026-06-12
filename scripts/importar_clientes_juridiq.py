@@ -32,7 +32,6 @@ import time
 import unicodedata
 
 import httpx
-import xlrd
 
 BASE_URL = "https://api.juridiq.com.br"
 THROTTLE_S = 0.3
@@ -121,6 +120,7 @@ def _parse_date(cell_value: object, datemode: int) -> str:
     """Excel float ou 'dd/mm/yyyy' → 'YYYY-MM-DD' (vazio se inválido)."""
     if isinstance(cell_value, float) and cell_value > 0:
         try:
+            import xlrd
             dt = xlrd.xldate_as_datetime(cell_value, datemode)
             return dt.strftime("%Y-%m-%d")
         except Exception:
@@ -151,6 +151,7 @@ def ler_planilhas(paths: list[str]) -> list[dict]:
                 row["_datemode"] = 0
                 registros.append(row)
         else:
+            import xlrd
             wb = xlrd.open_workbook(path, ignore_workbook_corruption=True)
             sh = wb.sheets()[0]
             header = [str(sh.cell_value(0, c)).strip() for c in range(sh.ncols)]
