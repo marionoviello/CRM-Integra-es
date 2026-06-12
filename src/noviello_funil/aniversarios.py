@@ -21,14 +21,65 @@ import datetime
 import logging
 import smtplib
 import time
+import unicodedata
+from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# Artes do cartão de aniversário (decisão Mario 2026-06-11):
+# clara → mulheres, escura → homens. Roteadas por heurística de nome
+# (Juridiq não tem campo de gênero).
+ASSETS_DIR = Path(__file__).parent / "assets"
+ARTE_CLARA = ASSETS_DIR / "aniversario_clara.png"
+ARTE_ESCURA = ASSETS_DIR / "aniversario_escura.png"
+
+# Nomes BR que terminam em 'a' mas são masculinos (exceções comuns).
+_MASCULINOS_EM_A = frozenset({
+    "luca", "joca", "juca", "nicola", "garcia", "jonata", "mustafa",
+    "akira",
+})
+# Nomes que NÃO terminam em 'a' mas são femininos.
+_FEMININOS_SEM_A = frozenset({
+    "isabel", "raquel", "rachel", "ester", "esther", "ruth", "rute",
+    "carmen", "miriam", "ingrid", "kelly", "joice", "joyce", "iris",
+    "ines", "agnes", "beatriz", "liz", "muriel",
+    "gisele", "michele", "michelle", "danielle", "daniele", "nicole",
+    "alice", "clarice", "denise", "elaine", "eliane", "simone",
+    "ivone", "marlene", "arlete", "ivete", "odete", "salete",
+    "solange", "edith", "edite", "mercedes",
+    "dolores", "lourdes", "jaqueline",
+    "jacqueline", "aline", "karine", "nadine", "celine", "pauline",
+})
+
+
+def _primeiro_nome_norm(nome: str) -> str:
+    s = unicodedata.normalize("NFKD", (nome or "").strip())
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    partes = s.lower().split()
+    return partes[0] if partes else ""
+
+
+def escolher_arte(nome: str) -> Path:
+    """Clara pra mulheres, escura pra homens (heurística de nome BR).
+
+    Sufixo 'a' → feminino, com listas de exceções. Na dúvida → escura.
+    Custo de erro ~zero: as artes diferem só na cor de fundo.
+    """
+    p = _primeiro_nome_norm(nome)
+    if not p:
+        return ARTE_ESCURA
+    if p in _FEMININOS_SEM_A:
+        return ARTE_CLARA
+    if p in _MASCULINOS_EM_A:
+        return ARTE_ESCURA
+    return ARTE_CLARA if p.endswith("a") else ARTE_ESCURA
 
 JURIDIQ_BASE = "https://api.juridiq.com.br"
 THROTTLE_S = 0.15
@@ -116,8 +167,15 @@ _MESES = [
 # aniversário com oferta de serviço violaria o tom do Provimento
 # 205/2021 da OAB (publicidade sóbria, sem mercantilização).
 
-def montar_email_parabens(nome: str) -> tuple[str, str, str]:
-    """Retorna (assunto, corpo_texto, corpo_html) do parabéns."""
+def montar_email_parabens(
+    nome: str, *, com_arte: bool = False,
+) -> tuple[str, str, str]:
+    """Retorna (assunto, corpo_texto, corpo_html) do parabéns.
+
+    ``com_arte=True`` insere o cartão da marca no topo (referenciado
+    por CID ``cid:arte`` — o caller embute o MIMEImage correspondente).
+    O texto encurta pra não duplicar o que a arte já diz.
+    """
     primeiro_nome = nome.strip().split()[0].title() if nome.strip() else "amigo(a)"
     assunto = f"Feliz aniversário, {primeiro_nome}! 🎉"
     texto = (
@@ -131,12 +189,14 @@ def montar_email_parabens(nome: str) -> tuple[str, str, str]:
         "Noviello Advocacia\n"
         "www.noviello.adv.br"
     )
-    html = f"""\
-<html>
-  <body style="font-family: Georgia, 'Times New Roman', serif; color: #2b2b2b;
-               max-width: 560px; margin: 0 auto; padding: 24px;">
-    <div style="border-top: 4px solid #68192E; padding-top: 24px;">
-      <p style="font-size: 17px;">Olá, <strong>{primeiro_nome}</strong>!</p>
+    arte_html = (
+        '<img src="cid:arte" alt="A Noviello Advocacia deseja feliz '
+        'aniversário!" width="560" '
+        'style="display: block; width: 100%; max-width: 560px; '
+        'height: auto; border-radius: 4px; margin-bottom: 20px;">'
+        if com_arte else ""
+    )
+    saudacao_extra = "" if com_arte else """
       <p style="font-size: 16px; line-height: 1.6;">
         Hoje é um dia especial e não poderíamos deixar passar em branco:
         <strong>feliz aniversário!</strong> 🎉
@@ -144,7 +204,20 @@ def montar_email_parabens(nome: str) -> tuple[str, str, str]:
       <p style="font-size: 16px; line-height: 1.6;">
         Que este novo ciclo venha cheio de saúde, conquistas e bons
         momentos ao lado de quem você ama.
-      </p>
+      </p>"""
+    mensagem_curta = """
+      <p style="font-size: 16px; line-height: 1.6;">
+        Hoje o dia é seu — <strong>feliz aniversário!</strong> 🎉
+        Conte sempre com a gente.
+      </p>""" if com_arte else ""
+    html = f"""\
+<html>
+  <body style="font-family: Georgia, 'Times New Roman', serif; color: #2b2b2b;
+               max-width: 560px; margin: 0 auto; padding: 24px;">
+    {arte_html}
+    <div style="border-top: 4px solid #68192E; padding-top: 24px;">
+      <p style="font-size: 17px;">Olá, <strong>{primeiro_nome}</strong>!</p>
+      {saudacao_extra}{mensagem_curta}
       <p style="font-size: 16px;">Um grande abraço,</p>
       <p style="margin-top: 28px; font-size: 15px;">
         <strong style="color: #68192E;">Mario Noviello</strong><br>
@@ -168,20 +241,45 @@ def enviar_email_parabens(
     destinatario: str,
     nome: str,
 ) -> bool:
-    """Envia o email via SMTP (STARTTLS). True só se aceito pelo servidor."""
-    assunto, texto, html = montar_email_parabens(nome)
-    msg = MIMEMultipart("alternative")
+    """Envia o email via SMTP (STARTTLS). True só se aceito pelo servidor.
+
+    Se as artes da marca existirem em ``assets/``, monta
+    multipart/related com o cartão inline (clara=mulheres,
+    escura=homens via escolher_arte). Sem as artes → versão só-texto
+    de antes (graceful).
+    """
+    arte_path = escolher_arte(nome)
+    com_arte = arte_path.is_file()
+    assunto, texto, html = montar_email_parabens(nome, com_arte=com_arte)
+
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(texto, "plain", "utf-8"))
+    alt.attach(MIMEText(html, "html", "utf-8"))
+
+    if com_arte:
+        msg: MIMEMultipart = MIMEMultipart("related")
+        msg.attach(alt)
+        img = MIMEImage(arte_path.read_bytes())
+        img.add_header("Content-ID", "<arte>")
+        img.add_header(
+            "Content-Disposition", "inline", filename=arte_path.name,
+        )
+        msg.attach(img)
+    else:
+        msg = alt
+
     msg["Subject"] = assunto
     msg["From"] = formataddr((from_name, smtp_user))
     msg["To"] = destinatario
-    msg.attach(MIMEText(texto, "plain", "utf-8"))
-    msg.attach(MIMEText(html, "html", "utf-8"))
     try:
         with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
             server.starttls()
             server.login(smtp_user, smtp_password)
             server.sendmail(smtp_user, [destinatario], msg.as_string())
-        logger.info("email de parabéns enviado pra %s <%s>", nome, destinatario)
+        logger.info(
+            "email de parabéns enviado pra %s <%s> (arte=%s)",
+            nome, destinatario, arte_path.name if com_arte else "sem",
+        )
         return True
     except Exception as exc:
         logger.exception(

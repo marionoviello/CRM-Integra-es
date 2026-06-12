@@ -170,3 +170,97 @@ def test_mensagem_marca_quem_recebeu_email():
     assert "Com Email — https://wa.me/5511911112222 📧✅" in msg
     assert "Sem Email — https://wa.me/5511933334444" in msg
     assert "já recebeu email" in msg
+
+
+# --- Arte por gênero (clara=mulheres, escura=homens) ------------------------
+
+def test_escolher_arte_heuristica_nomes_br():
+    from noviello_funil.aniversarios import ARTE_CLARA, ARTE_ESCURA, escolher_arte
+    # Femininos clássicos (sufixo 'a' + exceções sem 'a')
+    for nome in ("Maria Silva", "Cátia de Lourdes", "Madalena Vanda",
+                 "Isabel Cristina", "Raquel", "ALINE SOUZA"):
+        assert escolher_arte(nome) == ARTE_CLARA, nome
+    # Masculinos (sem 'a' + exceções com 'a')
+    for nome in ("Sergio Tellini", "Mario Noviello", "João Pedro",
+                 "Luca Mendes", "Denis"):
+        assert escolher_arte(nome) == ARTE_ESCURA, nome
+    # Vazio/estranho → escura (fallback)
+    assert escolher_arte("") == ARTE_ESCURA
+
+
+def test_email_com_arte_usa_cid_e_multipart_related(monkeypatch, tmp_path):
+    from noviello_funil import aniversarios as mod
+
+    # Simula as artes existindo
+    clara = tmp_path / "clara.png"
+    escura = tmp_path / "escura.png"
+    clara.write_bytes(b"\x89PNG\r\n\x1a\nfakeclara")
+    escura.write_bytes(b"\x89PNG\r\n\x1a\nfakeescura")
+    monkeypatch.setattr(mod, "ARTE_CLARA", clara)
+    monkeypatch.setattr(mod, "ARTE_ESCURA", escura)
+
+    corpos = []
+
+    class FakeSMTP:
+        def __init__(self, *a, **k):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def starttls(self):
+            pass
+        def login(self, u, p):
+            pass
+        def sendmail(self, de, para, corpo):
+            corpos.append(corpo)
+
+    monkeypatch.setattr(mod.smtplib, "SMTP", FakeSMTP)
+    ok = mod.enviar_email_parabens(
+        smtp_host="h", smtp_port=587, smtp_user="u@x.com",
+        smtp_password="p", from_name="Mario",
+        destinatario="cliente@x.com", nome="Maria Silva",
+    )
+    assert ok
+    corpo = corpos[0]
+    assert "multipart/related" in corpo
+    assert "Content-ID: <arte>" in corpo
+    # O HTML vai base64-encoded no MIME — valida o cid no template cru
+    _, _, html = mod.montar_email_parabens("Maria", com_arte=True)
+    assert 'src="cid:arte"' in html
+    # Arte CLARA pra Maria (base64 do conteúdo fake da clara presente)
+    import base64
+    assert base64.b64encode(b"\x89PNG\r\n\x1a\nfakeclara").decode() in \
+        corpo.replace("\n", "")
+
+
+def test_email_sem_arte_continua_funcionando(monkeypatch, tmp_path):
+    """Assets ausentes (ex: antes do deploy das imagens) → versão texto."""
+    from noviello_funil import aniversarios as mod
+    monkeypatch.setattr(mod, "ARTE_CLARA", tmp_path / "nao-existe.png")
+    monkeypatch.setattr(mod, "ARTE_ESCURA", tmp_path / "nao-existe2.png")
+
+    corpos = []
+
+    class FakeSMTP:
+        def __init__(self, *a, **k):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def starttls(self):
+            pass
+        def login(self, u, p):
+            pass
+        def sendmail(self, de, para, corpo):
+            corpos.append(corpo)
+
+    monkeypatch.setattr(mod.smtplib, "SMTP", FakeSMTP)
+    ok = mod.enviar_email_parabens(
+        smtp_host="h", smtp_port=587, smtp_user="u@x.com",
+        smtp_password="p", from_name="M",
+        destinatario="c@x.com", nome="Sergio",
+    )
+    assert ok
+    assert "cid:arte" not in corpos[0]
