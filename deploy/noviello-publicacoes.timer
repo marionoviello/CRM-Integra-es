@@ -1,0 +1,14 @@
+[Unit]
+Description=Noviello Funil Saude - Publicacoes nao tratadas (08h30 BRT)
+
+[Timer]
+# 11:30 UTC = 08:30 America/Sao_Paulo — meia hora depois do job de
+# aniversários pra não concorrerem. Persistent=true: VPS desligado no
+# horário → roda assim que subir. Publicação não tratada = risco de
+# prazo; o alerta repete diariamente até alguém tratar no painel.
+OnCalendar=*-*-* 11:30:00
+Persistent=true
+Unit=noviello-publicacoes.service
+
+[Install]
+WantedBy=timers.target

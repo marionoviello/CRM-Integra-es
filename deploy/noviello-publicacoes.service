@@ -1,0 +1,15 @@
+[Unit]
+Description=Noviello Funil Saude - Publicacoes nao tratadas (alerta WhatsApp)
+After=network.target
+
+[Service]
+Type=oneshot
+User=noviello
+Group=noviello
+WorkingDirectory=/opt/noviello-funil-saude
+EnvironmentFile=/opt/noviello-funil-saude/.env
+ExecStart=/opt/noviello-funil-saude/.venv/bin/noviello-publicacoes
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
