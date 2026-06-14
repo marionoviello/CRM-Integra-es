@@ -1631,3 +1631,57 @@ async def test_opt_out_suprime_confirma_e_sai_do_funil(db_conn):
     assert lead["estado"] == Estado.AGUARDANDO_HUMANO
     # não chamou o Claude (curto-circuitou antes da triagem)
     triagem_fn.assert_not_called()
+
+
+# --- 1.6 reconhecer cliente existente ---------------------------------------
+
+@pytest.mark.asyncio
+async def test_cliente_existente_avisa_mario_e_segue(db_conn):
+    from noviello_funil.person_index import chaves_telefone
+    # popula o índice com o telefone do lead de teste (5511999999999)
+    for ch in chaves_telefone("5511999999999"):
+        db_conn.execute(
+            "INSERT OR REPLACE INTO person_index "
+            "(telefone_chave, person_id, nome, email) VALUES (?, ?, ?, ?)",
+            (ch, "P-CLI", "Cliente Antigo", "cli@x.com"),
+        )
+    transcript = "Lead: oi, tudo bem? preciso de uma ajuda nova"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = await _triagem_returning(
+        Decisao(acao="responder", mensagem="Claro, como posso ajudar?")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    textos = [c[0][1] for c in jurichat.send_message.call_args_list]
+    # avisou o Mario que é cliente da casa
+    assert any("JÁ É CLIENTE" in t and "Cliente Antigo" in t for t in textos)
+    # e seguiu atendendo normalmente (não mudou o fluxo)
+    assert any("como posso ajudar" in t for t in textos)
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["cliente_checado_em"] is not None
+
+
+@pytest.mark.asyncio
+async def test_lead_desconhecido_nao_aciona_aviso_de_cliente(db_conn):
+    transcript = "Lead: oi, quero saber sobre usucapião"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")  # índice vazio
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = await _triagem_returning(
+        Decisao(acao="responder", mensagem="Posso explicar!")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    textos = [c[0][1] for c in jurichat.send_message.call_args_list]
+    assert not any("JÁ É CLIENTE" in t for t in textos)
+    # mesmo sem match, marca o check pra não repetir
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["cliente_checado_em"] is not None

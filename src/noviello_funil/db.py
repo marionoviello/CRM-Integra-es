@@ -153,6 +153,9 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     # alerta 🚨 ao Mario — NULL = ainda não escalado. Evita repetir o
     # alerta a cada mensagem do lead urgente.
     _ensure_column(conn, "leads", "urgencia_alertada_em", "TEXT")
+    # Reconhecer cliente existente (roadmap 1.6). Timestamp do check
+    # contra o person_index — NULL = ainda não checado. Roda 1x por lead.
+    _ensure_column(conn, "leads", "cliente_checado_em", "TEXT")
 
 
 def _ensure_column(

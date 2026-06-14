@@ -349,6 +349,16 @@ def mark_urgencia_alertada(conn: sqlite3.Connection, lead_id: int) -> None:
     )
 
 
+def mark_cliente_checado(conn: sqlite3.Connection, lead_id: int) -> None:
+    """Stamp cliente_checado_em = now (roadmap 1.6). O reconhecimento de
+    cliente roda UMA vez por lead (não a cada mensagem)."""
+    conn.execute(
+        "UPDATE leads SET cliente_checado_em = datetime('now'), "
+        "atualizado_em = datetime('now') WHERE id = ?",
+        (lead_id,),
+    )
+
+
 def list_leads_vencidos(
     conn: sqlite3.Connection, *, fu1_apos_horas: int = 48,
 ) -> list[sqlite3.Row]:

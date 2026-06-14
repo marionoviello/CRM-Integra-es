@@ -35,6 +35,7 @@ from noviello_funil.calendar_client import (
 )
 from noviello_funil.juridiq_client import JuridiqClient, intake_lead_agendado
 from noviello_funil.opt_out import detectar_opt_out, registrar_opt_out
+from noviello_funil.person_index import resolver_telefone
 from noviello_funil.urgencia import detectar_urgencia
 from noviello_funil.outbound import (
     JurichatClient,
@@ -52,6 +53,7 @@ from noviello_funil.state import (
     list_leads_para_polling,
     list_leads_para_reativacao,
     list_leads_vencidos,
+    mark_cliente_checado,
     mark_lead_activity_now,
     mark_lembrete_enviado,
     mark_urgencia_alertada,
@@ -1072,6 +1074,38 @@ async def run_poll_cycle(
             update_transcript_hash(conn, lead_id, new_hash)
             schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
             continue
+
+        # Signal 1.4: RECONHECER CLIENTE (roadmap 1.6). Na 1ª interação,
+        # cruza o telefone com o índice do Juridiq (person_index). Se é
+        # cliente da casa, avisa o Mario — ADITIVO, não muda o atendimento
+        # (quem já é cliente não deveria ser tratado como estranho). Roda
+        # 1x por lead; índice vazio → no-op gracioso.
+        if not lead["cliente_checado_em"]:
+            mark_cliente_checado(conn, lead_id)
+            ficha = resolver_telefone(conn, lead["contato_telefone"])
+            if ficha:
+                logger.info(
+                    "lead=%s reconhecido como cliente: %s",
+                    lead_id, ficha.get("nome"),
+                )
+                try:
+                    await notify_mario(
+                        jurichat,
+                        mario_conversation_id=mario_conversation_id,
+                        mensagem=format_notification(
+                            tipo="cliente_retornou",
+                            nome=ficha.get("nome") or lead["contato_nome"],
+                            telefone=lead["contato_telefone"],
+                            ultima_msg=_last_lead_message(transcript),
+                            motivo=ficha.get("email") or "",
+                            conversation_id=conv_id,
+                        ),
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "notify_mario(cliente) failed for lead=%s: %s",
+                        lead_id, exc,
+                    )
 
         # Signal 1.5: URGÊNCIA JURÍDICA (roadmap 1.12). Lead com prazo/ato
         # fatal ("fui citado", "penhora", "leilão amanhã") não pode esperar

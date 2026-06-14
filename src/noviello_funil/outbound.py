@@ -431,7 +431,11 @@ def format_notification(
     """
     nome_label = nome or "(sem nome)"
 
-    if tipo == "urgencia":
+    if tipo == "cliente_retornou":
+        head = f"🤝 {nome_label} ({telefone}) — JÁ É CLIENTE da casa"
+        body = f"Reconhecido pela ficha do Juridiq: {motivo or ''}".rstrip(": ")
+        extra = f'Voltou no funil. Última msg: "{ultima_msg}"'
+    elif tipo == "urgencia":
         head = f"🚨 Lead {nome_label} ({telefone}) — URGÊNCIA JURÍDICA"
         body = f"Sinal: {motivo or 'prazo/ato iminente'}"
         extra = f'Última msg: "{ultima_msg}"'
