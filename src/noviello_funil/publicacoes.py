@@ -1,21 +1,24 @@
-"""Alerta diário de publicações não tratadas no Juridiq.
+"""Alerta de publicações URGENTES não tratadas no Juridiq.
 
-Publicação de diário oficial parada sem tratamento = risco de prazo
-perdido. O Juridiq marca cada publicação com ``isHandled``; este job
-varre as não tratadas e manda a lista no WhatsApp do Mario (canal de
-alertas). Tratou no painel → alerta para sozinho no dia seguinte.
+O Juridiq já manda TODAS as movimentações no WhatsApp do Mario. Mandar
+a lista inteira de novo é ruído duplicado. Então este job faz o que o
+Juridiq não faz: lê o TEOR de cada publicação ainda não tratada,
+classifica com o Claude (urgente x rotina) e só fura o silêncio quando
+algo exige ação num prazo (intimação, audiência, sentença, citação,
+penhora/leilão). Nada urgente → não envia nada.
+
+É um realce sobre o canal primário do Juridiq, não um segundo canal de
+tudo. Fail-safe: se a classificação falhar, a publicação entra no
+alerta marcada "conferir" — nunca suprime o que não entendeu.
 
 Execução: console script ``noviello-publicacoes`` via systemd timer
-diário (08h30 BRT, meia hora após o de aniversários). Zero não
-tratadas → não envia nada (sem ruído). Enquanto houver pendência, o
-alerta REPETE todo dia — nag intencional, prazo é sério.
-
-Nota: diferente do GET /person/ (filtros quebrados), o filtro
-``isHandled`` do GET /publication/ FUNCIONA (verificado 2026-06-11
-contra a base real: 99 publicações, isHandled=false retornou só 1).
+diário (08h30 BRT). Quirk: o filtro ``isHandled=false`` do
+GET /publication/ FUNCIONA (≠ /person/); o ``title`` é genérico
+("Movimentação de processo") — o sinal de urgência está no ``content``.
 """
 
 import asyncio
+import json
 import logging
 import re
 
@@ -24,11 +27,47 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # Cap de itens detalhados na mensagem (o total sempre aparece no topo).
-MAX_ITENS = 10
+MAX_ITENS = 12
 _RESUMO_CHARS = 90
+# Teor enviado ao Claude por publicação. O tipo do ato + dispositivo
+# cabem com folga; truncar segura custo e latência.
+_TEOR_CHARS = 700
 
 # processNumber quando o Juridiq não identifica o processo na publicação.
 _SEM_PROCESSO = ("", "não encontrado", "nao encontrado")
+
+_CLASSIFICADOR_SYSTEM = """\
+Você assiste um advogado brasileiro. Para cada publicação de diário \
+oficial / movimentação processual, decida se ela é URGENTE (exige ação \
+do advogado dentro de um prazo, ou comunica risco/constrição) ou ROTINA \
+(mero andamento, não exige ato imediato).
+
+URGENTE:
+- Intimação que abre prazo (manifestação, contestação, impugnação, \
+recurso, embargos, cumprimento de sentença, emenda à inicial)
+- Audiência ou perícia designada (data marcada)
+- Sentença ou acórdão (abre prazo recursal)
+- Decisão sobre liminar/tutela, ou despacho que determina providência \
+da parte com prazo
+- Citação (cite-se)
+- Penhora, bloqueio/Sisbajud, arresto, sequestro, leilão/praça/hasta
+
+ROTINA:
+- Mero expediente, juntada de petição, vista ao MP/perito/contadoria
+- Ciência de ato sem prazo para a parte, conclusão, remessa, certidão
+- Publicação meramente informativa
+- Homologação/decisão que não exige ato (acordo já cumprido, baixa)
+
+Responda APENAS com um array JSON, um objeto por publicação, na MESMA \
+ordem recebida:
+[{"id":"<id>","urgente":true|false,"motivo":"<= 8 palavras","prazo":\
+"<prazo se houver, ex: 15 dias / 20/06; senão vazio>"}]"""
+
+
+def _limpar_teor(html: str) -> str:
+    """HTML do teor → texto plano colapsado."""
+    txt = re.sub(r"<[^>]+>", " ", html or "")
+    return re.sub(r"\s+", " ", txt).strip()
 
 
 def _data_curta(raw: object) -> str:
@@ -60,7 +99,7 @@ def _data_ordenavel(raw: object) -> str:
 def buscar_nao_tratadas(client: httpx.Client) -> list[dict]:
     """GET /publication/?isHandled=false paginado, normalizado.
 
-    Cada item: {id, processo, resumo, data, diario}.
+    Cada item: {id, processo, resumo, data, diario, teor}.
     """
     brutas, page = [], 1
     while True:
@@ -81,9 +120,8 @@ def buscar_nao_tratadas(client: httpx.Client) -> list[dict]:
         if processo.lower() in _SEM_PROCESSO:
             processo = ""
         diario = (p.get("officialDiary") or "").strip()
-        # title traz o tipo do ato ("Nova citação"); descriptionSmall
-        # costuma só repetir o nome do diário (verificado 2026-06-11) —
-        # candidato igual ao diário é descartado.
+        # title traz o tipo do ato; descriptionSmall costuma só repetir o
+        # diário (verificado 2026-06-11) — candidato igual ao diário cai.
         resumo = next(
             (
                 c.strip()
@@ -98,34 +136,108 @@ def buscar_nao_tratadas(client: httpx.Client) -> list[dict]:
             "resumo": resumo,
             "data": p.get("publicationDate") or p.get("availabilityDate"),
             "diario": diario,
+            "teor": _limpar_teor(p.get("content") or ""),
         })
     return pubs
 
 
-def montar_mensagem(pubs: list[dict]) -> str:
-    """Mensagem WhatsApp-ready pro canal de alertas do Mario."""
-    n = len(pubs)
-    plural = "publicações não tratadas" if n > 1 else "publicação não tratada"
-    cab = f"📌 *{n} {plural} no Juridiq*\n"
+def _parse_veredictos(raw: str, pubs: list[dict]) -> list[dict]:
+    """Mescla o veredicto do Claude em cada publicação. Fail-safe urgente.
 
-    ordenadas = sorted(pubs, key=lambda p: _data_ordenavel(p.get("data")))
+    - JSON inválido → TODAS viram urgentes ("conferir").
+    - publicação sem veredicto no retorno → urgente (fail-safe).
+    Nunca suprime silenciosamente uma publicação que não foi classificada.
+    """
+    por_id: dict[str, dict] = {}
+    text = (raw or "").strip()
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+    if fenced:
+        text = fenced.group(1).strip()
+    i, j = text.find("["), text.rfind("]")
+    if i != -1 and j > i:
+        try:
+            for v in json.loads(text[i : j + 1]):
+                if isinstance(v, dict) and v.get("id"):
+                    por_id[str(v["id"])] = v
+        except (json.JSONDecodeError, TypeError):
+            por_id = {}
+
+    out = []
+    for p in pubs:
+        v = por_id.get(p["id"])
+        if v is None:
+            out.append({**p, "urgente": True,
+                        "motivo": "não foi possível classificar — conferir",
+                        "prazo": ""})
+        else:
+            out.append({**p, "urgente": bool(v.get("urgente")),
+                        "motivo": (v.get("motivo") or "").strip(),
+                        "prazo": (v.get("prazo") or "").strip()})
+    return out
+
+
+async def classificar_urgencia(
+    anthropic_client, model: str, pubs: list[dict],
+) -> list[dict]:
+    """Classifica cada publicação como urgente/rotina via Claude.
+
+    Retorna a lista de pubs enriquecida com {urgente, motivo, prazo}.
+    Erro de API → fail-safe: todas urgentes ("conferir").
+    """
+    if not pubs:
+        return []
+    itens = [
+        {"id": p["id"], "tipo": p["resumo"] or "(movimentação)",
+         "teor": p["teor"][:_TEOR_CHARS]}
+        for p in pubs
+    ]
+    user_text = (
+        "Classifique as publicações abaixo. Responda só o array JSON.\n\n"
+        + json.dumps(itens, ensure_ascii=False)
+    )
+    try:
+        resp = await anthropic_client.messages.create(
+            model=model,
+            max_tokens=1024,
+            system=_CLASSIFICADOR_SYSTEM,
+            messages=[{"role": "user", "content": user_text}],
+        )
+        raw = resp.content[0].text
+    except Exception as exc:
+        logger.exception("publicacoes: classificação falhou: %s", exc)
+        raw = ""  # fail-safe: _parse marca tudo como urgente
+    return _parse_veredictos(raw, pubs)
+
+
+def montar_mensagem(urgentes: list[dict]) -> str:
+    """Mensagem WhatsApp-ready com SÓ as publicações urgentes."""
+    n = len(urgentes)
+    plural = (
+        "publicações que parecem urgentes" if n > 1
+        else "publicação que parece urgente"
+    )
+    cab = f"⚠️ *{n} {plural}*\n"
+
+    ordenadas = sorted(urgentes, key=lambda p: _data_ordenavel(p.get("data")))
     linhas = []
     for p in ordenadas[:MAX_ITENS]:
         ref = p["processo"] or p["diario"] or "(sem referência)"
-        resumo = p["resumo"][:_RESUMO_CHARS]
-        if len(p["resumo"]) > _RESUMO_CHARS:
-            resumo += "…"
         linha = f"• {_data_curta(p.get('data'))} — {ref}"
-        if resumo:
-            linha += f"\n   _{resumo}_"
+        motivo = (p.get("motivo") or "").strip()
+        prazo = (p.get("prazo") or "").strip()
+        detalhe = motivo
+        if prazo:
+            detalhe = f"{motivo} (prazo: {prazo})" if motivo else f"prazo: {prazo}"
+        if detalhe:
+            linha += f"\n   _{detalhe[:_RESUMO_CHARS]}_"
         linhas.append(linha)
 
     extra = ""
     if n > MAX_ITENS:
         extra = f"\n… e mais {n - MAX_ITENS}.\n"
     rodape = (
-        "\nTrate no painel do Juridiq (Publicações) pra silenciar "
-        "este alerta."
+        "\nO Juridiq segue mandando todas as movimentações; aqui vão só "
+        "as que parecem ter prazo. Trate no painel pra silenciar."
     )
     return cab + "\n" + "\n".join(linhas) + "\n" + extra + rodape
 
@@ -133,8 +245,10 @@ def montar_mensagem(pubs: list[dict]) -> str:
 def main() -> int:
     """Entry point do console script ``noviello-publicacoes``.
 
-    Zero publicações não tratadas → exit 0 silencioso (nenhum envio).
+    Zero publicações urgentes → exit 0 silencioso (nenhum envio).
     """
+    from anthropic import AsyncAnthropic
+
     from noviello_funil.config import Settings
     from noviello_funil.outbound import JurichatClient, notify_mario
 
@@ -165,10 +279,21 @@ def main() -> int:
     if not pubs:
         return 0
 
-    texto = montar_mensagem(pubs)
-    logger.info("publicacoes:\n%s", texto)
+    async def _run() -> None:
+        anthropic = AsyncAnthropic(api_key=settings.anthropic_api_key)
+        classificadas = await classificar_urgencia(
+            anthropic, settings.anthropic_model, pubs,
+        )
+        urgentes = [p for p in classificadas if p["urgente"]]
+        logger.info(
+            "publicacoes: %d urgente(s) de %d não tratada(s)",
+            len(urgentes), len(pubs),
+        )
+        if not urgentes:
+            return
 
-    async def _send() -> None:
+        texto = montar_mensagem(urgentes)
+        logger.info("publicacoes:\n%s", texto)
         jurichat = JurichatClient(
             api_key=settings.jurichat_api_key,
             base_url=settings.jurichat_base_url,
@@ -183,7 +308,7 @@ def main() -> int:
         finally:
             await jurichat.aclose()
 
-    asyncio.run(_send())
+    asyncio.run(_run())
     return 0
 
 
