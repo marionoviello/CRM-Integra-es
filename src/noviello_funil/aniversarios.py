@@ -370,6 +370,15 @@ def main() -> int:
             for a in aniversariantes:
                 if not a["email"]:
                     continue
+                # Endereço que já bouncou antes: não insiste (o
+                # detector_bounce marcou como morto).
+                morto = conn.execute(
+                    "SELECT 1 FROM emails_mortos WHERE email = ?",
+                    (a["email"].lower(),),
+                ).fetchone()
+                if morto:
+                    a["email_morto"] = True
+                    continue
                 ja = conn.execute(
                     "SELECT 1 FROM emails_aniversario "
                     "WHERE person_id = ? AND enviado_em = ?",

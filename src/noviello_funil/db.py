@@ -81,6 +81,16 @@ CREATE TABLE IF NOT EXISTS person_index (
     atualizado_em  TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (telefone_chave, person_id)
 );
+
+-- Emails que voltaram (bounce) — endereço inválido/morto. Os senders
+-- (aniversário etc) consultam antes de enviar pra não insistir no que
+-- nunca chega. Populada pelo detector_bounce ao cruzar devoluções da
+-- caixa com o que o sistema registrou como enviado.
+CREATE TABLE IF NOT EXISTS emails_mortos (
+    email        TEXT PRIMARY KEY,
+    motivo       TEXT,
+    detectado_em TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 

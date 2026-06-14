@@ -1,0 +1,12 @@
+[Unit]
+Description=Noviello Funil Saude - Detector de bounce (08h45 BRT diario)
+
+[Timer]
+# 11:45 UTC = 08:45 America/Sao_Paulo — depois dos jobs de envio da
+# manhã (aniversários 08h), pra pegar os bounces que já voltaram.
+OnCalendar=*-*-* 11:45:00
+Persistent=true
+Unit=noviello-bounce.service
+
+[Install]
+WantedBy=timers.target

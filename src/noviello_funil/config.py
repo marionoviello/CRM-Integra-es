@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     smtp_user: str = ""
     smtp_password: str = ""
     smtp_from_name: str = "Mario Noviello | Noviello Advocacia"
+    # IMAP (mesma conta/senha de app do SMTP) — o detector_bounce lê a
+    # caixa pra achar devoluções e avisar quando um email não chegou ao
+    # cliente. Exige IMAP habilitado na conta Workspace.
+    imap_host: str = "imap.gmail.com"
+    imap_port: int = 993
 
     # Dead-man's switch (healthchecks.io ou similar). Se preenchido, o
     # scheduler faz GET nesse URL ao fim de cada ciclo BEM-SUCEDIDO.

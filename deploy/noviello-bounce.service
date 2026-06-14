@@ -1,0 +1,16 @@
+[Unit]
+Description=Noviello Funil Saude - Detector de bounce (email devolvido)
+After=network.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=300
+User=noviello
+Group=noviello
+WorkingDirectory=/opt/noviello-funil-saude
+EnvironmentFile=/opt/noviello-funil-saude/.env
+ExecStart=/opt/noviello-funil-saude/.venv/bin/noviello-bounce
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
