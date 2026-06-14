@@ -350,6 +350,35 @@ def test_format_notification_handoff():
     assert "pediu falar com humano" in msg
 
 
+def test_format_notification_handoff_com_resumo():
+    # roadmap 1.11: resumo da conversa anexado pra equipe assumir rápido
+    msg = format_notification(
+        tipo="handoff",
+        nome="João",
+        telefone="5511888888888",
+        ultima_msg="quero falar com humano",
+        resumo="Usucapião em SP, posse há 12 anos, sem título — quer avaliar",
+        motivo="pediu falar com humano",
+        conversation_id="C-99",
+    )
+    assert "Resumo:" in msg
+    assert "Usucapião em SP" in msg
+
+
+def test_format_notification_urgencia():
+    msg = format_notification(
+        tipo="urgencia",
+        nome="Ana",
+        telefone="5511777777777",
+        ultima_msg="penhoraram minha conta!",
+        motivo="penhora/bloqueio de bens",
+        conversation_id="C-5",
+    )
+    assert msg.startswith("🚨")
+    assert "URGÊNCIA" in msg
+    assert "penhora/bloqueio de bens" in msg
+
+
 def test_format_notification_claude_erro():
     msg = format_notification(
         tipo="claude_erro",

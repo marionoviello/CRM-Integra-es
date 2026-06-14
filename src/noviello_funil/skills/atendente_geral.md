@@ -366,7 +366,7 @@ markdown:
 {
   "acao": "responder" | "propor" | "handoff" | "oferecer_horarios" | "confirmar_horario" | "remarcar_reuniao" | "cancelar_reuniao",
   "mensagem": "<texto a enviar ao lead>",
-  "resumo_caso": "<presente em propor e confirmar_horario; 1-2 linhas>",
+  "resumo_caso": "<presente em propor, confirmar_horario e handoff; 1-2 linhas>",
   "motivo_handoff": "<presente apenas se acao=handoff; 1 linha>",
   "horario_escolhido_iso": "<presente apenas em confirmar_horario; ISO 8601>",
   "lead_email": "<presente apenas em confirmar_horario; email completo>"
@@ -376,7 +376,9 @@ markdown:
 Regras:
 - `responder`: omita resumo_caso, motivo_handoff, horario_escolhido_iso, lead_email.
 - `propor`: inclua `resumo_caso`; omita os outros.
-- `handoff`: inclua `motivo_handoff`; omita os outros.
+- `handoff`: inclua `motivo_handoff` E `resumo_caso` (pra equipe assumir
+  sem reler a conversa: o que o lead quer, vertical, dados já coletados);
+  omita os outros.
 - `oferecer_horarios`: omita todos os campos opcionais — a `mensagem`
   deve conter `{{HORARIOS}}`.
 - `confirmar_horario`: inclua `horario_escolhido_iso`, `lead_email` E

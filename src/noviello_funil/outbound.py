@@ -442,7 +442,9 @@ def format_notification(
     elif tipo == "handoff":
         head = f"⚠️ Lead {nome_label} ({telefone}) — PRECISA DE VOCÊ"
         body = f"Motivo: {motivo or 'não especificado'}"
-        extra = f'Última msg: "{ultima_msg}"'
+        # Resumo da conversa (roadmap 1.11): equipe assume sem reler tudo.
+        resumo_linha = f"\nResumo: {resumo}" if resumo else ""
+        extra = f'Última msg: "{ultima_msg}"{resumo_linha}'
     elif tipo == "turnos":
         head = f"⏸ Lead {nome_label} ({telefone}) — 20 turnos sem progresso"
         body = f'Última msg: "{ultima_msg}"'

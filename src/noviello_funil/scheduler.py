@@ -1345,6 +1345,7 @@ async def run_poll_cycle(
                         telefone=lead["contato_telefone"],
                         ultima_msg=_last_lead_message(transcript),
                         motivo=decisao.motivo_handoff,
+                        resumo=decisao.resumo_caso,
                         conversation_id=conv_id,
                     ),
                 )
