@@ -1,0 +1,12 @@
+[Unit]
+Description=Noviello Funil Saude - Indice telefone->ficha (04h BRT diario)
+
+[Timer]
+# 07:00 UTC = 04:00 America/Sao_Paulo — de madrugada, antes dos jobs
+# da manhã (aniversários 08h etc) que poderão consultar o índice.
+OnCalendar=*-*-* 07:00:00
+Persistent=true
+Unit=noviello-indice.service
+
+[Install]
+WantedBy=timers.target

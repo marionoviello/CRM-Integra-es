@@ -30,6 +30,7 @@ noviello-relatorio = "noviello_funil.relatorio:main"
 noviello-aniversarios = "noviello_funil.aniversarios:main"
 noviello-publicacoes = "noviello_funil.publicacoes:main"
 noviello-saude-carteira = "noviello_funil.saude_carteira:main"
+noviello-indice = "noviello_funil.person_index:main"
 
 [build-system]
 requires = ["hatchling"]

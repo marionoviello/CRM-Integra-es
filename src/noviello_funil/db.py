@@ -67,6 +67,20 @@ CREATE TABLE IF NOT EXISTS carteira_erro_visto (
     process_number TEXT PRIMARY KEY,
     primeiro_visto TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Índice telefone→ficha do Juridiq (roadmap 0.1). Repovoado de
+-- madrugada a partir do GET /person/ (que já traz phone/email/document).
+-- Uma pessoa gera N linhas (variantes do número: com/sem 9º dígito).
+-- Destrava reconhecer cliente existente e detectar conflito de interesse.
+CREATE TABLE IF NOT EXISTS person_index (
+    telefone_chave TEXT NOT NULL,
+    person_id      TEXT NOT NULL,
+    nome           TEXT,
+    email          TEXT,
+    document       TEXT,
+    atualizado_em  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (telefone_chave, person_id)
+);
 """
 
 
