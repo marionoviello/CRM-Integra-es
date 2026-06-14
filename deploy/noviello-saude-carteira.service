@@ -1,0 +1,18 @@
+[Unit]
+Description=Noviello Funil Saude - Saude da carteira (monitoramento + parados)
+After=network.target
+
+[Service]
+Type=oneshot
+# Lista a carteira inteira (~284 processos, paginado) — rápido, mas
+# 5 min de folga não custa nada.
+TimeoutStartSec=300
+User=noviello
+Group=noviello
+WorkingDirectory=/opt/noviello-funil-saude
+EnvironmentFile=/opt/noviello-funil-saude/.env
+ExecStart=/opt/noviello-funil-saude/.venv/bin/noviello-saude-carteira
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true

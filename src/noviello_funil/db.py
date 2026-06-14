@@ -59,6 +59,14 @@ CREATE TABLE IF NOT EXISTS emails_aniversario (
     email       TEXT,
     UNIQUE(person_id, enviado_em)
 );
+
+-- Processos com monitoringStatus=ERRO já vistos pelo job de saúde da
+-- carteira. Serve pra destacar 🆕 só os que entraram em erro desde a
+-- última execução (em vez de repetir a lista inteira toda semana).
+CREATE TABLE IF NOT EXISTS carteira_erro_visto (
+    process_number TEXT PRIMARY KEY,
+    primeiro_visto TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 

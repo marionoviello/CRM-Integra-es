@@ -29,6 +29,7 @@ noviello-followup = "noviello_funil.scheduler:main"
 noviello-relatorio = "noviello_funil.relatorio:main"
 noviello-aniversarios = "noviello_funil.aniversarios:main"
 noviello-publicacoes = "noviello_funil.publicacoes:main"
+noviello-saude-carteira = "noviello_funil.saude_carteira:main"
 
 [build-system]
 requires = ["hatchling"]

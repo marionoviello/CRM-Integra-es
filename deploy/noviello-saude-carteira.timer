@@ -1,0 +1,13 @@
+[Unit]
+Description=Noviello Funil Saude - Saude da carteira (segunda 09h BRT)
+
+[Timer]
+# 12:00 UTC = 09:00 America/Sao_Paulo, segunda-feira — logo após o
+# relatório de funil (08h). Semanal: o monitoramento em ERRO e os
+# processos parados mudam devagar; alerta diário seria ruído.
+OnCalendar=Mon *-*-* 12:00:00
+Persistent=true
+Unit=noviello-saude-carteira.service
+
+[Install]
+WantedBy=timers.target
