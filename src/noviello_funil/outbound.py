@@ -431,7 +431,11 @@ def format_notification(
     """
     nome_label = nome or "(sem nome)"
 
-    if tipo == "fechar":
+    if tipo == "urgencia":
+        head = f"🚨 Lead {nome_label} ({telefone}) — URGÊNCIA JURÍDICA"
+        body = f"Sinal: {motivo or 'prazo/ato iminente'}"
+        extra = f'Última msg: "{ultima_msg}"'
+    elif tipo == "fechar":
         head = f"🔥 Lead {nome_label} ({telefone}) — QUER FECHAR"
         body = f'Última msg: "{ultima_msg}"'
         extra = f"Resumo Claude: {resumo}" if resumo else ""

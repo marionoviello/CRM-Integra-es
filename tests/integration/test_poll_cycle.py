@@ -169,7 +169,8 @@ async def test_hash_changed_propor_transitions_and_notifies(db_conn):
 
 @pytest.mark.asyncio
 async def test_hash_changed_handoff_transitions_and_notifies(db_conn):
-    transcript = "Lead: preciso falar com humano urgente"
+    # sem palavra de urgência: isola o handoff do escalonamento 1.12
+    transcript = "Lead: preciso falar com um atendente humano"
     _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
 
     jurichat = _make_jurichat(transcript)
@@ -1533,3 +1534,72 @@ async def test_fu_proprio_nao_reativa_lead(db_conn):
     # hash registrado pra não re-checar a mesma mudança todo tick
     assert lead["ultimo_transcript_hash"] is not None
     assert lead["ultimo_transcript_hash"] != "stale"
+
+
+# --- 1.12 escalonamento de urgência jurídica --------------------------------
+
+@pytest.mark.asyncio
+async def test_urgencia_escala_pro_mario_e_segue_atendendo(db_conn):
+    transcript = "Lead: socorro, fui citado e a audiência é amanhã!"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = await _triagem_returning(
+        Decisao(acao="responder", mensagem="Entendo a urgência, vamos te ajudar.")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    textos = [c[0][1] for c in jurichat.send_message.call_args_list]
+    # alertou o Mario com urgência (🚨)
+    assert any("URGÊNCIA" in t for t in textos)
+    # E NÃO interrompeu: o bot ainda respondeu o lead normalmente
+    assert any("vamos te ajudar" in t for t in textos)
+    # marca persistida pra não repetir
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["urgencia_alertada_em"] is not None
+
+
+@pytest.mark.asyncio
+async def test_urgencia_nao_repete_se_ja_alertada(db_conn):
+    transcript = "Lead: penhoraram minha conta de novo!"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+    # lead já foi escalado antes
+    db_conn.execute(
+        "UPDATE leads SET urgencia_alertada_em = datetime('now') WHERE jurichat_conversation_id = ?",
+        ("C-1",),
+    )
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = await _triagem_returning(
+        Decisao(acao="responder", mensagem="Ok, seguimos.")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    textos = [c[0][1] for c in jurichat.send_message.call_args_list]
+    assert not any("URGÊNCIA" in t for t in textos)  # não re-alertou
+
+
+@pytest.mark.asyncio
+async def test_mensagem_comum_nao_escala_urgencia(db_conn):
+    transcript = "Lead: oi, queria saber sobre inventário"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = await _triagem_returning(
+        Decisao(acao="responder", mensagem="Claro, posso explicar!")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    textos = [c[0][1] for c in jurichat.send_message.call_args_list]
+    assert not any("URGÊNCIA" in t for t in textos)
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["urgencia_alertada_em"] is None

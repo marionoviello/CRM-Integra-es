@@ -34,6 +34,7 @@ from noviello_funil.calendar_client import (
     Slot,
 )
 from noviello_funil.juridiq_client import JuridiqClient, intake_lead_agendado
+from noviello_funil.urgencia import detectar_urgencia
 from noviello_funil.outbound import (
     JurichatClient,
     format_notification,
@@ -52,6 +53,7 @@ from noviello_funil.state import (
     list_leads_vencidos,
     mark_lead_activity_now,
     mark_lembrete_enviado,
+    mark_urgencia_alertada,
     register_error,
     schedule_next_action_seconds,
     set_reuniao,
@@ -1069,6 +1071,37 @@ async def run_poll_cycle(
             update_transcript_hash(conn, lead_id, new_hash)
             schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
             continue
+
+        # Signal 1.5: URGÊNCIA JURÍDICA (roadmap 1.12). Lead com prazo/ato
+        # fatal ("fui citado", "penhora", "leilão amanhã") não pode esperar
+        # o funil. Escala 🚨 ao Mario UMA vez (urgencia_alertada_em) e NÃO
+        # interrompe: o bot segue atendendo normalmente (triagem abaixo).
+        if not lead["urgencia_alertada_em"]:
+            motivo_urgencia = detectar_urgencia(_last_lead_message(transcript))
+            if motivo_urgencia:
+                mark_urgencia_alertada(conn, lead_id)
+                logger.info(
+                    "lead=%s: urgência detectada (%s) — escalando pro Mario",
+                    lead_id, motivo_urgencia,
+                )
+                try:
+                    await notify_mario(
+                        jurichat,
+                        mario_conversation_id=mario_conversation_id,
+                        mensagem=format_notification(
+                            tipo="urgencia",
+                            nome=lead["contato_nome"],
+                            telefone=lead["contato_telefone"],
+                            ultima_msg=_last_lead_message(transcript),
+                            motivo=motivo_urgencia,
+                            conversation_id=conv_id,
+                        ),
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "notify_mario(urgencia) failed for lead=%s: %s",
+                        lead_id, exc,
+                    )
 
         # Signal 2: turn cap reached → hand off to Mario.
         if _count_lead_lines(transcript) >= max_turnos:

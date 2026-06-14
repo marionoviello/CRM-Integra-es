@@ -130,6 +130,10 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "leads", "lembrete_24h_enviado_em", "TEXT")
     _ensure_column(conn, "leads", "lembrete_2h_enviado_em", "TEXT")
     _ensure_column(conn, "leads", "lembrete_30min_enviado_em", "TEXT")
+    # Escalonamento de urgência jurídica (roadmap 1.12). Timestamp do
+    # alerta 🚨 ao Mario — NULL = ainda não escalado. Evita repetir o
+    # alerta a cada mensagem do lead urgente.
+    _ensure_column(conn, "leads", "urgencia_alertada_em", "TEXT")
 
 
 def _ensure_column(

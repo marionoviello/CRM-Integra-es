@@ -339,6 +339,16 @@ def update_transcript_hash(
     )
 
 
+def mark_urgencia_alertada(conn: sqlite3.Connection, lead_id: int) -> None:
+    """Stamp urgencia_alertada_em = now (roadmap 1.12). Garante que o
+    alerta 🚨 de urgência sai UMA vez por lead, não a cada mensagem."""
+    conn.execute(
+        "UPDATE leads SET urgencia_alertada_em = datetime('now'), "
+        "atualizado_em = datetime('now') WHERE id = ?",
+        (lead_id,),
+    )
+
+
 def list_leads_vencidos(
     conn: sqlite3.Connection, *, fu1_apos_horas: int = 48,
 ) -> list[sqlite3.Row]:
