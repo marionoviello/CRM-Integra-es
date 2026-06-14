@@ -1603,3 +1603,31 @@ async def test_mensagem_comum_nao_escala_urgencia(db_conn):
     assert not any("URGÊNCIA" in t for t in textos)
     lead = get_lead_by_conversation(db_conn, "C-1")
     assert lead["urgencia_alertada_em"] is None
+
+
+# --- 1.10 opt-out / LGPD ----------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_opt_out_suprime_confirma_e_sai_do_funil(db_conn):
+    from noviello_funil.opt_out import esta_suprimido
+
+    transcript = "Lead: pode parar de me mandar mensagem, por favor"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = AsyncMock(side_effect=AssertionError("não deve chamar Claude no opt-out"))
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    # registrou na supressão (pelo telefone do lead)
+    assert esta_suprimido(db_conn, telefone="5511999999999")
+    # confirmou de forma sóbria ao lead
+    textos = [c[0][1] for c in jurichat.send_message.call_args_list]
+    assert any("não vou mais te enviar" in t for t in textos)
+    # saiu do funil automático
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.AGUARDANDO_HUMANO
+    # não chamou o Claude (curto-circuitou antes da triagem)
+    triagem_fn.assert_not_called()

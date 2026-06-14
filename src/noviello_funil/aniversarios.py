@@ -366,9 +366,17 @@ def main() -> int:
         conn = connect(settings.database_path)
         run_migrations(conn)
         try:
+            from noviello_funil.opt_out import esta_suprimido
+
             hoje_str = hoje.isoformat()
             for a in aniversariantes:
                 if not a["email"]:
+                    continue
+                # Opt-out / LGPD (1.10): quem pediu pra parar não recebe.
+                if esta_suprimido(
+                    conn, telefone=a.get("telefone", ""), email=a["email"],
+                ):
+                    a["email_suprimido"] = True
                     continue
                 # Endereço que já bouncou antes: não insiste (o
                 # detector_bounce marcou como morto).

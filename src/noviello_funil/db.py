@@ -99,6 +99,17 @@ CREATE TABLE IF NOT EXISTS emails_mortos (
     motivo       TEXT,
     detectado_em TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Lista de SUPRESSÃO (opt-out / LGPD, roadmap 1.10). Quem pediu pra
+-- parar de receber. Chave = telefone (variante canônica, com/sem 9º
+-- dígito) OU email lowercase. TODOS os senders de relacionamento
+-- (follow-up, reativação, aniversário) consultam antes de enviar.
+CREATE TABLE IF NOT EXISTS opt_out (
+    chave      TEXT PRIMARY KEY,   -- telefone-canônico ou email lowercase
+    tipo       TEXT NOT NULL,      -- 'telefone' | 'email'
+    motivo     TEXT,
+    criado_em  TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 

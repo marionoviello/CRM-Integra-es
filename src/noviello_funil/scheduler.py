@@ -34,6 +34,7 @@ from noviello_funil.calendar_client import (
     Slot,
 )
 from noviello_funil.juridiq_client import JuridiqClient, intake_lead_agendado
+from noviello_funil.opt_out import detectar_opt_out, registrar_opt_out
 from noviello_funil.urgencia import detectar_urgencia
 from noviello_funil.outbound import (
     JurichatClient,
@@ -1102,6 +1103,34 @@ async def run_poll_cycle(
                         "notify_mario(urgencia) failed for lead=%s: %s",
                         lead_id, exc,
                     )
+
+        # Signal 1.6: OPT-OUT (LGPD, roadmap 1.10). Lead pediu pra parar de
+        # receber. Registra na supressão (telefone), confirma de forma
+        # sóbria e SAI do funil automático (aguardando_humano). Os jobs de
+        # relacionamento consultam a lista antes de enviar.
+        if detectar_opt_out(_last_lead_message(transcript)):
+            registrar_opt_out(
+                conn, telefone=lead["contato_telefone"],
+                motivo="pediu no WhatsApp",
+            )
+            logger.info("lead=%s pediu opt-out — suprimindo", lead_id)
+            transicao(
+                conn, lead_id, Estado.AGUARDANDO_HUMANO, motivo="opt_out",
+                proxima_acao_horas=CLEAR_PROXIMA_ACAO,
+            )
+            update_transcript_hash(conn, lead_id, new_hash)
+            try:
+                await jurichat.start_human_support(conv_id)
+                await jurichat.send_message(
+                    conv_id,
+                    "Tudo bem, não vou mais te enviar mensagens. "
+                    "Se um dia precisar, é só chamar por aqui. 🙏",
+                )
+            except Exception as exc:
+                logger.exception(
+                    "opt_out confirm send failed for lead=%s: %s", lead_id, exc,
+                )
+            continue
 
         # Signal 2: turn cap reached → hand off to Mario.
         if _count_lead_lines(transcript) >= max_turnos:
