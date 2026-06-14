@@ -4,6 +4,13 @@ After=network.target
 
 [Service]
 Type=oneshot
+# A varredura faz 1 GET /person/{id} por pessoa (a listagem não traz
+# birthDate) — ~1500 pessoas x 0.15s ≈ 4 min. O default do systemd
+# (TimeoutStartSec=90s) MATAVA o job na metade da base: só os ~600
+# primeiros recebiam o parabéns (bug confirmado 14/jun — Oswaldo pos.53
+# recebeu, Nayara pos.924 e Silvia pos.1358 não). 15 min dá folga
+# mesmo se a base dobrar.
+TimeoutStartSec=900
 User=noviello
 Group=noviello
 WorkingDirectory=/opt/noviello-funil-saude
