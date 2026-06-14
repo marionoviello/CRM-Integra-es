@@ -1,0 +1,13 @@
+[Unit]
+Description=Noviello Funil Saude - Carteira x DataJud (segunda 06h BRT)
+
+[Timer]
+# 09:00 UTC = 06:00 America/Sao_Paulo, segunda-feira — antes do alerta do
+# saude_carteira (09h BRT). Semanal: falhas silenciosas mudam devagar e a
+# consulta ao DataJud é lenta; rodar diário seria ruído + carga à toa.
+OnCalendar=Mon *-*-* 09:00:00
+Persistent=true
+Unit=noviello-carteira-datajud.service
+
+[Install]
+WantedBy=timers.target

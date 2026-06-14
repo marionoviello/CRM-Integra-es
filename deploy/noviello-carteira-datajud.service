@@ -1,0 +1,18 @@
+[Unit]
+Description=Noviello Funil Saude - Carteira x DataJud (falhas silenciosas)
+After=network.target
+
+[Service]
+Type=oneshot
+# Consulta o DataJud processo a processo (~284 x 0.6s throttle + latência)
+# ≈ 3-4 min. 10 min de folga cobre picos do DataJud.
+TimeoutStartSec=600
+User=noviello
+Group=noviello
+WorkingDirectory=/opt/noviello-funil-saude
+EnvironmentFile=/opt/noviello-funil-saude/.env
+ExecStart=/opt/noviello-funil-saude/.venv/bin/noviello-carteira-datajud
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true

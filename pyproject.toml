@@ -30,6 +30,7 @@ noviello-relatorio = "noviello_funil.relatorio:main"
 noviello-aniversarios = "noviello_funil.aniversarios:main"
 noviello-publicacoes = "noviello_funil.publicacoes:main"
 noviello-saude-carteira = "noviello_funil.saude_carteira:main"
+noviello-carteira-datajud = "noviello_funil.carteira_datajud:main"
 noviello-indice = "noviello_funil.person_index:main"
 noviello-bounce = "noviello_funil.detector_bounce:main"
 

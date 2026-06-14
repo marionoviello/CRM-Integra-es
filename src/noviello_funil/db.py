@@ -68,6 +68,14 @@ CREATE TABLE IF NOT EXISTS carteira_erro_visto (
     primeiro_visto TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Falhas SILENCIOSAS (carteira_datajud): processos que o Juridiq mostra
+-- como OK mas o cruzamento com o DataJud revela atrasados. Mesma ideia do
+-- carteira_erro_visto: destacar 🆕 só os que entraram desde a última vez.
+CREATE TABLE IF NOT EXISTS carteira_datajud_visto (
+    process_number TEXT PRIMARY KEY,
+    primeiro_visto TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Índice telefone→ficha do Juridiq (roadmap 0.1). Repovoado de
 -- madrugada a partir do GET /person/ (que já traz phone/email/document).
 -- Uma pessoa gera N linhas (variantes do número: com/sem 9º dígito).

@@ -102,6 +102,17 @@ class Settings(BaseSettings):
     juridiq_api_key: str = ""
     juridiq_base_url: str = "https://api.juridiq.com.br"
 
+    # DataJud (CNJ) — cruzamento da carteira pra pegar falhas SILENCIOSAS
+    # do monitoramento do Juridiq (carteira_datajud). A chave abaixo é a
+    # chave PÚBLICA oficial do CNJ (publicada em datajud-wiki.cnj.jus.br),
+    # igual pra todo mundo — não é segredo, daí o default no código.
+    datajud_api_key: str = (
+        "cDZHYzlZa0JadVREZDJCendQbXY6SkJlTzNjLV9TRENyQk1RdnFKZGRQdw=="
+    )
+    # Alerta quando o DataJud está mais que N dias à frente do Juridiq.
+    # 30 dias filtra ruído de cadência de sync (casos reais eram anos).
+    carteira_datajud_limiar_dias: int = Field(default=30, ge=1)
+
     # CUID do usuário "BOT IA" no Jurichat. Quando setado:
     #   1. start_human_support atribui conversas a ele (selectedUserId)
     #      em vez de sortear humano (isRandom) — conserta atribuição
