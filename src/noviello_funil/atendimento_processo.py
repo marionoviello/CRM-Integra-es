@@ -193,7 +193,7 @@ def construir_indice_cliente_processo(client: httpx.Client, conn) -> int:
         conn.execute("ROLLBACK")
         raise
     logger.info(
-        "cliente_processo: %d vínculos (CPF) telefone↔processo de %d processos",
+        "cliente_processo: %d vínculos (person_id) telefone↔processo de %d processos",
         n, len(processos),
     )
     return n
