@@ -124,6 +124,18 @@ CREATE TABLE IF NOT EXISTS parte_contraria (
 );
 
 CREATE INDEX IF NOT EXISTS idx_parte_nome ON parte_contraria(nome_norm);
+
+-- Eventos financeiros já alertados (triagem_financeira, roadmap 2.10):
+-- penhora/bloqueio/leilão (constrição) e RPV/precatório/alvará (dinheiro
+-- a levantar) detectados nas movimentações do DataJud. Idempotência por
+-- hash do evento (processo+data+nome) — um evento é um FATO que não
+-- "desfaz", então só inserimos (nunca removemos): cada um alerta 1 vez.
+CREATE TABLE IF NOT EXISTS triagem_financeira_visto (
+    evento_hash    TEXT PRIMARY KEY,
+    processo       TEXT NOT NULL,
+    tipo           TEXT,            -- 'constricao' | 'levantar'
+    primeiro_visto TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 

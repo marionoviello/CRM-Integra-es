@@ -112,6 +112,10 @@ class Settings(BaseSettings):
     # Alerta quando o DataJud está mais que N dias à frente do Juridiq.
     # 30 dias filtra ruído de cadência de sync (casos reais eram anos).
     carteira_datajud_limiar_dias: int = Field(default=30, ge=1)
+    # Triagem financeira (penhora/RPV/precatório/leilão nas movimentações):
+    # janela de quanto tempo pra trás varrer eventos. 120 dias na 1ª rodada
+    # pega o backlog recente; depois a idempotência só traz os novos.
+    triagem_financeira_janela_dias: int = Field(default=120, ge=1)
 
     # CUID do usuário "BOT IA" no Jurichat. Quando setado:
     #   1. start_human_support atribui conversas a ele (selectedUserId)

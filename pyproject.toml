@@ -36,6 +36,7 @@ noviello-bounce = "noviello_funil.detector_bounce:main"
 noviello-tarefas = "noviello_funil.tarefas:main"
 noviello-higiene = "noviello_funil.higiene_base:main"
 noviello-gerencial = "noviello_funil.relatorio_gerencial:main"
+noviello-triagem-financeira = "noviello_funil.triagem_financeira:main"
 
 [build-system]
 requires = ["hatchling"]

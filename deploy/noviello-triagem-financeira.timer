@@ -1,0 +1,14 @@
+[Unit]
+Description=Noviello Funil Saude - Triagem financeira (quinta 06h BRT)
+
+[Timer]
+# 09:00 UTC = 06:00 America/Sao_Paulo, quinta. Dia DIFERENTE do
+# carteira-datajud (segunda) de propósito: os dois fazem varredura
+# pesada no DataJud — separados, não competem pela cota do CNJ e dão
+# uma checagem financeira no meio da semana.
+OnCalendar=Thu *-*-* 09:00:00
+Persistent=true
+Unit=noviello-triagem-financeira.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,18 @@
+[Unit]
+Description=Noviello Funil Saude - Triagem financeira (penhora/RPV/leilao na carteira)
+After=network.target
+
+[Service]
+Type=oneshot
+# Varre o DataJud processo a processo (paralelizado, ~3min). Margem
+# folgada igual ao carteira-datajud pra nunca estourar o timer.
+TimeoutStartSec=900
+User=noviello
+Group=noviello
+WorkingDirectory=/opt/noviello-funil-saude
+EnvironmentFile=/opt/noviello-funil-saude/.env
+ExecStart=/opt/noviello-funil-saude/.venv/bin/noviello-triagem-financeira
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
