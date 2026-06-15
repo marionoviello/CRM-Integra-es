@@ -160,6 +160,16 @@ CREATE TABLE IF NOT EXISTS cliente_processo (
 CREATE INDEX IF NOT EXISTS idx_cliente_processo_tel
     ON cliente_processo(telefone_chave);
 
+-- Publicação urgente → TAREFA no Juridiq (roadmap 1.1). Idempotência por
+-- publication_id: uma publicação só gera UMA tarefa, e a publicação só é
+-- marcada como tratada depois da tarefa criada (não perde no meio).
+CREATE TABLE IF NOT EXISTS tarefa_publicacao (
+    publication_id TEXT PRIMARY KEY,
+    process_number TEXT,
+    task_id        TEXT,
+    criada_em      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Boletim mensal de andamento ao cliente (roadmap 3.1, variante mensal).
 -- Idempotência por competência (YYYY-MM): o job roda no último dia útil
 -- (e na janela até o fim do mês, p/ retry se o envio falhar), mas o lote
