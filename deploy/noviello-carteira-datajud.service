@@ -4,9 +4,10 @@ After=network.target
 
 [Service]
 Type=oneshot
-# Consulta o DataJud processo a processo (~284 x 0.6s throttle + latência)
-# ≈ 3-4 min. 10 min de folga cobre picos do DataJud.
-TimeoutStartSec=600
+# Consulta o DataJud processo a processo (~284 x 0.6s throttle + latência;
+# alguns TRF levam 5-11s). Na prática ~10-15 min — 30 min de teto cobre
+# folga sem risco (job semanal de madrugada, tempo de execução não importa).
+TimeoutStartSec=1800
 User=noviello
 Group=noviello
 WorkingDirectory=/opt/noviello-funil-saude
