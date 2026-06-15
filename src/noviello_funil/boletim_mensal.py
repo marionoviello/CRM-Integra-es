@@ -393,7 +393,9 @@ def main() -> int:
     conn = connect(settings.database_path)
     run_migrations(conn)
     try:
-        if conn.execute(
+        # boletim_forcar (smoke) fura a idempotência E não marca a competência
+        # (abaixo) — assim o teste manual é repetível e não bloqueia a rodada real.
+        if not settings.boletim_forcar and conn.execute(
             "SELECT 1 FROM boletim_competencia WHERE competencia = ?", (comp,),
         ).fetchone():
             logger.info("boletim: competência %s já enviada — pulando", comp)
@@ -486,10 +488,11 @@ def main() -> int:
         )
         texto = montar_lote(itens, comp, sem_telefone=sem_tel)
         if texto is None:
-            conn.execute(
-                "INSERT OR IGNORE INTO boletim_competencia (competencia, total) "
-                "VALUES (?, 0)", (comp,),
-            )
+            if not settings.boletim_forcar:
+                conn.execute(
+                    "INSERT OR IGNORE INTO boletim_competencia (competencia, total) "
+                    "VALUES (?, 0)", (comp,),
+                )
             return 0
 
         async def _enviar() -> tuple[int, int]:
@@ -530,10 +533,11 @@ def main() -> int:
                     "boletim: só %d/%d destinos receberam (marca mesmo assim)",
                     ok, total_dest,
                 )
-            conn.execute(
-                "INSERT OR IGNORE INTO boletim_competencia (competencia, total) "
-                "VALUES (?, ?)", (comp, len(itens)),
-            )
+            if not settings.boletim_forcar:
+                conn.execute(
+                    "INSERT OR IGNORE INTO boletim_competencia (competencia, total) "
+                    "VALUES (?, ?)", (comp, len(itens)),
+                )
         else:
             logger.error("boletim: nenhum destino recebeu — não marca competência")
     finally:
