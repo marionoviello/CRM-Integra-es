@@ -399,7 +399,7 @@ def main() -> int:
         # DataJud em paralelo (infra da triagem) → movimentos por processo,
         # contabilizando cobertura (não confundir falha de consulta com
         # "sem movimentação").
-        dj = httpx.Client(timeout=20.0)
+        dj = httpx.Client(timeout=30.0)   # alguns TRFs passam de 20s (smoke 15/jun)
         limiter = _RateLimiter(RATE_MIN_INTERVALO)
         movs_por_proc: dict = {}
         cobertura: Counter = Counter()
