@@ -13,14 +13,19 @@ O que o bot informa (processo NÃO sigiloso, cliente verificado): número,
 data e texto da última movimentação (fato processual público) + "equipe
 acompanhando". SEM opinião jurídica, mérito ou prognóstico.
 
-Vínculo telefone→processo: o ``person_index`` liga telefone↔ficha (com
-CPF); o ``/lawSuit/`` traz ``persons`` com ``personOrigin`` e o nome do
-cliente (com CPF colado no sufixo). Casamos por CPF (forte) e, na falta,
-por nome completo normalizado. Índice ``cliente_processo`` repovoado de
+Vínculo telefone→processo — AUTENTICAÇÃO SÓ POR CPF (chave forte). O
+``person_index`` liga telefone↔ficha (com CPF); o ``/lawSuit/`` traz o
+nome do cliente com o CPF no sufixo. Casamos pelo CPF e gravamos o
+``person_id``. NÃO casamos por nome: homônimo (dois "João Silva") faria o
+processo de um vazar pro telefone do outro — risco inaceitável quando o
+resultado é REVELAR dado de processo (a revisão adversarial de 15/jun pegou
+isso). Cliente sem CPF no cadastro → cai em atendimento humano. Se um
+telefone resolve pra DUAS fichas distintas (homônimo/contato compartilhado),
+não autenticamos: escalamos. Índice ``cliente_processo`` repovoado de
 madrugada junto do person_index (depende dele estar fresco).
 
 Regra de marca: o bot fala "nossa equipe" / "um advogado", NUNCA "Dr.
-Mario". Segredo e não-identificado vão SÓ pro canal interno.
+Mario". Segredo, ambíguo e não-identificado vão SÓ pro canal interno.
 """
 
 import logging
@@ -28,27 +33,36 @@ import re
 
 import httpx
 
-from noviello_funil.conflito import normalizar_nome
 from noviello_funil.person_index import chaves_telefone
 
 logger = logging.getLogger(__name__)
 
-# Intenção "como está meu processo?". Exige uma referência a processo/ação/
-# caso PERTO de uma pista de status — pra não sequestrar lead novo que só
-# quer "abrir um processo" ou "entrar com uma ação".
+# Intenção "como está meu processo?". Exige uma PISTA DE STATUS perto de uma
+# referência a processo/ação/caso — e uma guarda que derruba quem quer ABRIR
+# um caso (lead novo), pra não sequestrar o funil.
 _PROC = r"(processos?|a[çc][õo]es|a[çc][ãa]o|caso|invent[áa]rio|usucapi[ãa]o)"
+_CUE = (
+    r"(como\s+(est|t|and|v|sa)\w+|andamento|novidades?|not[íi]cias?|"
+    r"atualiza[çc]\w+|status|movimenta[çc]\w+|posi[çc][ãa]o|"
+    r"saiu|sa[íi]u|senten[çc]a|audi[êe]ncia|despacho|parad[oa]|"
+    r"andou|parou|decis[ãa]o)"
+)
+_SEP = r"[^?.!\n]{0,18}"   # mesma frase: '?' '.' '!' e quebra são barreiras
 _PERGUNTAS_STATUS = [
-    rf"\bcomo\s+(est[áa]|t[áa]|anda|andam|v[ãa]o|vai)\b[^?]{{0,25}}{_PROC}",
-    rf"\bandamento[s]?\b[^?]{{0,20}}{_PROC}",
-    rf"{_PROC}[^?]{{0,20}}\bandamento",
-    rf"\b(novidade|not[íi]cia|atualiza[çc][ãa]o|status|movimenta[çc][ãa]o|posi[çc][ãa]o)\b"
-    rf"[^?]{{0,25}}{_PROC}",
-    rf"\bmeu[s]?\s+{_PROC}\b[^?]{{0,30}}"
-    rf"\b(como|novidade|andamento|atualiza|status|saiu|movimento|parado|anda|notici)",
-    rf"{_PROC}[^?]{{0,25}}\b(teve|tem|saiu|houve)\s+(alguma\s+)?"
-    rf"(novidade|movimenta|atualiza|not[íi]cia)",
+    rf"{_CUE}{_SEP}{_PROC}",
+    rf"{_PROC}{_SEP}{_CUE}",
 ]
 _RX_STATUS = [re.compile(p, re.IGNORECASE) for p in _PERGUNTAS_STATUS]
+
+# Guarda: quem QUER ABRIR/contratar não é consulta de status (lead novo).
+_RX_ABERTURA = re.compile(
+    r"\b(quero|queria|gostaria|preciso|pretendo|posso|tenho\s+que)\b"
+    r"[^?.!\n]{0,20}\b(abrir|entrar|processar|mover|ajuizar|propor|"
+    r"dar\s+entrada|fazer)\b"
+    r"|\bquanto\s+custa\b|\bcomo\s+funciona\b|\bcomo\s+fa[çc]o\s+pra\b"
+    r"|\bvoc[êe]s?\s+(fazem|pegam|atendem|trabalham|cuidam)\b",
+    re.IGNORECASE,
+)
 
 # Mensagens ao cliente (neutras — não confirmam nem negam processo sigiloso).
 MSG_SIGILOSO_CLIENTE = (
@@ -62,8 +76,15 @@ MSG_NAO_CADASTRADO_CLIENTE = (
 
 
 def detectar_pergunta_status(texto: object) -> bool:
-    """True se a mensagem é uma pergunta sobre o andamento de um processo."""
+    """True se a mensagem é uma pergunta sobre o andamento de um processo.
+
+    Conservador de propósito: quem quer ABRIR um caso (lead novo) NÃO casa,
+    pra não tirar o lead do funil. Falso-negativo é barato (cai no funil e o
+    Signal 1.5 ainda avisa que um cliente conhecido voltou).
+    """
     t = str(texto or "")
+    if _RX_ABERTURA.search(t):
+        return False
     return any(rx.search(t) for rx in _RX_STATUS)
 
 
@@ -109,24 +130,25 @@ def _listar_processos(client: httpx.Client) -> list[dict]:
 def construir_indice_cliente_processo(client: httpx.Client, conn) -> int:
     """Repovoa cliente_processo cruzando /lawSuit/ (clientes) com person_index.
 
-    Casa por CPF (forte) e, na falta, por nome completo normalizado (≥2
-    palavras). Idempotente: zera e reconstrói em transação (leitor do poll
-    nunca vê índice parcial). Retorna nº de vínculos (telefone, processo).
+    AUTENTICAÇÃO SÓ POR CPF: vincula o processo a uma ficha quando o CPF do
+    cliente no /lawSuit/ aponta pra UMA única ficha do person_index. Sem CPF,
+    CPF ausente do índice, ou CPF ambíguo → nenhum vínculo automático (o
+    cliente cai em atendimento humano). Idempotente em transação. Retorna nº
+    de vínculos (telefone, processo).
     """
-    # 1. person_index → por_doc / por_nome → telefones do cliente.
-    por_doc: dict[str, set[str]] = {}
-    por_nome: dict[str, set[str]] = {}
-    for _pid, nome, doc, tel in conn.execute(
+    doc_para_pid: dict[str, set[str]] = {}   # cpf → person_id(s)
+    pid_tels: dict[str, set[str]] = {}       # person_id → telefones
+    pid_nome: dict[str, str] = {}            # person_id → nome (exibição)
+    for pid, nome, doc, tel in conn.execute(
         "SELECT person_id, nome, document, telefone_chave FROM person_index"
     ).fetchall():
-        if not tel:
-            continue
+        if tel:
+            pid_tels.setdefault(pid, set()).add(tel)
         d = _so_digitos(doc)
         if d:
-            por_doc.setdefault(d, set()).add(tel)
-        nn = normalizar_nome(nome)
-        if len(nn.split()) >= 2:
-            por_nome.setdefault(nn, set()).add(tel)
+            doc_para_pid.setdefault(d, set()).add(pid)
+        if nome:
+            pid_nome[pid] = _nome_limpo(nome)
 
     processos = _listar_processos(client)
 
@@ -143,19 +165,21 @@ def construir_indice_cliente_processo(client: httpx.Client, conn) -> int:
             for pessoa in p.get("persons") or []:
                 if (pessoa.get("personOrigin") or "").strip().lower() != "cliente":
                     continue
-                nome = pessoa.get("name")
-                doc = extrair_documento(nome)
-                telefones: set[str] = set()
-                if doc and doc in por_doc:          # CPF é a chave forte
-                    telefones = por_doc[doc]
-                else:                               # fallback: nome completo
-                    telefones = por_nome.get(normalizar_nome(nome), set())
-                for tel in telefones:
+                doc = extrair_documento(pessoa.get("name"))
+                if not doc:
+                    continue                       # sem CPF → não autentica
+                pids = doc_para_pid.get(doc)
+                if not pids or len(pids) != 1:
+                    continue                       # CPF ausente/ambíguo → humano
+                pid = next(iter(pids))
+                nome_disp = pid_nome.get(pid) or _nome_limpo(pessoa.get("name"))
+                for tel in pid_tels.get(pid, set()):
                     conn.execute(
                         "INSERT OR REPLACE INTO cliente_processo "
-                        "(telefone_chave, process_number, is_secret, "
-                        "last_movement_date, cliente_nome) VALUES (?, ?, ?, ?, ?)",
-                        (tel, num, is_secret, lmd, _nome_limpo(nome)),
+                        "(telefone_chave, person_id, process_number, is_secret, "
+                        "last_movement_date, cliente_nome, match_tipo) "
+                        "VALUES (?, ?, ?, ?, ?, ?, 'cpf')",
+                        (tel, pid, num, is_secret, lmd, nome_disp),
                     )
                     n += 1
         conn.execute("COMMIT")
@@ -163,29 +187,34 @@ def construir_indice_cliente_processo(client: httpx.Client, conn) -> int:
         conn.execute("ROLLBACK")
         raise
     logger.info(
-        "cliente_processo: %d vínculos telefone↔processo de %d processos",
+        "cliente_processo: %d vínculos (CPF) telefone↔processo de %d processos",
         n, len(processos),
     )
     return n
 
 
 def consultar_processos_do_telefone(conn, telefone: object) -> list[dict]:
-    """Processos em que este telefone é PARTE CLIENTE. [] se nenhum."""
+    """Processos em que este telefone é PARTE CLIENTE. [] se nenhum.
+
+    Cada item carrega o ``person_id`` — o classificar detecta telefone que
+    bate com mais de uma ficha (ambíguo) e recusa autenticar.
+    """
     chaves = chaves_telefone(telefone)
     if not chaves:
         return []
     ph = ",".join("?" * len(chaves))
     rows = conn.execute(
-        f"SELECT DISTINCT process_number, is_secret, last_movement_date, cliente_nome "
-        f"FROM cliente_processo WHERE telefone_chave IN ({ph})",
+        f"SELECT DISTINCT person_id, process_number, is_secret, last_movement_date, "
+        f"cliente_nome FROM cliente_processo WHERE telefone_chave IN ({ph})",
         tuple(chaves),
     ).fetchall()
     return [
         {
-            "process_number": r[0],
-            "is_secret": bool(r[1]),
-            "last_movement_date": r[2],
-            "cliente_nome": r[3],
+            "person_id": r[0],
+            "process_number": r[1],
+            "is_secret": bool(r[2]),
+            "last_movement_date": r[3],
+            "cliente_nome": r[4],
         }
         for r in rows
     ]
@@ -194,13 +223,17 @@ def consultar_processos_do_telefone(conn, telefone: object) -> list[dict]:
 def classificar_atendimento(processos: list[dict]) -> dict:
     """Decide a ação a partir dos processos do telefone.
 
-    - sem processo            → 'nao_cadastrado' (não revela, avisa interno)
-    - tem algum NÃO sigiloso  → 'responder' (responde os públicos; sigilosos
-                                 — se houver — vão escalados, nunca citados)
-    - só sigiloso(s)          → 'sigiloso' (neutro ao cliente, escala interno)
+    - sem processo               → 'nao_cadastrado' (não revela, avisa interno)
+    - bate com 2+ fichas         → 'ambiguo' (não autentica, escala humano)
+    - tem algum NÃO sigiloso     → 'responder' (responde os públicos; sigilosos,
+                                    se houver, vão escalados — nunca citados)
+    - só sigiloso(s)             → 'sigiloso' (neutro ao cliente, escala interno)
     """
     if not processos:
         return {"acao": "nao_cadastrado", "publicos": [], "sigilosos": []}
+    pids = {p.get("person_id") for p in processos}
+    if len(pids) > 1:   # telefone aponta pra mais de uma pessoa → inseguro
+        return {"acao": "ambiguo", "publicos": [], "sigilosos": []}
     publicos = [p for p in processos if not p["is_secret"]]
     sigilosos = [p for p in processos if p["is_secret"]]
     if publicos:
@@ -262,6 +295,17 @@ def alerta_nao_identificado(telefone: object, ultima_msg: object) -> str:
     )
 
 
+def alerta_ambiguo(telefone: object, ultima_msg: object) -> str:
+    """Alerta interno: o telefone bate com mais de uma ficha (homônimo)."""
+    msg = re.sub(r"\s+", " ", str(ultima_msg or "")).strip()[:160]
+    return (
+        "⚠️ *Consulta de processo — telefone AMBÍGUO*\n"
+        f"O número {telefone} bate com MAIS DE UM cadastro (homônimo ou contato "
+        "compartilhado). Não autentiquei nem revelei nada — confirmem quem é "
+        f'antes de responder.\nMensagem: "{msg}"'
+    )
+
+
 async def ultimo_movimento_datajud(
     process_number: str, datajud_api_key: str,
 ) -> dict | None:
@@ -269,6 +313,7 @@ async def ultimo_movimento_datajud(
 
     Best-effort e fora do event loop (asyncio.to_thread) — só roda quando um
     cliente verificado pergunta. Falha/timeout → None (cai pra data do Juridiq).
+    Timeout curto (8s): a degradação pra data-only já é graciosa.
     """
     if not datajud_api_key or not process_number:
         return None
@@ -277,7 +322,7 @@ async def ultimo_movimento_datajud(
     from noviello_funil.triagem_financeira import consultar_movimentos_datajud
 
     def _fetch() -> dict | None:
-        with httpx.Client(timeout=15.0) as c:
+        with httpx.Client(timeout=8.0) as c:
             movs, _ = consultar_movimentos_datajud(c, process_number, datajud_api_key)
         if not movs:
             return None

@@ -147,10 +147,12 @@ CREATE TABLE IF NOT EXISTS triagem_financeira_visto (
 -- ter vários processos.
 CREATE TABLE IF NOT EXISTS cliente_processo (
     telefone_chave     TEXT NOT NULL,
+    person_id          TEXT,            -- ficha do Juridiq (autenticação forte)
     process_number     TEXT NOT NULL,
     is_secret          INTEGER NOT NULL DEFAULT 0,
     last_movement_date TEXT,
     cliente_nome       TEXT,
+    match_tipo         TEXT,            -- 'cpf' (só CPF gera vínculo automático)
     atualizado_em      TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (telefone_chave, process_number)
 );

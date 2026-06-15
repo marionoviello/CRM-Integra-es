@@ -2,9 +2,11 @@
 
 Duas travas OAB do Mario: (1) só responde pro telefone que está no cadastro
 como parte cliente; (2) processo sigiloso → não responde, escala Mario+Hilde.
+Autenticação SÓ POR CPF (homônimo por nome não vincula — revisão 15/jun).
 """
 
 from noviello_funil.atendimento_processo import (
+    alerta_ambiguo,
     alerta_nao_identificado,
     alerta_sigiloso,
     classificar_atendimento,
@@ -28,12 +30,14 @@ def test_perguntas_de_status_positivas():
         "meu processo teve alguma movimentação?",
         "como anda o caso?",
         "saiu alguma novidade do inventário?",
+        "meu processo andou?",
+        "novidades do meu processo?",
     ]:
         assert detectar_pergunta_status(t) is True, t
 
 
 def test_nao_confunde_com_lead_novo():
-    # Quem quer ABRIR um caso não deve disparar o fluxo de status.
+    # Quem quer ABRIR um caso não deve disparar o fluxo de status (FP caro).
     for t in [
         "quero abrir um processo contra meu vizinho",
         "preciso processar uma empresa",
@@ -41,6 +45,8 @@ def test_nao_confunde_com_lead_novo():
         "tenho um problema com meu plano de saúde",
         "vocês pegam caso de usucapião?",
         "bom dia, gostaria de uma consulta",
+        "meu caso é o seguinte: quero processar alguém",
+        "tenho um processo trabalhista pra abrir",
     ]:
         assert detectar_pergunta_status(t) is False, t
 
@@ -53,7 +59,7 @@ def test_extrai_cpf_do_sufixo_do_nome():
     assert extrair_documento("Beltrano Sem Documento") == ""
 
 
-# --- construir_indice + consultar (vínculo telefone↔processo) ----------------
+# --- construir_indice + consultar (vínculo telefone↔processo, SÓ por CPF) -----
 
 class _FakeResp:
     def __init__(self, data):
@@ -98,17 +104,18 @@ def test_indice_casa_por_cpf():
             {"name": "Banco Réu S.A.", "personOrigin": "Requerida"},
         ],
     }])
-    n = construir_indice_cliente_processo(client, conn)
-    assert n >= 1
+    assert construir_indice_cliente_processo(client, conn) >= 1
     procs = consultar_processos_do_telefone(conn, "11999998888")
     assert len(procs) == 1
     assert procs[0]["process_number"] == "1000000-00.2024.8.26.0100"
+    assert procs[0]["person_id"] == "p1"
     assert procs[0]["is_secret"] is False
     assert procs[0]["last_movement_date"] == "2026-06-10"
     conn.close()
 
 
-def test_indice_casa_por_nome_quando_sem_cpf():
+def test_sem_cpf_nao_vincula():
+    # Cliente sem CPF no cadastro → nenhum vínculo automático (cai em humano).
     conn = connect(":memory:")
     run_migrations(conn)
     _seed_person(conn, "11988887777", "p2", "Beltrano Souza Lima", doc="")
@@ -118,7 +125,26 @@ def test_indice_casa_por_nome_quando_sem_cpf():
         "persons": [{"name": "Beltrano Souza Lima", "personOrigin": "Cliente"}],
     }])
     construir_indice_cliente_processo(client, conn)
-    assert len(consultar_processos_do_telefone(conn, "11988887777")) == 1
+    assert consultar_processos_do_telefone(conn, "11988887777") == []
+    conn.close()
+
+
+def test_homonimo_so_vincula_o_cpf_certo():
+    # Dois "João Silva" distintos (CPFs diferentes). O processo do A NUNCA
+    # pode vincular ao telefone do B — esse era o bypass da revisão 15/jun.
+    conn = connect(":memory:")
+    run_migrations(conn)
+    _seed_person(conn, "11911112222", "pA", "João Silva", "111.111.111-11")
+    _seed_person(conn, "11933334444", "pB", "João Silva", "222.222.222-22")
+    client = _FakeClient([{
+        "processNumber": "A-1",
+        "isSecret": False,
+        "persons": [{"name": "João Silva - CPF: 111.111.111-11",
+                     "personOrigin": "Cliente"}],
+    }])
+    construir_indice_cliente_processo(client, conn)
+    assert len(consultar_processos_do_telefone(conn, "11911112222")) == 1  # A
+    assert consultar_processos_do_telefone(conn, "11933334444") == []       # B: nada
     conn.close()
 
 
@@ -139,7 +165,6 @@ def test_indice_marca_segredo_de_justica():
 
 
 def test_parte_contraria_nao_vira_vinculo():
-    # O telefone do RÉU (se por acaso cadastrado) não pode puxar o processo.
     conn = connect(":memory:")
     run_migrations(conn)
     _seed_person(conn, "11955554444", "p4", "Banco Réu", "999.999.999-99")
@@ -161,10 +186,30 @@ def test_telefone_desconhecido_sem_vinculo():
     conn.close()
 
 
+def test_telefone_compartilhado_por_duas_fichas_fica_ambiguo():
+    # Mesmo número em duas fichas (CPFs distintos) → consulta traz 2 pessoas →
+    # classificar recusa autenticar.
+    conn = connect(":memory:")
+    run_migrations(conn)
+    _seed_person(conn, "11912345678", "pA", "Ana", "111.111.111-11")
+    _seed_person(conn, "11912345678", "pB", "Bia", "222.222.222-22")
+    client = _FakeClient([
+        {"processNumber": "A", "isSecret": False,
+         "persons": [{"name": "Ana - CPF: 111.111.111-11", "personOrigin": "Cliente"}]},
+        {"processNumber": "B", "isSecret": False,
+         "persons": [{"name": "Bia - CPF: 222.222.222-22", "personOrigin": "Cliente"}]},
+    ])
+    construir_indice_cliente_processo(client, conn)
+    procs = consultar_processos_do_telefone(conn, "11912345678")
+    assert len({p["person_id"] for p in procs}) == 2
+    assert classificar_atendimento(procs)["acao"] == "ambiguo"
+    conn.close()
+
+
 # --- classificar_atendimento -------------------------------------------------
 
-def _p(num, secret):
-    return {"process_number": num, "is_secret": secret,
+def _p(num, secret, pid="pX"):
+    return {"person_id": pid, "process_number": num, "is_secret": secret,
             "last_movement_date": "2026-06-01", "cliente_nome": "Cliente"}
 
 
@@ -183,6 +228,11 @@ def test_classifica_sigiloso_quando_so_secreto():
     r = classificar_atendimento([_p("9", True)])
     assert r["acao"] == "sigiloso"
     assert r["publicos"] == []
+
+
+def test_classifica_ambiguo_quando_duas_pessoas():
+    r = classificar_atendimento([_p("1", False, "pA"), _p("2", False, "pB")])
+    assert r["acao"] == "ambiguo"
 
 
 # --- montar_resposta_cliente / alertas ---------------------------------------
@@ -214,3 +264,9 @@ def test_alerta_nao_identificado_cita_numero_e_msg():
     msg = alerta_nao_identificado("5511900000000", "como está meu processo?")
     assert "5511900000000" in msg
     assert "como está meu processo" in msg
+
+
+def test_alerta_ambiguo_avisa_homonimo():
+    msg = alerta_ambiguo("5511912345678", "meu processo tem novidade?")
+    assert "5511912345678" in msg
+    assert "AMBÍGUO" in msg or "ambíguo" in msg.lower()

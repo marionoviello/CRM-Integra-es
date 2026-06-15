@@ -30,6 +30,7 @@ import httpx
 from noviello_funil.atendimento_processo import (
     MSG_NAO_CADASTRADO_CLIENTE,
     MSG_SIGILOSO_CLIENTE,
+    alerta_ambiguo,
     alerta_nao_identificado,
     alerta_sigiloso,
     classificar_atendimento,
@@ -1216,13 +1217,23 @@ async def run_poll_cycle(
                 await jurichat.start_human_support(conv_id)
 
                 if plano["acao"] == "responder":
-                    movimentos: dict = {}
-                    for p in plano["publicos"]:
-                        mov = await ultimo_movimento_datajud(
-                            p["process_number"], datajud_api_key
-                        )
-                        if mov:
-                            movimentos[p["process_number"]] = mov
+                    # DataJud em paralelo (não serial) pra não segurar o
+                    # poll cycle: N processos do MESMO cliente colapsam de
+                    # N×8s pra ~8s. Best-effort — falha cai pra data-only.
+                    movs_list = await asyncio.gather(
+                        *[
+                            ultimo_movimento_datajud(
+                                p["process_number"], datajud_api_key
+                            )
+                            for p in plano["publicos"]
+                        ],
+                        return_exceptions=True,
+                    )
+                    movimentos: dict = {
+                        p["process_number"]: m
+                        for p, m in zip(plano["publicos"], movs_list)
+                        if isinstance(m, dict)
+                    }
                     await jurichat.send_message(
                         conv_id, montar_resposta_cliente(plano["publicos"], movimentos)
                     )
@@ -1245,14 +1256,21 @@ async def run_poll_cycle(
                             plano["sigilosos"],
                         ),
                     )
-                else:  # nao_cadastrado
+                else:  # nao_cadastrado ou ambiguo — não revela nada, escala
                     await jurichat.send_message(conv_id, MSG_NAO_CADASTRADO_CLIENTE)
+                    alerta = (
+                        alerta_ambiguo(
+                            lead["contato_telefone"], _last_lead_message(transcript),
+                        )
+                        if plano["acao"] == "ambiguo"
+                        else alerta_nao_identificado(
+                            lead["contato_telefone"], _last_lead_message(transcript),
+                        )
+                    )
                     await notify_mario(
                         jurichat,
                         mario_conversation_id=mario_conversation_id,
-                        mensagem=alerta_nao_identificado(
-                            lead["contato_telefone"], _last_lead_message(transcript),
-                        ),
+                        mensagem=alerta,
                     )
 
                 logger.info(
