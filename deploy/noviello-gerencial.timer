@@ -1,0 +1,12 @@
+[Unit]
+Description=Noviello Funil Saude - Relatorio gerencial (segunda 07h BRT)
+
+[Timer]
+# 10:00 UTC = 07:00 America/Sao_Paulo, segunda — pulso da semana antes do
+# expediente. Semanal: visao macro.
+OnCalendar=Mon *-*-* 10:00:00
+Persistent=true
+Unit=noviello-gerencial.service
+
+[Install]
+WantedBy=timers.target
