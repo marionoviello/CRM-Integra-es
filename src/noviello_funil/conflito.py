@@ -52,23 +52,42 @@ def construir_indice_partes(client: httpx.Client, conn) -> int:
             break
         page += 1
 
-    conn.execute("DELETE FROM parte_contraria")
-    n = 0
+    # 1ª passada: nomes que são CLIENTE em QUALQUER processo. Um cliente
+    # do escritório nunca pode virar "adversário" — mesmo que apareça com
+    # outro papel noutro processo (defesa do bug de revisão 15/jun).
+    clientes = set()
     for p in processos:
-        num = p.get("processNumber") or ""
         for pessoa in p.get("persons") or []:
-            origem = (pessoa.get("personOrigin") or "").strip().lower()
-            if not origem or origem == "cliente":
-                continue
-            nome_norm = normalizar_nome(pessoa.get("name"))
-            if len(nome_norm.split()) < 2:   # ignora nomes/instituições de 1 palavra
-                continue
-            conn.execute(
-                "INSERT OR IGNORE INTO parte_contraria "
-                "(nome_norm, processo, papel) VALUES (?, ?, ?)",
-                (nome_norm, num, pessoa.get("personOrigin")),
-            )
-            n += 1
+            if (pessoa.get("personOrigin") or "").strip().lower() == "cliente":
+                clientes.add(normalizar_nome(pessoa.get("name")))
+
+    # Transação: leitores (poll cycle) nunca veem o índice parcial entre o
+    # DELETE e os INSERTs (mesmo motivo do person_index — bug revisão 15/jun).
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DELETE FROM parte_contraria")
+        n = 0
+        for p in processos:
+            num = p.get("processNumber") or ""
+            for pessoa in p.get("persons") or []:
+                origem = (pessoa.get("personOrigin") or "").strip().lower()
+                if not origem or origem == "cliente":
+                    continue
+                nome_norm = normalizar_nome(pessoa.get("name"))
+                if len(nome_norm.split()) < 2:   # ignora nomes/instituições de 1 palavra
+                    continue
+                if nome_norm in clientes:         # é cliente noutro processo → não é adversário
+                    continue
+                conn.execute(
+                    "INSERT OR IGNORE INTO parte_contraria "
+                    "(nome_norm, processo, papel) VALUES (?, ?, ?)",
+                    (nome_norm, num, pessoa.get("personOrigin")),
+                )
+                n += 1
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
     logger.info("conflito: %d partes contrárias indexadas de %d processos",
                 n, len(processos))
     return n

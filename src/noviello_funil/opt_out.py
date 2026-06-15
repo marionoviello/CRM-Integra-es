@@ -23,7 +23,9 @@ from noviello_funil.person_index import chaves_telefone
 # (lowercase, sem acento via _norm). Exige verbo de PARAR + objeto de
 # comunicação, pra não confundir com "me manda o contrato" (pedido).
 _PADROES = (
-    r"\bpar(ar|e|a)\b.{0,20}(mandar|enviar|mensage|manda|receber|encher)",
+    # "parar/pare/para de mandar" — NÃO casa a preposição "para" sozinha
+    # (senão "manda PARA meu email" virava opt-out — bug revisão 15/jun).
+    r"\b(par(ar|e)|para de|pra de)\b.{0,20}(mandar|enviar|mensage|manda|receber|encher)",
     r"nao quero (mais )?(receber|mensage|nada)",
     r"descadastr",
     r"sair da lista",

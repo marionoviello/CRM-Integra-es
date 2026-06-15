@@ -23,11 +23,18 @@ def test_sem_codigo_pais_normaliza_igual():
     assert chaves_telefone("11976425232") & chaves_telefone("5511976425232")
 
 
-def test_fixo_8_digitos_gera_variante_com_9():
-    ch = chaves_telefone("1132514567")  # 11 3251-4567 (fixo)
+def test_fixo_8_digitos_nao_ganha_9():
+    # fixo (começa com 2-5) NÃO vira celular — casaria ficha de outra pessoa
+    ch = chaves_telefone("1132514567")  # 11 3251-4567 (fixo, começa com 3)
     assert "1132514567" in ch
-    assert "1193251456" not in ch  # fixo não vira celular cego (só prefixa 9)
-    assert "11932514567" in ch     # variante com 9 prefixado
+    assert "11932514567" not in ch
+
+
+def test_celular_legado_8_digitos_ganha_9():
+    # celular antigo (8 díg começando 6-9) casa com a versão moderna (com 9)
+    ch = chaves_telefone("1187654321")  # começa com 8 → celular legado
+    assert "1187654321" in ch
+    assert "11987654321" in ch
 
 
 def test_formatacao_e_lixo_sao_ignorados():

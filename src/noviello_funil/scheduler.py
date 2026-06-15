@@ -1076,20 +1076,50 @@ async def run_poll_cycle(
             schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
             continue
 
-        # Signal 1.4: RECONHECER CLIENTE (roadmap 1.6). Na 1ª interação,
-        # cruza o telefone com o índice do Juridiq (person_index). Se é
-        # cliente da casa, avisa o Mario — ADITIVO, não muda o atendimento
-        # (quem já é cliente não deveria ser tratado como estranho). Roda
-        # 1x por lead; índice vazio → no-op gracioso.
+        # Signal 1.4: OPT-OUT (LGPD, roadmap 1.10) — PRIMEIRO, antes de
+        # qualquer alerta de relacionamento. Lead pediu pra parar → registra
+        # na supressão, confirma sóbrio e SAI do funil. Vir antes garante que
+        # nenhum alerta (cliente/conflito/urgência) contradiga a supressão no
+        # mesmo tick (bug revisão 15/jun). try/except: falha não trava o ciclo.
+        if detectar_opt_out(_last_lead_message(transcript)):
+            try:
+                registrar_opt_out(
+                    conn, telefone=lead["contato_telefone"],
+                    motivo="pediu no WhatsApp",
+                )
+                logger.info("lead=%s pediu opt-out — suprimindo", lead_id)
+                transicao(
+                    conn, lead_id, Estado.AGUARDANDO_HUMANO, motivo="opt_out",
+                    proxima_acao_horas=CLEAR_PROXIMA_ACAO,
+                )
+                update_transcript_hash(conn, lead_id, new_hash)
+                await jurichat.start_human_support(conv_id)
+                await jurichat.send_message(
+                    conv_id,
+                    "Tudo bem, não vou mais te enviar mensagens. "
+                    "Se um dia precisar, é só chamar por aqui. 🙏",
+                )
+            except Exception as exc:
+                logger.exception(
+                    "opt_out handling failed for lead=%s: %s", lead_id, exc,
+                )
+            continue
+
+        # Signal 1.5: RECONHECER CLIENTE (1.6) + CONFLITO (1.7). Aditivos,
+        # 1x por lead (cliente_checado_em). Cliente: cruza telefone com o
+        # person_index. Conflito: nome bate com parte contrária → SÓ suspeita,
+        # SÓ canal interno, NUNCA ao lead. try/except externo (bug revisão
+        # 15/jun): falha local (DB/índice) não derruba o poll cycle dos
+        # outros leads. mark_cliente_checado fora do try → não re-tenta em loop.
         if not lead["cliente_checado_em"]:
             mark_cliente_checado(conn, lead_id)
-            ficha = resolver_telefone(conn, lead["contato_telefone"])
-            if ficha:
-                logger.info(
-                    "lead=%s reconhecido como cliente: %s",
-                    lead_id, ficha.get("nome"),
-                )
-                try:
+            try:
+                ficha = resolver_telefone(conn, lead["contato_telefone"])
+                if ficha:
+                    logger.info(
+                        "lead=%s reconhecido como cliente: %s",
+                        lead_id, ficha.get("nome"),
+                    )
                     await notify_mario(
                         jurichat,
                         mario_conversation_id=mario_conversation_id,
@@ -1102,23 +1132,12 @@ async def run_poll_cycle(
                             conversation_id=conv_id,
                         ),
                     )
-                except Exception as exc:
-                    logger.exception(
-                        "notify_mario(cliente) failed for lead=%s: %s",
-                        lead_id, exc,
+                conflitos = checar_conflito(conn, lead["contato_nome"])
+                if conflitos:
+                    refs = "; ".join(
+                        f"{c['processo']} ({c['papel']})" for c in conflitos[:5]
                     )
-            # Conflito de interesse (roadmap 1.7): lead bate com parte
-            # contrária de algum processo? SÓ suspeita, SÓ canal interno,
-            # NUNCA revelado ao lead. Decisão de impedimento é humana.
-            conflitos = checar_conflito(conn, lead["contato_nome"])
-            if conflitos:
-                refs = "; ".join(
-                    f"{c['processo']} ({c['papel']})" for c in conflitos[:5]
-                )
-                logger.warning(
-                    "lead=%s POSSÍVEL CONFLITO: %s", lead_id, refs,
-                )
-                try:
+                    logger.warning("lead=%s POSSÍVEL CONFLITO: %s", lead_id, refs)
                     await notify_mario(
                         jurichat,
                         mario_conversation_id=mario_conversation_id,
@@ -1131,25 +1150,24 @@ async def run_poll_cycle(
                             conversation_id=conv_id,
                         ),
                     )
-                except Exception as exc:
-                    logger.exception(
-                        "notify_mario(conflito) failed for lead=%s: %s",
-                        lead_id, exc,
-                    )
-
-        # Signal 1.5: URGÊNCIA JURÍDICA (roadmap 1.12). Lead com prazo/ato
-        # fatal ("fui citado", "penhora", "leilão amanhã") não pode esperar
-        # o funil. Escala 🚨 ao Mario UMA vez (urgencia_alertada_em) e NÃO
-        # interrompe: o bot segue atendendo normalmente (triagem abaixo).
-        if not lead["urgencia_alertada_em"]:
-            motivo_urgencia = detectar_urgencia(_last_lead_message(transcript))
-            if motivo_urgencia:
-                mark_urgencia_alertada(conn, lead_id)
-                logger.info(
-                    "lead=%s: urgência detectada (%s) — escalando pro Mario",
-                    lead_id, motivo_urgencia,
+            except Exception as exc:
+                logger.exception(
+                    "cliente/conflito check failed for lead=%s: %s",
+                    lead_id, exc,
                 )
-                try:
+
+        # Signal 1.6: URGÊNCIA JURÍDICA (roadmap 1.12). Lead com prazo/ato
+        # fatal não pode esperar o funil. Escala 🚨 UMA vez e NÃO interrompe
+        # (a triagem segue). try/except: falha não trava o ciclo.
+        if not lead["urgencia_alertada_em"]:
+            try:
+                motivo_urgencia = detectar_urgencia(_last_lead_message(transcript))
+                if motivo_urgencia:
+                    mark_urgencia_alertada(conn, lead_id)
+                    logger.info(
+                        "lead=%s: urgência detectada (%s) — escalando pro Mario",
+                        lead_id, motivo_urgencia,
+                    )
                     await notify_mario(
                         jurichat,
                         mario_conversation_id=mario_conversation_id,
@@ -1162,39 +1180,10 @@ async def run_poll_cycle(
                             conversation_id=conv_id,
                         ),
                     )
-                except Exception as exc:
-                    logger.exception(
-                        "notify_mario(urgencia) failed for lead=%s: %s",
-                        lead_id, exc,
-                    )
-
-        # Signal 1.6: OPT-OUT (LGPD, roadmap 1.10). Lead pediu pra parar de
-        # receber. Registra na supressão (telefone), confirma de forma
-        # sóbria e SAI do funil automático (aguardando_humano). Os jobs de
-        # relacionamento consultam a lista antes de enviar.
-        if detectar_opt_out(_last_lead_message(transcript)):
-            registrar_opt_out(
-                conn, telefone=lead["contato_telefone"],
-                motivo="pediu no WhatsApp",
-            )
-            logger.info("lead=%s pediu opt-out — suprimindo", lead_id)
-            transicao(
-                conn, lead_id, Estado.AGUARDANDO_HUMANO, motivo="opt_out",
-                proxima_acao_horas=CLEAR_PROXIMA_ACAO,
-            )
-            update_transcript_hash(conn, lead_id, new_hash)
-            try:
-                await jurichat.start_human_support(conv_id)
-                await jurichat.send_message(
-                    conv_id,
-                    "Tudo bem, não vou mais te enviar mensagens. "
-                    "Se um dia precisar, é só chamar por aqui. 🙏",
-                )
             except Exception as exc:
                 logger.exception(
-                    "opt_out confirm send failed for lead=%s: %s", lead_id, exc,
+                    "urgencia check failed for lead=%s: %s", lead_id, exc,
                 )
-            continue
 
         # Signal 2: turn cap reached → hand off to Mario.
         if _count_lead_lines(transcript) >= max_turnos:

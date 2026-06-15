@@ -59,6 +59,35 @@ async def test_indexa_so_partes_contrarias(respx_mock):
     conn.close()
 
 
+@pytest.mark.asyncio
+async def test_cliente_em_outro_processo_nao_vira_adversario(respx_mock):
+    # mesma pessoa: Cliente no proc A, Requerido no proc B → NÃO indexar
+    # como adversário (não pode disparar conflito contra cliente da casa)
+    respx_mock.get("https://api.juridiq.com.br/lawSuit/").mock(
+        return_value=httpx.Response(200, json={
+            "data": [
+                {"processNumber": "1-1", "persons": [
+                    {"name": "Carlos Multipapel Dias", "personOrigin": "Cliente"},
+                ]},
+                {"processNumber": "2-2", "persons": [
+                    {"name": "Carlos Multipapel Dias", "personOrigin": "Requerido"},
+                ]},
+            ],
+            "totalPages": 1, "totalResults": 2,
+        }),
+    )
+    conn = connect(":memory:")
+    run_migrations(conn)
+    client = httpx.Client(base_url="https://api.juridiq.com.br",
+                          headers={"x-juridiq-api-key": "jq"})
+    try:
+        construir_indice_partes(client, conn)
+    finally:
+        client.close()
+    assert checar_conflito(conn, "Carlos Multipapel Dias") == []  # é cliente, não adversário
+    conn.close()
+
+
 # --- checar_conflito ---------------------------------------------------------
 
 def test_lead_que_e_parte_contraria_dispara():

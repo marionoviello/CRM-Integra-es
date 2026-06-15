@@ -107,13 +107,15 @@ def consultar_datajud(
         datas = [
             mov["dataHora"]
             for h in hits
-            for mov in h["_source"].get("movimentos", []) or []
+            for mov in (h.get("_source") or {}).get("movimentos", []) or []
             if mov.get("dataHora")
         ]
         if not datas:
             return None, "sem_movimentos"
         return max(datas), "ok"
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+        # ValueError = 200 com corpo não-JSON; KeyError/TypeError = payload
+        # inesperado. Não pode derrubar a varredura dos outros processos.
         return None, f"erro_{type(exc).__name__}"
 
 

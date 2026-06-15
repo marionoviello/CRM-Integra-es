@@ -47,7 +47,10 @@ def chaves_telefone(raw: object) -> set[str]:
     chaves = {ddd + num}
     if len(num) == 9 and num[0] == "9":   # celular: adiciona variante sem o 9
         chaves.add(ddd + num[1:])
-    if len(num) == 8:                       # 8 dígitos: adiciona variante com 9
+    # 8 dígitos começando com 6-9 = celular LEGADO (pré-9º dígito) → casa
+    # com a versão moderna (com 9). Fixo (começa 2-5) NÃO ganha o 9, senão
+    # casaria o celular de OUTRA pessoa (bug revisão 15/jun).
+    if len(num) == 8 and num[0] in "6789":
         chaves.add(ddd + "9" + num)
     return chaves
 
@@ -65,21 +68,32 @@ def construir_indice(client: httpx.Client, conn) -> int:
             break
         page += 1
 
-    conn.execute("DELETE FROM person_index")
-    indexadas = 0
-    for p in pessoas:
-        chaves = chaves_telefone(p.get("phone"))
-        if not chaves:
-            continue
-        indexadas += 1
-        for ch in chaves:
-            conn.execute(
-                "INSERT OR REPLACE INTO person_index "
-                "(telefone_chave, person_id, nome, email, document) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (ch, p.get("id"), p.get("name"), p.get("email"),
-                 p.get("document")),
-            )
+    # Transação (BEGIN IMMEDIATE): leitores concorrentes (poll cycle) veem
+    # sempre o índice ANTIGO completo OU o novo completo — nunca o estado
+    # parcial entre o DELETE e os INSERTs (bug revisão 15/jun: lead que
+    # interage na janela do rebuild teria resolver_telefone vazio +
+    # cliente_checado_em já gravado = falso-negativo permanente).
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DELETE FROM person_index")
+        indexadas = 0
+        for p in pessoas:
+            chaves = chaves_telefone(p.get("phone"))
+            if not chaves:
+                continue
+            indexadas += 1
+            for ch in chaves:
+                conn.execute(
+                    "INSERT OR REPLACE INTO person_index "
+                    "(telefone_chave, person_id, nome, email, document) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (ch, p.get("id"), p.get("name"), p.get("email"),
+                     p.get("document")),
+                )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
     logger.info(
         "person_index: %d pessoas indexadas de %d (com telefone)",
         indexadas, len(pessoas),

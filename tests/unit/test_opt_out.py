@@ -39,6 +39,11 @@ def test_nao_confunde_pedido_de_envio_com_opt_out():
     # "me manda" é pedido, não opt-out
     assert not detectar_opt_out("me manda o contrato por favor")
     assert not detectar_opt_out("pode mandar os documentos")
+    # armadilha da preposição "para" (bug ALTA revisão 15/jun):
+    # pedir pra enviar PARA um destino NÃO é descadastro
+    assert not detectar_opt_out("manda para meu email a mensagem")
+    assert not detectar_opt_out("pode mandar para mim os documentos")
+    assert not detectar_opt_out("envia para o whatsapp da minha esposa")
 
 
 # --- registrar / consultar ---------------------------------------------------
