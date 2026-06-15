@@ -40,6 +40,7 @@ from noviello_funil.atendimento_processo import (
     ultimo_movimento_datajud,
 )
 from noviello_funil.brain import Decisao, DecisaoInvalida
+from noviello_funil.briefing_reuniao import montar_briefing
 from noviello_funil.calendar_client import (
     GoogleCalendarClient,
     GoogleCalendarError,
@@ -1231,7 +1232,7 @@ async def run_poll_cycle(
                     )
                     movimentos: dict = {
                         p["process_number"]: m
-                        for p, m in zip(plano["publicos"], movs_list)
+                        for p, m in zip(plano["publicos"], movs_list, strict=False)
                         if isinstance(m, dict)
                     }
                     await jurichat.send_message(
@@ -1555,6 +1556,7 @@ async def run_reminder_cycle(
     *,
     get_db: Callable[[], Any],
     jurichat: JurichatClient,
+    mario_conversation_id: str = "",
 ) -> None:
     """Manda lembretes 24h / 2h / 30min de cada reunião agendada.
 
@@ -1616,6 +1618,27 @@ async def run_reminder_cycle(
                     jurichat, conv_id, msg, lead["id"], "2h",
                 ):
                     mark_lembrete_enviado(conn, lead["id"], "2h")
+                    # Signal 3.2: briefing pré-reunião pra EQUIPE (interno),
+                    # junto do lembrete de 2h. Se cliente, lista os processos
+                    # (do cliente_processo, instantâneo). try/except: nunca
+                    # derruba o ciclo de lembretes.
+                    if mario_conversation_id:
+                        try:
+                            procs = consultar_processos_do_telefone(
+                                conn, lead["contato_telefone"]
+                            )
+                            await notify_mario(
+                                jurichat,
+                                mario_conversation_id=mario_conversation_id,
+                                mensagem=montar_briefing(
+                                    lead["contato_nome"], lead["contato_telefone"],
+                                    horario_human, meet_link, procs,
+                                ),
+                            )
+                        except Exception as exc:
+                            logger.exception(
+                                "briefing 3.2 falhou lead=%s: %s", lead["id"], exc,
+                            )
         elif delta <= datetime.timedelta(hours=24):
             if lead["lembrete_24h_enviado_em"] is None:
                 msg = _msg_lembrete_24h(nome, horario_human, meet_link)
@@ -1901,6 +1924,7 @@ def main() -> int:
         await run_reminder_cycle(
             get_db=lambda: conn,
             jurichat=jurichat,
+            mario_conversation_id=settings.mario_conversation_id,
         )
         # 4. Follow-up cycle nudges idle leads.
         await run_followup_cycle(
