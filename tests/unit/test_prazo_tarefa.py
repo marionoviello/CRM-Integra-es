@@ -3,9 +3,11 @@
 from noviello_funil.db import connect, run_migrations
 from noviello_funil.prazo_tarefa import (
     calcular_prazo_sugerido,
+    criar_tarefa,
     deve_criar_tarefa,
     ja_criada,
     marcar_criada,
+    montar_corpo_tarefa,
     montar_descricao,
     montar_titulo,
 )
@@ -83,3 +85,58 @@ def test_sem_id_nao_cria():
     run_migrations(conn)
     assert ja_criada(conn, "") is True   # sem id → trata como já criada (não duplica cego)
     conn.close()
+
+
+# --- corpo + POST ------------------------------------------------------------
+
+def test_montar_corpo_tarefa():
+    c = montar_corpo_tarefa(
+        titulo="PRAZO: x", descricao="d", final_date="2026-06-20",
+        law_suit_id="uuid-1", board="Quadro", column="Pendente", priority="Alta",
+    )
+    assert c["title"] == "PRAZO: x"
+    assert c["lawSuitId"] == "uuid-1"
+    assert c["finalDate"] == "2026-06-20"
+    assert c["column"] == "Pendente" and c["priority"] == "Alta"
+    # sem data → sem a chave finalDate
+    c2 = montar_corpo_tarefa(
+        titulo="t", descricao="d", final_date=None, law_suit_id="u",
+        board="B", column="C", priority="Alta",
+    )
+    assert "finalDate" not in c2
+
+
+class _FakeResp:
+    def __init__(self, status, data=None, text=""):
+        self.status_code = status
+        self._data = data
+        self.text = text
+
+    def json(self):
+        if self._data is None:
+            raise ValueError("no json")
+        return self._data
+
+
+class _FakeClient:
+    def __init__(self, resp):
+        self._resp = resp
+        self.body = None
+
+    def post(self, path, json=None):
+        self.body = json
+        return self._resp
+
+
+def test_criar_tarefa_sucesso():
+    cli = _FakeClient(_FakeResp(201, {"data": {"id": "task-123"}}))
+    tid, det = criar_tarefa(cli, {"title": "x"})
+    assert tid == "task-123" and det == "ok"
+    assert cli.body == {"title": "x"}
+
+
+def test_criar_tarefa_erro_http_devolve_corpo():
+    cli = _FakeClient(_FakeResp(400, text="column not found"))
+    tid, det = criar_tarefa(cli, {})
+    assert tid is None
+    assert "http_400" in det and "column not found" in det

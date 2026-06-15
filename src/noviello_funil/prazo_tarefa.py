@@ -19,7 +19,12 @@ criada — uma falha no meio não perde o prazo.
 """
 
 import datetime
+import logging
 import re
+
+import httpx
+
+logger = logging.getLogger(__name__)
 
 # Folga (dias) antes da data real estimada — a tarefa vence ANTES pra dar
 # margem. Conservador de propósito (perder prazo é o pior caso).
@@ -146,3 +151,48 @@ def marcar_criada(conn, publication_id: object, processo: object, task_id: objec
         "(publication_id, process_number, task_id) VALUES (?, ?, ?)",
         (str(publication_id or ""), str(processo or ""), str(task_id or "")),
     )
+
+
+def montar_corpo_tarefa(
+    *,
+    titulo: str,
+    descricao: str,
+    final_date: str | None,
+    law_suit_id: str,
+    board: str,
+    column: str,
+    priority: str,
+) -> dict:
+    """Corpo do POST /task/ (campos espelham a estrutura do GET /task/:
+    title, description, priority, board, column, lawSuitId, finalDate)."""
+    body: dict = {
+        "title": titulo,
+        "description": descricao,
+        "priority": priority,
+        "board": board,
+        "column": column,
+        "lawSuitId": law_suit_id,
+    }
+    if final_date:
+        body["finalDate"] = final_date
+    return body
+
+
+def criar_tarefa(
+    client: httpx.Client, corpo: dict,
+) -> tuple[str | None, str]:
+    """POST /task/ → (task_id | None, detalhe). Erro não levanta — devolve o
+    motivo pro caller decidir (e logar o corpo da resposta na 1ª validação)."""
+    try:
+        r = client.post("/task/", json=corpo)
+    except httpx.HTTPError as exc:
+        return None, f"erro_{type(exc).__name__}"
+    if r.status_code >= 400:
+        return None, f"http_{r.status_code}: {r.text[:400]}"
+    try:
+        data = r.json()
+    except ValueError:
+        return None, "resposta_nao_json"
+    obj = data.get("data") if isinstance(data, dict) and "data" in data else data
+    tid = obj.get("id") if isinstance(obj, dict) else None
+    return (str(tid) if tid else None), "ok"
