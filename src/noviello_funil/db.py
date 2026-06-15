@@ -159,6 +159,16 @@ CREATE TABLE IF NOT EXISTS cliente_processo (
 
 CREATE INDEX IF NOT EXISTS idx_cliente_processo_tel
     ON cliente_processo(telefone_chave);
+
+-- Boletim mensal de andamento ao cliente (roadmap 3.1, variante mensal).
+-- Idempotência por competência (YYYY-MM): o job roda no último dia útil
+-- (e na janela até o fim do mês, p/ retry se o envio falhar), mas o lote
+-- só é montado UMA vez por mês. Marcado só após o envio ao Mario dar certo.
+CREATE TABLE IF NOT EXISTS boletim_competencia (
+    competencia TEXT PRIMARY KEY,        -- 'YYYY-MM'
+    total       INTEGER,
+    enviado_em  TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 

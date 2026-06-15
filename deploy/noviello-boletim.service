@@ -1,0 +1,18 @@
+[Unit]
+Description=Noviello Funil Saude - Boletim mensal ao cliente (ultimo dia util)
+After=network.target
+
+[Service]
+Type=oneshot
+# Varre o DataJud dos processos de cliente (paralelizado) — margem folgada
+# igual aos outros jobs DataJud pra nao estourar o timer.
+TimeoutStartSec=900
+User=noviello
+Group=noviello
+WorkingDirectory=/opt/noviello-funil-saude
+EnvironmentFile=/opt/noviello-funil-saude/.env
+ExecStart=/opt/noviello-funil-saude/.venv/bin/noviello-boletim
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true

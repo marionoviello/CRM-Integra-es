@@ -1,0 +1,13 @@
+[Unit]
+Description=Noviello Funil Saude - Boletim mensal (diario; age so no ultimo dia util)
+
+[Timer]
+# 13:00 UTC = 10:00 America/Sao_Paulo, TODO dia. O job se auto-limita: so
+# monta o lote na janela do ultimo dia util ate o fim do mes (margem de
+# retry se o envio falhar no dia exato). Idempotente por competencia (YYYY-MM).
+OnCalendar=*-*-* 13:00:00
+Persistent=true
+Unit=noviello-boletim.service
+
+[Install]
+WantedBy=timers.target

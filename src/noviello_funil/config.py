@@ -116,6 +116,9 @@ class Settings(BaseSettings):
     # janela de quanto tempo pra trás varrer eventos. 120 dias na 1ª rodada
     # pega o backlog recente; depois a idempotência só traz os novos.
     triagem_financeira_janela_dias: int = Field(default=120, ge=1)
+    # Boletim mensal de andamento ao cliente (3.1). True força a rodada
+    # mesmo fora do último dia útil — só pra smoke/teste manual.
+    boletim_forcar: bool = False
 
     # CUID do usuário "BOT IA" no Jurichat. Quando setado:
     #   1. start_human_support atribui conversas a ele (selectedUserId)
