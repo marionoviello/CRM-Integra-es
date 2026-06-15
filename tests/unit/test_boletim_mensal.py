@@ -90,6 +90,25 @@ def test_termos_sensiveis_viram_rascunho():
         assert classificar_boletim(_m(nome))["modo"] == "rascunho", f"{nome}: virou auto!"
 
 
+def test_familia_indeferimento_negacao_vira_rascunho():
+    # Atos adversos que carregam um substantivo da whitelist (petição/despacho/
+    # certidão) — escapavam pro auto antes da revisão 15/jun.
+    adversos = [
+        "Indeferimento da Petição Inicial",
+        "Despacho - Negado seguimento ao recurso",
+        "Manifestação - Recurso Inadmitido",
+        "Petição de Renúncia ao mandato",
+        "Despacho - Indefiro a Justiça Gratuita",
+        "Suspensão do Processo (art. 921)",
+        "Negado provimento ao recurso",
+        "Recurso desprovido",
+        "Não conhecido o recurso",
+        "Certidão de não interposição de recurso",
+    ]
+    for nome in adversos:
+        assert classificar_boletim(_m(nome))["modo"] == "rascunho", f"{nome}: virou auto!"
+
+
 def test_procedimentais_viram_auto():
     seguros = [
         "Juntada de Petição", "Conclusão", "Despacho", "Publicação", "Vista",

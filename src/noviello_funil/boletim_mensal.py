@@ -120,6 +120,23 @@ _DESFECHO = [
     r"\bliquida[çc][ãa]o\b",
     r"\bdesist[êe]ncia\b",
     r"\bintima[çc][ãa]o\s+\w*\s*pagamento\b",
+    # Família INDEFERIMENTO/NEGAÇÃO/INADMISSÃO/RENÚNCIA/SUSPENSÃO (revisão
+    # 15/jun): atos adversos que carregam um substantivo da whitelist
+    # ('Indeferimento da PETIÇÃO inicial', 'DESPACHO - Negado seguimento') e
+    # escapariam pro auto. Na dúvida → rascunho (falso-positivo é barato).
+    r"\bindef[ei]r\w*",   # indeferimento/indeferida/indefere/indefiro
+    r"\bnegad[oa]\b",
+    r"\bnega\w+\s+(seguimento|provimento)\b",
+    r"\bn[ãa]o[-\s]provimento\b",
+    r"\bdesprovid\w+",
+    r"\bimprovid\w+",
+    r"\binadmiss\w+",
+    r"\binadmitid\w+",
+    r"\bn[ãa]o\s+conhec\w+",
+    r"\bn[ãa]o\s+interp\w+",   # não interposição/interposto (perdeu o prazo recursal)
+    r"\bren[úu]ncia\b",
+    r"\bsuspens[ãa]o\b",
+    r"\bsobresta\w+",
 ]
 _RX_DESFECHO = [re.compile(p) for p in _DESFECHO]
 
@@ -435,8 +452,8 @@ def main() -> int:
             ultima = max(
                 (str(m.get("data") or "")[:10] for m in movs_mes), default=""
             )
-            # nome estável (não depende da ordem de scan): o do person_id
-            # cujo telefone vamos usar, senão qualquer um.
+            # nome p/ o lote do Mario (NÃO vai na msg ao cliente): o 1º
+            # cadastrado do processo. Em 'auto' só há 1 pessoa (multi→rascunho).
             nome = next(iter(info["nomes"].values()), None) or "Cliente"
             if plano["modo"] == "auto":
                 link = wa_me_link(tel, montar_mensagem_cliente(pn, ultima))
