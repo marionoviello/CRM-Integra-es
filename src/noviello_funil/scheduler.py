@@ -27,6 +27,17 @@ from typing import Any
 
 import httpx
 
+from noviello_funil.atendimento_processo import (
+    MSG_NAO_CADASTRADO_CLIENTE,
+    MSG_SIGILOSO_CLIENTE,
+    alerta_nao_identificado,
+    alerta_sigiloso,
+    classificar_atendimento,
+    consultar_processos_do_telefone,
+    detectar_pergunta_status,
+    montar_resposta_cliente,
+    ultimo_movimento_datajud,
+)
 from noviello_funil.brain import Decisao, DecisaoInvalida
 from noviello_funil.calendar_client import (
     GoogleCalendarClient,
@@ -36,14 +47,13 @@ from noviello_funil.calendar_client import (
 from noviello_funil.conflito import checar_conflito
 from noviello_funil.juridiq_client import JuridiqClient, intake_lead_agendado
 from noviello_funil.opt_out import detectar_opt_out, registrar_opt_out
-from noviello_funil.person_index import resolver_telefone
-from noviello_funil.urgencia import detectar_urgencia
 from noviello_funil.outbound import (
     JurichatClient,
     format_notification,
     notify_mario,
     split_conversation_ids,
 )
+from noviello_funil.person_index import resolver_telefone
 from noviello_funil.state import (
     CLEAR_PROXIMA_ACAO,
     Estado,
@@ -64,6 +74,7 @@ from noviello_funil.state import (
     transicao,
     update_transcript_hash,
 )
+from noviello_funil.urgencia import detectar_urgencia
 
 logger = logging.getLogger(__name__)
 
@@ -950,6 +961,7 @@ async def run_poll_cycle(
     calendar: CalendarConfig | None = None,
     bot_user_id: str = "",
     juridiq: JuridiqClient | None = None,
+    datajud_api_key: str = "",
 ) -> None:
     """Process all em_conversa leads whose poll tick is due."""
     conn = get_db()
@@ -1184,6 +1196,82 @@ async def run_poll_cycle(
                 logger.exception(
                     "urgencia check failed for lead=%s: %s", lead_id, exc,
                 )
+
+        # Signal 1.7: ATENDIMENTO "como está meu processo?" (roadmap 2.4).
+        # Curto-circuita o funil: o bot responde a consulta de status (ou
+        # escala) em vez de tratar como lead. Regras OAB do Mario:
+        #   - só passa info pro telefone que está no cadastro como CLIENTE;
+        #   - processo em SEGREDO → não responde, escala Mario+Hilde manual;
+        #   - telefone não-cadastrado → não revela nada, avisa Mario+Hilde.
+        # Em qualquer caso o bot dá baixa pra HUMANO (cliente existente não é
+        # lead a nutrir). try/else: sucesso → continue; falha → cai no fluxo
+        # normal (degradação graciosa, não trava o ciclo).
+        if detectar_pergunta_status(_last_lead_message(transcript)):
+            tratou = False
+            try:
+                procs = consultar_processos_do_telefone(
+                    conn, lead["contato_telefone"]
+                )
+                plano = classificar_atendimento(procs)
+                await jurichat.start_human_support(conv_id)
+
+                if plano["acao"] == "responder":
+                    movimentos: dict = {}
+                    for p in plano["publicos"]:
+                        mov = await ultimo_movimento_datajud(
+                            p["process_number"], datajud_api_key
+                        )
+                        if mov:
+                            movimentos[p["process_number"]] = mov
+                    await jurichat.send_message(
+                        conv_id, montar_resposta_cliente(plano["publicos"], movimentos)
+                    )
+                    if plano["sigilosos"]:
+                        await notify_mario(
+                            jurichat,
+                            mario_conversation_id=mario_conversation_id,
+                            mensagem=alerta_sigiloso(
+                                lead["contato_nome"], lead["contato_telefone"],
+                                plano["sigilosos"],
+                            ),
+                        )
+                elif plano["acao"] == "sigiloso":
+                    await jurichat.send_message(conv_id, MSG_SIGILOSO_CLIENTE)
+                    await notify_mario(
+                        jurichat,
+                        mario_conversation_id=mario_conversation_id,
+                        mensagem=alerta_sigiloso(
+                            lead["contato_nome"], lead["contato_telefone"],
+                            plano["sigilosos"],
+                        ),
+                    )
+                else:  # nao_cadastrado
+                    await jurichat.send_message(conv_id, MSG_NAO_CADASTRADO_CLIENTE)
+                    await notify_mario(
+                        jurichat,
+                        mario_conversation_id=mario_conversation_id,
+                        mensagem=alerta_nao_identificado(
+                            lead["contato_telefone"], _last_lead_message(transcript),
+                        ),
+                    )
+
+                logger.info(
+                    "lead=%s: consulta de status — ação=%s (%d processos)",
+                    lead_id, plano["acao"], len(procs),
+                )
+                transicao(
+                    conn, lead_id, Estado.AGUARDANDO_HUMANO,
+                    motivo=f"atendimento_processo_{plano['acao']}",
+                    proxima_acao_horas=CLEAR_PROXIMA_ACAO,
+                )
+                update_transcript_hash(conn, lead_id, new_hash)
+                tratou = True
+            except Exception as exc:
+                logger.exception(
+                    "atendimento_processo (2.4) falhou lead=%s: %s", lead_id, exc,
+                )
+            if tratou:
+                continue
 
         # Signal 2: turn cap reached → hand off to Mario.
         if _count_lead_lines(transcript) >= max_turnos:
@@ -1788,6 +1876,7 @@ def main() -> int:
             calendar=calendar_config,
             bot_user_id=settings.jurichat_bot_user_id,
             juridiq=juridiq_client,
+            datajud_api_key=settings.datajud_api_key,
         )
         # 3. Reminder cycle envia lembretes 24h/2h/30min antes de
         #    cada reunião agendada.

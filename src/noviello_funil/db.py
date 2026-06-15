@@ -136,6 +136,27 @@ CREATE TABLE IF NOT EXISTS triagem_financeira_visto (
     tipo           TEXT,            -- 'constricao' | 'levantar'
     primeiro_visto TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Índice telefone→processo DO CLIENTE (atendimento "como está meu
+-- processo?", roadmap 2.4). Liga o telefone de quem manda WhatsApp ao(s)
+-- processo(s) em que ele é PARTE CLIENTE — a autenticação: só passa info
+-- pra quem está no cadastro. Repovoado de madrugada (junto do person_index)
+-- cruzando GET /lawSuit/ (persons personOrigin=Cliente, por CPF/nome) com
+-- o person_index (telefone↔CPF). is_secret marca segredo de justiça →
+-- nunca responder automático, escalar pra Mario+Hilde. Uma pessoa pode
+-- ter vários processos.
+CREATE TABLE IF NOT EXISTS cliente_processo (
+    telefone_chave     TEXT NOT NULL,
+    process_number     TEXT NOT NULL,
+    is_secret          INTEGER NOT NULL DEFAULT 0,
+    last_movement_date TEXT,
+    cliente_nome       TEXT,
+    atualizado_em      TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (telefone_chave, process_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cliente_processo_tel
+    ON cliente_processo(telefone_chave);
 """
 
 

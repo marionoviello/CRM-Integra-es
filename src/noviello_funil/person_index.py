@@ -149,6 +149,16 @@ def main() -> int:
             logger.info("person_index: índice de partes (%d) reconstruído", np)
         except Exception as exc:
             logger.exception("person_index: índice de partes falhou: %s", exc)
+        # E o índice telefone→processo do cliente (atendimento 2.4) — depende
+        # do person_index acima estar fresco (lê dele pra casar CPF/nome).
+        from noviello_funil.atendimento_processo import (
+            construir_indice_cliente_processo,
+        )
+        try:
+            nc = construir_indice_cliente_processo(client, conn)
+            logger.info("person_index: índice cliente↔processo (%d) reconstruído", nc)
+        except Exception as exc:
+            logger.exception("person_index: índice cliente↔processo falhou: %s", exc)
     finally:
         client.close()
         conn.close()
