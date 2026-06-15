@@ -365,6 +365,21 @@ def test_format_notification_handoff_com_resumo():
     assert "Usucapião em SP" in msg
 
 
+def test_format_notification_conflito():
+    msg = format_notification(
+        tipo="conflito",
+        nome="João Réu Souza",
+        telefone="5511555554444",
+        ultima_msg="preciso de advogado",
+        motivo="1234567-89.2026.8.26.0100 (Requerido)",
+        conversation_id="C-3",
+    )
+    assert msg.startswith("⚖️")
+    assert "CONFLITO" in msg
+    assert "1234567-89.2026.8.26.0100" in msg
+    assert "NÃO mencione isto ao lead" in msg
+
+
 def test_format_notification_urgencia():
     msg = format_notification(
         tipo="urgencia",

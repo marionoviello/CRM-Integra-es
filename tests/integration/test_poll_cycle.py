@@ -1685,3 +1685,43 @@ async def test_lead_desconhecido_nao_aciona_aviso_de_cliente(db_conn):
     # mesmo sem match, marca o check pra não repetir
     lead = get_lead_by_conversation(db_conn, "C-1")
     assert lead["cliente_checado_em"] is not None
+
+
+# --- 1.7 conflito de interesse ----------------------------------------------
+
+@pytest.mark.asyncio
+async def test_conflito_de_interesse_alerta_so_no_canal_interno(db_conn):
+    db_conn.execute(
+        "INSERT INTO parte_contraria (nome_norm, processo, papel) VALUES (?,?,?)",
+        ("joao reu souza", "1234567-89.2026.8.26.0100", "Requerido"),
+    )
+    transcript = "Lead: oi, preciso de um advogado"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+    # lead com nome que bate com a parte contrária
+    db_conn.execute(
+        "UPDATE leads SET contato_nome = ? WHERE jurichat_conversation_id = ?",
+        ("João Réu Souza", "C-1"),
+    )
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = await _triagem_returning(
+        Decisao(acao="responder", mensagem="Claro, como ajudo?")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    # alerta de conflito existe e cita o processo
+    conflito_calls = [
+        c for c in jurichat.send_message.call_args_list if "CONFLITO" in c[0][1]
+    ]
+    assert conflito_calls, "deveria ter alertado conflito"
+    assert "1234567-89.2026.8.26.0100" in conflito_calls[0][0][1]
+    # CRÍTICO: a suspeita vai SÓ pro canal interno do Mario, nunca ao lead
+    assert conflito_calls[0][0][0] == "mario-conv"
+    # e o lead NÃO recebe nada sobre conflito (só a resposta normal)
+    lead_msgs = [
+        c[0][1] for c in jurichat.send_message.call_args_list if c[0][0] == "C-1"
+    ]
+    assert not any("CONFLITO" in t or "parte contrária" in t for t in lead_msgs)

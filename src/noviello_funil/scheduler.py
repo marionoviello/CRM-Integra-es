@@ -33,6 +33,7 @@ from noviello_funil.calendar_client import (
     GoogleCalendarError,
     Slot,
 )
+from noviello_funil.conflito import checar_conflito
 from noviello_funil.juridiq_client import JuridiqClient, intake_lead_agendado
 from noviello_funil.opt_out import detectar_opt_out, registrar_opt_out
 from noviello_funil.person_index import resolver_telefone
@@ -1104,6 +1105,35 @@ async def run_poll_cycle(
                 except Exception as exc:
                     logger.exception(
                         "notify_mario(cliente) failed for lead=%s: %s",
+                        lead_id, exc,
+                    )
+            # Conflito de interesse (roadmap 1.7): lead bate com parte
+            # contrária de algum processo? SÓ suspeita, SÓ canal interno,
+            # NUNCA revelado ao lead. Decisão de impedimento é humana.
+            conflitos = checar_conflito(conn, lead["contato_nome"])
+            if conflitos:
+                refs = "; ".join(
+                    f"{c['processo']} ({c['papel']})" for c in conflitos[:5]
+                )
+                logger.warning(
+                    "lead=%s POSSÍVEL CONFLITO: %s", lead_id, refs,
+                )
+                try:
+                    await notify_mario(
+                        jurichat,
+                        mario_conversation_id=mario_conversation_id,
+                        mensagem=format_notification(
+                            tipo="conflito",
+                            nome=lead["contato_nome"],
+                            telefone=lead["contato_telefone"],
+                            ultima_msg=_last_lead_message(transcript),
+                            motivo=refs,
+                            conversation_id=conv_id,
+                        ),
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "notify_mario(conflito) failed for lead=%s: %s",
                         lead_id, exc,
                     )
 

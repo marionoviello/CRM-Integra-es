@@ -110,6 +110,20 @@ CREATE TABLE IF NOT EXISTS opt_out (
     motivo     TEXT,
     criado_em  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Partes CONTRÁRIAS dos processos (conflito de interesse, roadmap 1.7).
+-- Repovoada de madrugada do GET /lawSuit/ (persons com personOrigin !=
+-- Cliente). Quando um lead novo bate com um nome aqui, o bot LEVANTA
+-- SUSPEITA ao Mario (nunca ao lead) — decisão é humana. Um nome pode
+-- aparecer em vários processos.
+CREATE TABLE IF NOT EXISTS parte_contraria (
+    nome_norm  TEXT NOT NULL,
+    processo   TEXT NOT NULL,
+    papel      TEXT,
+    PRIMARY KEY (nome_norm, processo)
+);
+
+CREATE INDEX IF NOT EXISTS idx_parte_nome ON parte_contraria(nome_norm);
 """
 
 

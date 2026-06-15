@@ -126,6 +126,15 @@ def main() -> int:
     try:
         n = construir_indice(client, conn)
         logger.info("person_index: índice reconstruído (%d pessoas)", n)
+        # Mesmo job de madrugada também reconstrói o índice de partes
+        # contrárias (conflito de interesse, roadmap 1.7) — reusa a
+        # conexão/cliente, sem mais um timer.
+        from noviello_funil.conflito import construir_indice_partes
+        try:
+            np = construir_indice_partes(client, conn)
+            logger.info("person_index: índice de partes (%d) reconstruído", np)
+        except Exception as exc:
+            logger.exception("person_index: índice de partes falhou: %s", exc)
     finally:
         client.close()
         conn.close()
