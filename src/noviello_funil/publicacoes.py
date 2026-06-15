@@ -133,6 +133,9 @@ def buscar_nao_tratadas(client: httpx.Client) -> list[dict]:
         pubs.append({
             "id": p.get("id") or "",
             "processo": processo,
+            # lawsuitId (minúsculo) liga a publicação ao processo p/ a tarefa
+            # (1.1) — vem direto na publicação, sem resolver processNumber.
+            "lawsuitId": p.get("lawsuitId") or "",
             "resumo": resumo,
             "data": p.get("publicationDate") or p.get("availabilityDate"),
             "diario": diario,
@@ -209,14 +212,22 @@ async def classificar_urgencia(
     return _parse_veredictos(raw, pubs)
 
 
-def montar_mensagem(urgentes: list[dict]) -> str:
-    """Mensagem WhatsApp-ready com SÓ as publicações urgentes."""
+def montar_mensagem(urgentes: list[dict], n_tarefas: int = 0) -> str:
+    """Mensagem WhatsApp-ready com SÓ as publicações urgentes.
+
+    ``n_tarefas`` (1.1): quantas viraram TAREFA no painel — vira uma linha de
+    confirmação no topo (os ✅ não precisam mais ser anotados à mão)."""
     n = len(urgentes)
     plural = (
         "publicações que parecem urgentes" if n > 1
         else "publicação que parece urgente"
     )
     cab = f"⚠️ *{n} {plural}*\n"
+    if n_tarefas:
+        cab += (
+            f"✅ {n_tarefas} virou tarefa no painel (prazo SUGERIDO — confira a "
+            "contagem).\n"
+        )
 
     ordenadas = sorted(urgentes, key=lambda p: _data_ordenavel(p.get("data")))
     linhas = []
@@ -240,6 +251,73 @@ def montar_mensagem(urgentes: list[dict]) -> str:
         "as que parecem ter prazo. Trate no painel pra silenciar."
     )
     return cab + "\n" + "\n".join(linhas) + "\n" + extra + rodape
+
+
+def _criar_tarefas_de_prazo(settings, urgentes: list[dict]) -> int:
+    """Cria TAREFA no Juridiq pras publicações urgentes com processo (1.1).
+
+    Idempotente por publication_id. Gated por publicacoes_criar_tarefa +
+    task_column_id. Erro por publicação não derruba as outras. Retorna nº
+    criadas. (sync — chamado dentro do _run; são poucas tarefas.)
+    """
+    import datetime
+
+    from noviello_funil.db import connect, run_migrations
+    from noviello_funil.prazo_tarefa import (
+        calcular_prazo_sugerido,
+        criar_tarefa,
+        deve_criar_tarefa,
+        ja_criada,
+        marcar_criada,
+        montar_corpo_tarefa,
+        montar_descricao,
+        montar_titulo,
+    )
+
+    if not (settings.publicacoes_criar_tarefa and settings.task_column_id):
+        return 0
+
+    conn = connect(settings.database_path)
+    run_migrations(conn)
+    cli = httpx.Client(
+        base_url=settings.juridiq_base_url,
+        headers={"x-juridiq-api-key": settings.juridiq_api_key},
+        timeout=30.0,
+    )
+    hoje = datetime.date.today().isoformat()
+    n = 0
+    try:
+        for pub in urgentes:
+            if not (deve_criar_tarefa(pub) and pub.get("lawsuitId")):
+                continue
+            if ja_criada(conn, pub["id"]):
+                continue
+            corpo = montar_corpo_tarefa(
+                titulo=montar_titulo(
+                    pub.get("motivo") or pub.get("resumo"), pub["processo"],
+                ),
+                descricao=montar_descricao(
+                    pub.get("motivo"), pub.get("prazo"), pub.get("teor"),
+                    pub.get("data"),
+                ),
+                final_date=calcular_prazo_sugerido(pub.get("prazo"), pub.get("data")),
+                initial_date=hoje,
+                law_suit_id=pub["lawsuitId"],
+                column_id=settings.task_column_id,
+                priority=settings.task_priority,
+            )
+            tid, det = criar_tarefa(cli, corpo)
+            if tid:
+                marcar_criada(conn, pub["id"], pub["processo"], tid)
+                n += 1
+            else:
+                logger.error(
+                    "publicacoes: criar tarefa falhou pub=%s: %s", pub["id"], det,
+                )
+    finally:
+        cli.close()
+        conn.close()
+    return n
 
 
 def main() -> int:
@@ -292,7 +370,13 @@ def main() -> int:
         if not urgentes:
             return
 
-        texto = montar_mensagem(urgentes)
+        # 1.1: publicação urgente com processo vira TAREFA rastreável no painel
+        # (não some no alerta). Gated/idempotente — ver _criar_tarefas_de_prazo.
+        n_tarefas = _criar_tarefas_de_prazo(settings, urgentes)
+        if n_tarefas:
+            logger.info("publicacoes: %d tarefa(s) de prazo criada(s)", n_tarefas)
+
+        texto = montar_mensagem(urgentes, n_tarefas)
         logger.info("publicacoes:\n%s", texto)
         jurichat = JurichatClient(
             api_key=settings.jurichat_api_key,
