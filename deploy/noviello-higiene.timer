@@ -1,0 +1,13 @@
+[Unit]
+Description=Noviello Funil Saude - Higiene da base (terca 08h BRT)
+
+[Timer]
+# 11:00 UTC = 08:00 America/Sao_Paulo, terca — dia diferente dos outros
+# relatorios (funil seg, carteira seg, datajud seg) pra nao amontoar.
+# Semanal: a qualidade da base muda devagar.
+OnCalendar=Tue *-*-* 11:00:00
+Persistent=true
+Unit=noviello-higiene.service
+
+[Install]
+WantedBy=timers.target

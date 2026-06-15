@@ -34,6 +34,7 @@ noviello-carteira-datajud = "noviello_funil.carteira_datajud:main"
 noviello-indice = "noviello_funil.person_index:main"
 noviello-bounce = "noviello_funil.detector_bounce:main"
 noviello-tarefas = "noviello_funil.tarefas:main"
+noviello-higiene = "noviello_funil.higiene_base:main"
 
 [build-system]
 requires = ["hatchling"]
