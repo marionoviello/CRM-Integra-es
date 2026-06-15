@@ -20,6 +20,12 @@ neutros E nenhum casa o léxico sensível. Qualquer coisa fora disso →
 rascunho (na dúvida, humano). É o gate inverso ao da triagem (que é
 blacklist tolerante a falso-negativo, por ser screening interno).
 
+FONTE DOS DADOS: "moveu este mês" vem da data do Juridiq (``cliente_processo.
+last_movement_date``, fresca, atualizada de madrugada) — NÃO do DataJud, que
+atrasa a publicação. O DataJud é consultado só pra pegar o TEXTO do movimento
+(classificar ✅/⚠️) dos poucos que moveram; se o texto ainda não saiu lá
+(atraso), o caso vira ⚠️ rascunho (o Mario confere no painel) — nunca some.
+
 Travas OAB (reuso do 2.4): só telefone autenticado por person_id
 (``cliente_processo``); pula segredo; respeita opt-out (1.10); co-autores
 e telefone ambíguo/fixo → rascunho; conteúdo sóbrio, "nossa equipe", nunca
@@ -188,6 +194,14 @@ def movimentos_do_mes(movimentos: list[dict], ano: int, mes: int) -> list[dict]:
     return out
 
 
+def moveu_no_mes(last_movement_date: object, ano: int, mes: int) -> bool:
+    """A última movimentação do Juridiq (data FRESCA, do ``cliente_processo``)
+    cai no mês/ano? É o gate de "moveu este mês" — fresco e instantâneo, sem
+    depender do DataJud (que atrasa)."""
+    d = _data_brt(last_movement_date)
+    return d is not None and d.year == ano and d.month == mes
+
+
 def motivo_sensivel(movimentos: list[dict]) -> str | None:
     """Se algum movimento do mês é sensível, devolve o motivo; senão None."""
     for m in movimentos:
@@ -223,17 +237,20 @@ def classificar_boletim(
 ) -> dict:
     """skip (sem movimento) | rascunho (qualquer dúvida) | auto (só o seguro).
 
-    Ordem de guardas é proposital: co-autores e telefone primeiro (questões
-    de DESTINATÁRIO), depois sensibilidade do conteúdo.
+    Chamado SÓ pra processo que já moveu no mês (gate por moveu_no_mes, no
+    chamador). Nunca 'skip' — sempre auto ou rascunho. Ordem proposital:
+    destinatário primeiro, depois detalhe/sensibilidade.
     """
-    if not movimentos_mes:
-        return {"modo": "skip", "motivo": "sem movimentação no mês"}
     if multi_cliente:
         return {"modo": "rascunho", "motivo": "co-autores — escreva você"}
     if telefone_ambiguo:
         return {"modo": "rascunho", "motivo": "telefone bate com +1 cadastro"}
     if not telefone_movel:
         return {"modo": "rascunho", "motivo": "sem celular no cadastro"}
+    if not movimentos_mes:
+        # Juridiq diz que moveu, mas o DataJud ainda não publicou o texto
+        # (atraso) — vai pra rascunho, o Mario confere no painel. NÃO some.
+        return {"modo": "rascunho", "motivo": "sem detalhe — confira no painel"}
     mot = motivo_sensivel(movimentos_mes)
     if mot:
         return {"modo": "rascunho", "motivo": mot}
@@ -289,7 +306,7 @@ def wa_me_link(telefone_chave: str, mensagem: str = "") -> str:
 def montar_lote(itens: list[dict], comp: str, sem_telefone: int = 0) -> str | None:
     """Lote de revisão ao Mario. Sem cap: o fatiamento (fatiar_mensagem)
     pagina tudo, pra nenhum cliente sumir silenciosamente."""
-    if not itens:
+    if not itens and not sem_telefone:
         return None
     auto = [i for i in itens if i["modo"] == "auto"]
     rasc = [i for i in itens if i["modo"] == "rascunho"]
@@ -323,17 +340,17 @@ def montar_lote(itens: list[dict], comp: str, sem_telefone: int = 0) -> str | No
 
 
 def _carregar_clientes(conn) -> dict:
-    """cliente_processo → {process_number: {person_ids, is_secret, nome,
-    telefones}} + tel_pids (telefone→person_ids, p/ detectar ambiguidade)."""
+    """cliente_processo → {process_number: {person_ids, is_secret, nomes,
+    telefones, last_movement_date}} + tel_pids (telefone→person_ids)."""
     procs: dict = {}
     tel_pids: dict = defaultdict(set)
-    for pn, pid, secret, nome, tel in conn.execute(
-        "SELECT process_number, person_id, is_secret, cliente_nome, telefone_chave "
-        "FROM cliente_processo"
+    for pn, pid, secret, nome, tel, lmd in conn.execute(
+        "SELECT process_number, person_id, is_secret, cliente_nome, telefone_chave, "
+        "last_movement_date FROM cliente_processo"
     ).fetchall():
         e = procs.setdefault(pn, {
             "person_ids": set(), "is_secret": bool(secret),
-            "nomes": {}, "telefones": set(),
+            "nomes": {}, "telefones": set(), "last_movement_date": lmd,
         })
         e["person_ids"].add(pid)
         if nome:
@@ -383,52 +400,52 @@ def main() -> int:
             return 0
 
         dados = _carregar_clientes(conn)
-        candidatos = [
-            (pn, info) for pn, info in dados["procs"].items()
-            if not info["is_secret"] and info["telefones"]
-        ]
-        sem_tel = sum(
-            1 for _pn, info in dados["procs"].items()
-            if not info["is_secret"] and not info["telefones"]
-        )
+        # GATE pela data do Juridiq (FRESCA, instantânea): só processos cuja
+        # última movimentação caiu NESTE mês. Não depende do DataJud (que
+        # atrasa) pra decidir "moveu", e encolhe a varredura ao subset.
+        candidatos = []
+        sem_tel = 0
+        for pn, info in dados["procs"].items():
+            if info["is_secret"]:
+                continue
+            if not moveu_no_mes(info["last_movement_date"], hoje.year, hoje.month):
+                continue
+            if not info["telefones"]:
+                sem_tel += 1
+                continue
+            candidatos.append((pn, info))
         logger.info(
-            "boletim: %d processos candidatos (não sigilosos com telefone); "
-            "%d sem telefone (de fora)", len(candidatos), sem_tel,
+            "boletim: %d processos moveram em %s (com telefone); %d sem telefone",
+            len(candidatos), comp, sem_tel,
         )
 
-        # DataJud em paralelo (infra da triagem) → movimentos por processo,
-        # contabilizando cobertura (não confundir falha de consulta com
-        # "sem movimentação").
-        dj = httpx.Client(timeout=30.0)   # alguns TRFs passam de 20s (smoke 15/jun)
-        limiter = _RateLimiter(RATE_MIN_INTERVALO)
+        # DataJud SÓ pro TEXTO dos que moveram (subset pequeno) — best-effort:
+        # falha de consulta vira rascunho "sem detalhe", nada se perde (por
+        # isso não há mais abort por cobertura).
         movs_por_proc: dict = {}
-        cobertura: Counter = Counter()
-        plock = threading.Lock()
+        if candidatos:
+            dj = httpx.Client(timeout=30.0)   # alguns TRFs passam de 20s
+            limiter = _RateLimiter(RATE_MIN_INTERVALO)
+            cobertura: Counter = Counter()
+            plock = threading.Lock()
 
-        def _consultar(par) -> None:
-            pn, _info = par
-            limiter.aguardar()
-            movs, st = consultar_movimentos_datajud(dj, pn, settings.datajud_api_key)
-            with plock:
-                movs_por_proc[pn] = movs
-                cobertura[st] += 1
+            def _consultar(par) -> None:
+                pn, _info = par
+                limiter.aguardar()
+                movs, st = consultar_movimentos_datajud(
+                    dj, pn, settings.datajud_api_key
+                )
+                with plock:
+                    movs_por_proc[pn] = movs
+                    cobertura[st] += 1
 
-        try:
-            with ThreadPoolExecutor(max_workers=CONCORRENCIA) as ex:
-                list(ex.map(_consultar, candidatos))
-        finally:
-            dj.close()
-
-        falhas = sum(v for k, v in cobertura.items() if k != "ok")
-        if candidatos and falhas > len(candidatos) * 0.5:
-            logger.error(
-                "boletim: %d/%d consultas DataJud falharam — não marca a "
-                "competência, re-tenta na janela. cobertura=%s",
-                falhas, len(candidatos), dict(cobertura),
-            )
-            return 0
-        if falhas:
-            logger.warning("boletim: cobertura parcial DataJud: %s", dict(cobertura))
+            try:
+                with ThreadPoolExecutor(max_workers=CONCORRENCIA) as ex:
+                    list(ex.map(_consultar, candidatos))
+            finally:
+                dj.close()
+            if any(k != "ok" for k in cobertura):
+                logger.warning("boletim: cobertura DataJud: %s", dict(cobertura))
 
         itens = []
         for pn, info in candidatos:
@@ -447,11 +464,8 @@ def main() -> int:
                 movs_mes, telefone_ambiguo=ambiguo, multi_cliente=multi,
                 telefone_movel=bool(movel),
             )
-            if plano["modo"] == "skip":
-                continue
-            ultima = max(
-                (str(m.get("data") or "")[:10] for m in movs_mes), default=""
-            )
+            # data FRESCA do Juridiq (não a do DataJud, que atrasa).
+            ultima = info["last_movement_date"] or ""
             # nome p/ o lote do Mario (NÃO vai na msg ao cliente): o 1º
             # cadastrado do processo. Em 'auto' só há 1 pessoa (multi→rascunho).
             nome = next(iter(info["nomes"].values()), None) or "Cliente"

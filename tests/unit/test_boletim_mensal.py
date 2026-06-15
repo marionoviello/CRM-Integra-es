@@ -16,6 +16,7 @@ from noviello_funil.boletim_mensal import (
     montar_lote,
     montar_mensagem_cliente,
     motivo_sensivel,
+    moveu_no_mes,
     movimentos_do_mes,
     na_janela_de_envio,
     ultimo_dia_util_do_mes,
@@ -133,8 +134,19 @@ def test_misto_com_um_sensivel_vira_rascunho():
     assert classificar_boletim(movs)["modo"] == "rascunho"
 
 
-def test_classificar_skip_sem_movimento():
-    assert classificar_boletim([])["modo"] == "skip"
+def test_classificar_sem_detalhe_datajud_vira_rascunho():
+    # Juridiq diz que moveu, mas DataJud sem o texto → rascunho (não some).
+    r = classificar_boletim([])
+    assert r["modo"] == "rascunho"
+    assert "detalhe" in r["motivo"]
+
+
+def test_moveu_no_mes_gate_juridiq():
+    assert moveu_no_mes("2026-06-10", 2026, 6) is True
+    assert moveu_no_mes("2026-06-30T23:30:00", 2026, 6) is True
+    assert moveu_no_mes("2026-05-31", 2026, 6) is False
+    assert moveu_no_mes("", 2026, 6) is False
+    assert moveu_no_mes(None, 2026, 6) is False
 
 
 # --- guardas de destinatário -------------------------------------------------
@@ -188,3 +200,5 @@ def test_montar_lote_agrupa_e_avisa_sem_telefone():
     assert "Ana" in txt and "Bia" in txt
     assert "ficaram de fora" in txt and "3" in txt
     assert montar_lote([], "2026-06") is None
+    # só sem-telefone (nenhum item) ainda avisa o Mario
+    assert montar_lote([], "2026-06", sem_telefone=2) is not None
