@@ -13,14 +13,16 @@ O que o bot informa (processo NÃO sigiloso, cliente verificado): número,
 data e texto da última movimentação (fato processual público) + "equipe
 acompanhando". SEM opinião jurídica, mérito ou prognóstico.
 
-Vínculo telefone→processo — AUTENTICAÇÃO SÓ POR CPF (chave forte). O
-``person_index`` liga telefone↔ficha (com CPF); o ``/lawSuit/`` traz o
-nome do cliente com o CPF no sufixo. Casamos pelo CPF e gravamos o
-``person_id``. NÃO casamos por nome: homônimo (dois "João Silva") faria o
-processo de um vazar pro telefone do outro — risco inaceitável quando o
-resultado é REVELAR dado de processo (a revisão adversarial de 15/jun pegou
-isso). Cliente sem CPF no cadastro → cai em atendimento humano. Se um
-telefone resolve pra DUAS fichas distintas (homônimo/contato compartilhado),
+Vínculo telefone→processo — AUTENTICAÇÃO POR person_id (id da ficha do
+Juridiq, chave forte e única). O ``/lawSuit/`` traz cada parte como
+``{id, name, personOrigin}``; o ``id`` do Cliente é o mesmo person_id que o
+``/person/`` expõe e que o ``person_index`` mapeia pra telefone. Ligamos por
+esse id — NÃO por nome (homônimo "João Silva" vazaria o processo de um pro
+telefone do outro; a revisão adversarial de 15/jun pegou isso) e sem
+depender de CPF (que o ``/lawSuit/`` não expõe no cliente — verificado
+15/jun: campos só ``id/name/personOrigin``). CPF no nome, quando aparece,
+serve de reforço. Cliente cuja ficha não tem telefone → atendimento humano.
+Se um telefone resolve pra DUAS fichas distintas (contato compartilhado),
 não autenticamos: escalamos. Índice ``cliente_processo`` repovoado de
 madrugada junto do person_index (depende dele estar fresco).
 
@@ -130,11 +132,11 @@ def _listar_processos(client: httpx.Client) -> list[dict]:
 def construir_indice_cliente_processo(client: httpx.Client, conn) -> int:
     """Repovoa cliente_processo cruzando /lawSuit/ (clientes) com person_index.
 
-    AUTENTICAÇÃO SÓ POR CPF: vincula o processo a uma ficha quando o CPF do
-    cliente no /lawSuit/ aponta pra UMA única ficha do person_index. Sem CPF,
-    CPF ausente do índice, ou CPF ambíguo → nenhum vínculo automático (o
-    cliente cai em atendimento humano). Idempotente em transação. Retorna nº
-    de vínculos (telefone, processo).
+    AUTENTICAÇÃO POR person_id: o ``id`` da parte Cliente no /lawSuit/ é o
+    person_id da ficha; ligamos o processo aos telefones dessa ficha. CPF no
+    nome (raro no cliente) entra como reforço, exigindo CPF único no índice.
+    Sem id reconhecível nem CPF → nenhum vínculo automático (cai em humano).
+    Idempotente em transação. Retorna nº de vínculos (telefone, processo).
     """
     doc_para_pid: dict[str, set[str]] = {}   # cpf → person_id(s)
     pid_tels: dict[str, set[str]] = {}       # person_id → telefones
@@ -165,21 +167,25 @@ def construir_indice_cliente_processo(client: httpx.Client, conn) -> int:
             for pessoa in p.get("persons") or []:
                 if (pessoa.get("personOrigin") or "").strip().lower() != "cliente":
                     continue
-                doc = extrair_documento(pessoa.get("name"))
-                if not doc:
-                    continue                       # sem CPF → não autentica
-                pids = doc_para_pid.get(doc)
-                if not pids or len(pids) != 1:
-                    continue                       # CPF ausente/ambíguo → humano
-                pid = next(iter(pids))
+                # CHAVE FORTE: o id da parte Cliente é o person_id da ficha.
+                pid = pessoa.get("id")
+                match_tipo = "person_id"
+                if not pid or pid not in pid_tels:
+                    # Sem id reconhecível: tenta CPF no nome (raro), único.
+                    doc = extrair_documento(pessoa.get("name"))
+                    pids = doc_para_pid.get(doc) if doc else None
+                    if not pids or len(pids) != 1:
+                        continue               # sem id nem CPF único → humano
+                    pid = next(iter(pids))
+                    match_tipo = "cpf"
                 nome_disp = pid_nome.get(pid) or _nome_limpo(pessoa.get("name"))
                 for tel in pid_tels.get(pid, set()):
                     conn.execute(
                         "INSERT OR REPLACE INTO cliente_processo "
                         "(telefone_chave, person_id, process_number, is_secret, "
                         "last_movement_date, cliente_nome, match_tipo) "
-                        "VALUES (?, ?, ?, ?, ?, ?, 'cpf')",
-                        (tel, pid, num, is_secret, lmd, nome_disp),
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (tel, pid, num, is_secret, lmd, nome_disp, match_tipo),
                     )
                     n += 1
         conn.execute("COMMIT")

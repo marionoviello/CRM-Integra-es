@@ -114,15 +114,37 @@ def test_indice_casa_por_cpf():
     conn.close()
 
 
-def test_sem_cpf_nao_vincula():
-    # Cliente sem CPF no cadastro → nenhum vínculo automático (cai em humano).
+def test_indice_casa_por_person_id():
+    # Caminho FORTE primário: o id da parte Cliente == person_id da ficha.
+    # (No /lawSuit/ real o cliente é {id, name, personOrigin}, sem CPF.)
+    conn = connect(":memory:")
+    run_migrations(conn)
+    _seed_person(conn, "11999998888", "pid-123", "Fulano Teste", doc="")
+    client = _FakeClient([{
+        "processNumber": "1-1",
+        "isSecret": False,
+        "lastMovementDate": "2026-06-09",
+        "persons": [{"id": "pid-123", "name": "Fulano Teste",
+                     "personOrigin": "Cliente"}],
+    }])
+    assert construir_indice_cliente_processo(client, conn) >= 1
+    procs = consultar_processos_do_telefone(conn, "11999998888")
+    assert len(procs) == 1
+    assert procs[0]["person_id"] == "pid-123"
+    conn.close()
+
+
+def test_id_desconhecido_e_sem_cpf_nao_vincula():
+    # Cliente cuja ficha não está no person_index (id não bate) e sem CPF →
+    # nenhum vínculo automático (cai em humano).
     conn = connect(":memory:")
     run_migrations(conn)
     _seed_person(conn, "11988887777", "p2", "Beltrano Souza Lima", doc="")
     client = _FakeClient([{
         "processNumber": "2-2",
         "isSecret": False,
-        "persons": [{"name": "Beltrano Souza Lima", "personOrigin": "Cliente"}],
+        "persons": [{"id": "outra-ficha", "name": "Beltrano Souza Lima",
+                     "personOrigin": "Cliente"}],
     }])
     construir_indice_cliente_processo(client, conn)
     assert consultar_processos_do_telefone(conn, "11988887777") == []
@@ -195,9 +217,9 @@ def test_telefone_compartilhado_por_duas_fichas_fica_ambiguo():
     _seed_person(conn, "11912345678", "pB", "Bia", "222.222.222-22")
     client = _FakeClient([
         {"processNumber": "A", "isSecret": False,
-         "persons": [{"name": "Ana - CPF: 111.111.111-11", "personOrigin": "Cliente"}]},
+         "persons": [{"id": "pA", "name": "Ana", "personOrigin": "Cliente"}]},
         {"processNumber": "B", "isSecret": False,
-         "persons": [{"name": "Bia - CPF: 222.222.222-22", "personOrigin": "Cliente"}]},
+         "persons": [{"id": "pB", "name": "Bia", "personOrigin": "Cliente"}]},
     ])
     construir_indice_cliente_processo(client, conn)
     procs = consultar_processos_do_telefone(conn, "11912345678")
