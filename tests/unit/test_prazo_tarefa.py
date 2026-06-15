@@ -92,18 +92,22 @@ def test_sem_id_nao_cria():
 def test_montar_corpo_tarefa():
     c = montar_corpo_tarefa(
         titulo="PRAZO: x", descricao="d", final_date="2026-06-20",
-        law_suit_id="uuid-1", board="Quadro", column="Pendente", priority="Alta",
+        initial_date="2026-06-15", law_suit_id="uuid-1", column_id="col-uuid",
+        priority="Alta",
     )
     assert c["title"] == "PRAZO: x"
     assert c["lawSuitId"] == "uuid-1"
     assert c["finalDate"] == "2026-06-20"
-    assert c["column"] == "Pendente" and c["priority"] == "Alta"
-    # sem data → sem a chave finalDate
+    assert c["columnId"] == "col-uuid"          # UUID, não nome
+    assert c["initialDate"] == "2026-06-15"
+    assert c["priority"] == "Alta"
+    # sem prazo → sem a chave finalDate (mas columnId/initialDate ficam)
     c2 = montar_corpo_tarefa(
-        titulo="t", descricao="d", final_date=None, law_suit_id="u",
-        board="B", column="C", priority="Alta",
+        titulo="t", descricao="d", final_date=None, initial_date="2026-06-15",
+        law_suit_id="u", column_id="c", priority="Alta",
     )
     assert "finalDate" not in c2
+    assert c2["columnId"] == "c" and c2["initialDate"] == "2026-06-15"
 
 
 class _FakeResp:

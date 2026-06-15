@@ -158,19 +158,20 @@ def montar_corpo_tarefa(
     titulo: str,
     descricao: str,
     final_date: str | None,
+    initial_date: str,
     law_suit_id: str,
-    board: str,
-    column: str,
+    column_id: str,
     priority: str,
 ) -> dict:
-    """Corpo do POST /task/ (campos espelham a estrutura do GET /task/:
-    title, description, priority, board, column, lawSuitId, finalDate)."""
+    """Corpo do POST /task/. O validador exige columnId (UUID da coluna, não
+    o nome) e initialDate (data de início, ISO) — descoberto no teste 15/jun.
+    finalDate é o prazo SUGERIDO (opcional)."""
     body: dict = {
         "title": titulo,
         "description": descricao,
         "priority": priority,
-        "board": board,
-        "column": column,
+        "columnId": column_id,
+        "initialDate": initial_date,
         "lawSuitId": law_suit_id,
     }
     if final_date:

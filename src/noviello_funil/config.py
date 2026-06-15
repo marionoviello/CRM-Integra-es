@@ -121,13 +121,12 @@ class Settings(BaseSettings):
     boletim_forcar: bool = False
 
     # 1.1: publicação urgente vira TAREFA no Juridiq. publicacoes_criar_tarefa
-    # liga o POST /task/ (default OFF — só alerta, como hoje, até validar o
-    # shape com um teste controlado). board/column/priority do kanban onde a
-    # tarefa nasce (descobertos no GET /task/: board "Seu Primeiro Quadro",
-    # coluna ativa "Pendente"). Ajustáveis sem mexer no código.
+    # liga o POST /task/ (default OFF — só alerta, como hoje, até validar).
+    # task_column_id é o UUID da coluna do kanban onde a tarefa nasce (o POST
+    # exige columnId, não o nome — descoberto 15/jun). Preencher no .env com o
+    # id da coluna "Pendente" (achado pelo diagnóstico). Vazio = não cria.
     publicacoes_criar_tarefa: bool = False
-    task_board: str = "Seu Primeiro Quadro"
-    task_column: str = "Pendente"
+    task_column_id: str = ""
     task_priority: str = "Alta"
 
     # CUID do usuário "BOT IA" no Jurichat. Quando setado:
