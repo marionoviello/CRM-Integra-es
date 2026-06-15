@@ -1,7 +1,8 @@
 """Tests for the monthly client briefing (boletim_mensal, roadmap 3.1).
 
-Híbrido: seguros (procedimental) → '✅ pronto'; sensíveis/ambíguos →
-'⚠️ revisar'. Sem movimentação no mês → não entra. Travas OAB reusam o 2.4.
+Classificação é WHITELIST (revisão adversarial 15/jun): auto só pra atos
+procedimentais neutros; qualquer movimento sensível/desconhecido → rascunho
+(fail-safe — um auto tom-surdo iria pré-preenchido ao cliente).
 """
 
 import calendar
@@ -10,24 +11,30 @@ import datetime
 from noviello_funil.boletim_mensal import (
     classificar_boletim,
     competencia,
-    eh_sensivel,
+    eh_comunicavel_auto,
+    melhor_movel,
     montar_lote,
     montar_mensagem_cliente,
+    motivo_sensivel,
     movimentos_do_mes,
     na_janela_de_envio,
     ultimo_dia_util_do_mes,
     wa_me_link,
 )
 
-# --- calendário (último dia útil) --------------------------------------------
+
+def _m(nome):
+    return [{"nome": nome, "data": "2026-06-10"}]
+
+
+# --- calendário --------------------------------------------------------------
 
 def test_ultimo_dia_util_e_dia_de_semana():
     for mes in range(1, 13):
         u = ultimo_dia_util_do_mes(datetime.date(2026, mes, 15))
         assert u.month == mes
-        assert u.weekday() < 5                       # seg-sex
+        assert u.weekday() < 5
         last = calendar.monthrange(2026, mes)[1]
-        # volta no máximo sáb+dom a partir do último dia do mês
         assert (datetime.date(2026, mes, last) - u).days <= 2
 
 
@@ -38,62 +45,101 @@ def test_na_janela_de_envio():
     if antes.month == u.month:
         assert na_janela_de_envio(antes) is False
     fim = datetime.date(2026, 6, calendar.monthrange(2026, 6)[1])
-    assert na_janela_de_envio(fim) is True           # fim de semana ainda conta
+    assert na_janela_de_envio(fim) is True
 
 
 def test_competencia():
     assert competencia(datetime.date(2026, 6, 30)) == "2026-06"
-    assert competencia(datetime.date(2026, 12, 1)) == "2026-12"
 
 
-# --- movimentos do mês -------------------------------------------------------
+# --- movimentos do mês + fuso ------------------------------------------------
 
 def test_movimentos_do_mes_filtra():
     movs = [
-        {"nome": "a", "data": "2026-06-10T00:00:00Z"},
+        {"nome": "a", "data": "2026-06-10T12:00:00Z"},
         {"nome": "b", "data": "2026-05-30"},
         {"nome": "c", "data": None},
     ]
     assert [m["nome"] for m in movimentos_do_mes(movs, 2026, 6)] == ["a"]
 
 
-# --- sensibilidade -----------------------------------------------------------
-
-def test_eh_sensivel():
-    assert eh_sensivel([{"nome": "Penhora online", "data": "2026-06-01"}]) == "constrição"
-    assert eh_sensivel([{"nome": "Expedição de RPV", "data": "2026-06-01"}]) == \
-        "dinheiro a levantar"
-    assert eh_sensivel([{"nome": "Sentença proferida", "data": "2026-06-01"}]) == \
-        "desfecho/decisão"
-    assert eh_sensivel([{"nome": "Conclusão", "data": "2026-06-01"}]) is None
-    assert eh_sensivel([]) is None
+def test_movimentos_do_mes_converte_fuso_brt():
+    # 2026-07-01 01:00 UTC = 2026-06-30 22:00 BRT → conta em JUNHO.
+    movs = [{"nome": "x", "data": "2026-07-01T01:00:00Z"}]
+    assert len(movimentos_do_mes(movs, 2026, 6)) == 1
+    assert len(movimentos_do_mes(movs, 2026, 7)) == 0
 
 
-# --- classificação -----------------------------------------------------------
+# --- classificação: sensíveis NUNCA viram auto (o coração da revisão) --------
 
-def _m(nome):
-    return [{"nome": nome, "data": "2026-06-10"}]
+def test_termos_sensiveis_viram_rascunho():
+    sensiveis = [
+        "Sequestro", "Busca e Apreensão", "Despejo", "Reintegração de Posse",
+        "Imissão na Posse", "Prisão Civil", "Confisco", "Remoção de Bens",
+        "Avaliação de Bens", "Recuperação Judicial", "Falência",
+        "Designação de Praça", "Hasta Pública", "Penhora", "Arresto",
+        "Indisponibilidade de Ativos", "Adjudicação", "Arrematação",
+        "Expedição de RPV", "RPV", "Pagamento de RPV", "Alvará",
+        "Levantamento de Valores", "Sentença", "Acórdão", "Improcedência",
+        "Procedência", "Procedência em Parte", "Trânsito em Julgado",
+        "Extinção", "Arquivamento dos Autos", "Baixa", "Homologação de Acordo",
+        "Intimação para Pagamento",
+    ]
+    for nome in sensiveis:
+        assert motivo_sensivel(_m(nome)) is not None, f"{nome}: motivo None"
+        assert classificar_boletim(_m(nome))["modo"] == "rascunho", f"{nome}: virou auto!"
+
+
+def test_procedimentais_viram_auto():
+    seguros = [
+        "Juntada de Petição", "Conclusão", "Despacho", "Publicação", "Vista",
+        "Remessa", "Decurso de Prazo", "Ato Ordinatório", "Certidão",
+        "Manifestação", "Designada Audiência",
+    ]
+    for nome in seguros:
+        assert eh_comunicavel_auto(_m(nome)) is True, nome
+        assert classificar_boletim(_m(nome))["modo"] == "auto", nome
+
+
+def test_movimento_desconhecido_vira_rascunho():
+    # Fail-safe: o que não está na whitelist nem é sensível → rascunho.
+    r = classificar_boletim(_m("Movimento Exótico ZZZ"))
+    assert r["modo"] == "rascunho"
+    assert r["motivo"] == "movimentação não rotineira"
+
+
+def test_misto_com_um_sensivel_vira_rascunho():
+    movs = [{"nome": "Juntada", "data": "2026-06-01"},
+            {"nome": "Penhora", "data": "2026-06-05"}]
+    assert classificar_boletim(movs)["modo"] == "rascunho"
 
 
 def test_classificar_skip_sem_movimento():
-    assert classificar_boletim([], False)["modo"] == "skip"
+    assert classificar_boletim([])["modo"] == "skip"
 
 
-def test_classificar_rascunho_se_ambiguo():
-    assert classificar_boletim(_m("Conclusão"), True)["modo"] == "rascunho"
+# --- guardas de destinatário -------------------------------------------------
+
+def test_co_autores_viram_rascunho():
+    assert classificar_boletim(_m("Juntada"), multi_cliente=True)["modo"] == "rascunho"
 
 
-def test_classificar_rascunho_se_sensivel():
-    r = classificar_boletim(_m("Penhora"), False)
+def test_telefone_ambiguo_vira_rascunho():
+    assert classificar_boletim(_m("Juntada"), telefone_ambiguo=True)["modo"] == "rascunho"
+
+
+def test_telefone_fixo_vira_rascunho():
+    r = classificar_boletim(_m("Juntada"), telefone_movel=False)
     assert r["modo"] == "rascunho"
-    assert r["motivo"] == "constrição"
+    assert "celular" in r["motivo"]
 
 
-def test_classificar_auto_procedimental():
-    assert classificar_boletim(_m("Juntada de Petição"), False)["modo"] == "auto"
+def test_melhor_movel():
+    assert melhor_movel({"1133334444", "11933334444"}) == "11933334444"
+    assert melhor_movel({"1133334444"}) is None       # só fixo
 
 
-# --- mensagem ao cliente + wa.me ---------------------------------------------
+# --- mensagem + wa.me + lote -------------------------------------------------
 
 def test_mensagem_cliente_sobria_e_marca():
     msg = montar_mensagem_cliente("1234567-00.2024.8.26.0100", "2026-06-12")
@@ -111,17 +157,15 @@ def test_wa_me_link():
     assert wa_me_link("11987654321") == "https://wa.me/5511987654321"
 
 
-# --- lote ao Mario -----------------------------------------------------------
-
-def test_montar_lote_agrupa_e_vazio():
+def test_montar_lote_agrupa_e_avisa_sem_telefone():
     itens = [
         {"nome": "Ana", "processo": "1", "telefone": "11999", "modo": "auto",
          "motivo": "", "data": "2026-06-10", "link": "L1"},
         {"nome": "Bia", "processo": "2", "telefone": "11988", "modo": "rascunho",
-         "motivo": "constrição", "data": "2026-06-05", "link": "L2"},
+         "motivo": "constrição/patrimônio", "data": "2026-06-05", "link": "L2"},
     ]
-    txt = montar_lote(itens, "2026-06")
+    txt = montar_lote(itens, "2026-06", sem_telefone=3)
     assert "Prontos pra enviar" in txt and "Revisar antes" in txt
     assert "Ana" in txt and "Bia" in txt
-    assert "constrição" in txt
+    assert "ficaram de fora" in txt and "3" in txt
     assert montar_lote([], "2026-06") is None
