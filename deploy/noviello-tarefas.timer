@@ -1,0 +1,12 @@
+[Unit]
+Description=Noviello Funil Saude - Agenda/SLA de tarefas (07h30 BRT dias uteis)
+
+[Timer]
+# 10:30 UTC = 07:30 America/Sao_Paulo, seg-sex — cartão matinal antes do
+# expediente. Só dias úteis: prazo não vence em fim de semana forense.
+OnCalendar=Mon..Fri *-*-* 10:30:00
+Persistent=true
+Unit=noviello-tarefas.service
+
+[Install]
+WantedBy=timers.target
