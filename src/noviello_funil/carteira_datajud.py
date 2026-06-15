@@ -25,14 +25,39 @@ https://datajud-wiki.cnj.jus.br/api-publica/acesso) — não é segredo.
 import datetime
 import logging
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
-THROTTLE_S = 0.6     # rate limit documentado do DataJud: 120 req/min
-MAX_LISTA = 25       # cap de itens detalhados na mensagem
+# Paralelismo: a varredura sequencial (284 × até 11s no DataJud) estourava
+# o timeout do systemd mesmo a 30min. Consultamos em paralelo com um rate
+# limiter global que mantém ~1.8 req/s (sob o limite de 120/min do CNJ) —
+# absorve a latência sem estourar a cota. Cai de ~15-50min para ~3min.
+CONCORRENCIA = 6
+RATE_MIN_INTERVALO = 0.55  # s entre saídas de request (≈109/min)
+MAX_LISTA = 25             # cap de itens detalhados na mensagem
+
+
+class _RateLimiter:
+    """Espaça as saídas de request em >= intervalo s (thread-safe)."""
+
+    def __init__(self, intervalo: float) -> None:
+        self._intervalo = intervalo
+        self._lock = threading.Lock()
+        self._proximo = 0.0
+
+    def aguardar(self) -> None:
+        with self._lock:
+            agora = time.monotonic()
+            espera = self._proximo - agora
+            if espera > 0:
+                time.sleep(espera)
+                agora = time.monotonic()
+            self._proximo = max(agora, self._proximo) + self._intervalo
 
 # Mapa J.TR do número CNJ (NNNNNNN-DD.AAAA.J.TR.OOOO) → alias do endpoint
 # DataJud. Mesmo mapa do scripts/auditar_processos_datajud.py.
@@ -263,17 +288,29 @@ def main() -> int:
     finally:
         jq.close()
 
-    # Anexa a última mov. do DataJud a cada processo (consulta a consulta).
+    # Anexa a última mov. do DataJud a cada processo, EM PARALELO (httpx.Client
+    # é thread-safe) com rate limiter global. Erro por processo não derruba os
+    # demais — consultar_datajud já devolve (None, motivo).
     dj = httpx.Client(timeout=30.0)
+    limiter = _RateLimiter(RATE_MIN_INTERVALO)
+    progresso = {"n": 0}
+    plock = threading.Lock()
+
+    def _consultar(p: dict) -> None:
+        num = p.get("processNumber") or ""
+        if num:
+            limiter.aguardar()
+            p["dj_date"], _ = consultar_datajud(dj, num, settings.datajud_api_key)
+        with plock:
+            progresso["n"] += 1
+            if progresso["n"] % 50 == 0:
+                logger.info(
+                    "carteira_datajud: %d/%d consultados", progresso["n"], len(processos),
+                )
+
     try:
-        for i, p in enumerate(processos, 1):
-            num = p.get("processNumber") or ""
-            if num:
-                dj_data, _ = consultar_datajud(dj, num, settings.datajud_api_key)
-                p["dj_date"] = dj_data
-            if i % 50 == 0:
-                logger.info("carteira_datajud: %d/%d consultados", i, len(processos))
-            time.sleep(THROTTLE_S)
+        with ThreadPoolExecutor(max_workers=CONCORRENCIA) as ex:
+            list(ex.map(_consultar, processos))
     finally:
         dj.close()
 
