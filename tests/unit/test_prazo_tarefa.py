@@ -1,5 +1,7 @@
 """Tests for publication→task (prazo_tarefa, roadmap 1.1)."""
 
+import datetime
+
 from noviello_funil.db import connect, run_migrations
 from noviello_funil.prazo_tarefa import (
     calcular_prazo_sugerido,
@@ -13,30 +15,38 @@ from noviello_funil.prazo_tarefa import (
 )
 
 PUB = "11/06/2026"
+HOJE = datetime.date(2026, 6, 15)   # determinístico (não usa today() real)
 
 
 # --- calcular_prazo_sugerido -------------------------------------------------
 
 def test_prazo_n_dias_com_buffer():
-    # 15 dias a partir de 11/06 = 26/06; buffer 3 → 23/06.
-    assert calcular_prazo_sugerido("15 dias", PUB, buffer_dias=3) == "2026-06-23"
+    # 15 dias a partir de 11/06 = 26/06; buffer 3 → 23/06 (futuro).
+    assert calcular_prazo_sugerido("15 dias", PUB, hoje=HOJE, buffer_dias=3) == \
+        "2026-06-23"
 
 
 def test_prazo_data_explicita():
-    # 20/06 (mesmo ano da publicação) − buffer 3 → 17/06.
-    assert calcular_prazo_sugerido("20/06", PUB, buffer_dias=3) == "2026-06-17"
-    assert calcular_prazo_sugerido("20/06/2026", PUB, buffer_dias=0) == "2026-06-20"
+    assert calcular_prazo_sugerido("20/06", PUB, hoje=HOJE, buffer_dias=3) == \
+        "2026-06-17"
+    assert calcular_prazo_sugerido("20/06/2026", PUB, hoje=HOJE, buffer_dias=0) == \
+        "2026-06-20"
 
 
-def test_prazo_data_sem_ano_que_passou_vai_pro_proximo_ano():
-    # publicação 11/06/2026, prazo "05/01" → já passou no ano → 2027.
-    assert calcular_prazo_sugerido("05/01", PUB, buffer_dias=0) == "2027-01-05"
+def test_prazo_no_passado_vira_none():
+    # publicação antiga reprocessada: '5 dias' de 08/06 = 13/06; buffer 3 → 10/06
+    # (antes de hoje 15/06) → None (tarefa sem data, não nasce vencida).
+    assert calcular_prazo_sugerido("5 dias", "08/06/2026", hoje=HOJE) is None
+    # prazo curto onde o buffer inverte: 16/06 − 3 = 13/06 < 15/06 → None.
+    assert calcular_prazo_sugerido("16/06", PUB, hoje=HOJE, buffer_dias=3) is None
+    # data sem ano que "passou" no ano da publicação → None (sem +1 ano absurdo).
+    assert calcular_prazo_sugerido("05/01", PUB, hoje=HOJE, buffer_dias=0) is None
 
 
 def test_prazo_vazio_ou_nao_parseavel():
-    assert calcular_prazo_sugerido("", PUB) is None
-    assert calcular_prazo_sugerido("a ver", PUB) is None
-    assert calcular_prazo_sugerido("10 dias", "data ruim") is None   # sem base
+    assert calcular_prazo_sugerido("", PUB, hoje=HOJE) is None
+    assert calcular_prazo_sugerido("a ver", PUB, hoje=HOJE) is None
+    assert calcular_prazo_sugerido("10 dias", "data ruim", hoje=HOJE) is None
 
 
 # --- titulo / descricao ------------------------------------------------------

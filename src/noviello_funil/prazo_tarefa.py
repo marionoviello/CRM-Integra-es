@@ -52,6 +52,8 @@ def _data_base(iso: object) -> datetime.date | None:
 def calcular_prazo_sugerido(
     prazo_texto: object,
     data_pub: object,
+    *,
+    hoje: datetime.date | None = None,
     buffer_dias: int = BUFFER_DIAS,
 ) -> str | None:
     """Estima a data-limite (ISO 'YYYY-MM-DD') a partir do prazo extraído.
@@ -60,43 +62,39 @@ def calcular_prazo_sugerido(
     - 'N dias' → data da publicação + N − buffer (corridos, conservador).
     - Nada parseável → None (a tarefa fica sem data, marcada "conferir").
 
-    SEMPRE uma sugestão com folga — não é cálculo oficial de prazo.
+    NUNCA devolve data no PASSADO: se a estimativa (já com buffer) cair antes
+    de hoje — publicação antiga reprocessada, prazo curto onde o buffer
+    inverte, ou data mal-extraída — devolve None. Tarefa sem data ("conferir")
+    é melhor que tarefa nascendo vencida (revisão adversarial 15/jun). É
+    sempre uma sugestão — não é cálculo oficial de prazo.
     """
+    hoje = hoje or datetime.date.today()
     t = str(prazo_texto or "").strip().lower()
     if not t:
         return None
     base = _data_base(data_pub)
+    alvo: datetime.date | None = None
 
     # Data explícita DD/MM[/AAAA].
     m = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\b", t)
     if m:
         dia, mes = int(m.group(1)), int(m.group(2))
-        if m.group(3):
-            ano = int(m.group(3))
-        elif base:
-            ano = base.year
-        else:
-            return None
+        ano = int(m.group(3)) if m.group(3) else (base.year if base else hoje.year)
         try:
             alvo = datetime.date(ano, mes, dia)
         except ValueError:
             return None
-        # sem ano e a data "já passou" relativa à publicação → ano seguinte
-        if not m.group(3) and base and alvo < base:
-            try:
-                alvo = alvo.replace(year=alvo.year + 1)
-            except ValueError:
-                return None
-        return (alvo - datetime.timedelta(days=buffer_dias)).isoformat()
+    else:
+        # "N dias" (ancorado na publicação).
+        m = re.search(r"\b(\d{1,3})\s*dias?\b", t)
+        if m and base:
+            alvo = base + datetime.timedelta(days=int(m.group(1)))
 
-    # "N dias".
-    m = re.search(r"\b(\d{1,3})\s*dias?\b", t)
-    if m and base:
-        n = int(m.group(1))
-        alvo = base + datetime.timedelta(days=n)
-        return (alvo - datetime.timedelta(days=buffer_dias)).isoformat()
-
-    return None
+    if alvo is None:
+        return None
+    final = alvo - datetime.timedelta(days=buffer_dias)
+    # Guarda: nada de prazo no passado (≥ hoje garante também final ≥ início).
+    return final.isoformat() if final >= hoje else None
 
 
 def montar_titulo(motivo: object, processo: object) -> str:

@@ -284,35 +284,54 @@ def _criar_tarefas_de_prazo(settings, urgentes: list[dict]) -> int:
         headers={"x-juridiq-api-key": settings.juridiq_api_key},
         timeout=30.0,
     )
-    hoje = datetime.date.today().isoformat()
+    hoje = datetime.date.today()
     n = 0
     try:
         for pub in urgentes:
-            if not (deve_criar_tarefa(pub) and pub.get("lawsuitId")):
-                continue
-            if ja_criada(conn, pub["id"]):
-                continue
-            corpo = montar_corpo_tarefa(
-                titulo=montar_titulo(
-                    pub.get("motivo") or pub.get("resumo"), pub["processo"],
-                ),
-                descricao=montar_descricao(
-                    pub.get("motivo"), pub.get("prazo"), pub.get("teor"),
-                    pub.get("data"),
-                ),
-                final_date=calcular_prazo_sugerido(pub.get("prazo"), pub.get("data")),
-                initial_date=hoje,
-                law_suit_id=pub["lawsuitId"],
-                column_id=settings.task_column_id,
-                priority=settings.task_priority,
-            )
-            tid, det = criar_tarefa(cli, corpo)
-            if tid:
-                marcar_criada(conn, pub["id"], pub["processo"], tid)
+            # try/except POR publicação: uma falha (dado malformado, DB) não
+            # derruba as demais nem o alerta (revisão adversarial 15/jun).
+            try:
+                if not (deve_criar_tarefa(pub) and pub.get("lawsuitId")):
+                    continue
+                if ja_criada(conn, pub["id"]):
+                    continue
+                corpo = montar_corpo_tarefa(
+                    titulo=montar_titulo(
+                        pub.get("motivo") or pub.get("resumo"), pub["processo"],
+                    ),
+                    descricao=montar_descricao(
+                        pub.get("motivo"), pub.get("prazo"), pub.get("teor"),
+                        pub.get("data"),
+                    ),
+                    final_date=calcular_prazo_sugerido(
+                        pub.get("prazo"), pub.get("data"), hoje=hoje,
+                    ),
+                    initial_date=hoje.isoformat(),
+                    law_suit_id=pub["lawsuitId"],
+                    column_id=settings.task_column_id,
+                    priority=settings.task_priority,
+                )
+                tid, det = criar_tarefa(cli, corpo)
+                if not tid:
+                    logger.error(
+                        "publicacoes: criar tarefa falhou pub=%s: %s", pub["id"], det,
+                    )
+                    continue
+                # marcar_criada protegido: se o POST deu certo mas o registro
+                # local falhar, NÃO propaga (senão duplicaria a tarefa no
+                # próximo run) — loga a órfã com task_id pra reconciliação.
+                try:
+                    marcar_criada(conn, pub["id"], pub["processo"], tid)
+                except Exception as exc:
+                    logger.error(
+                        "publicacoes: tarefa %s CRIADA mas marcar_criada falhou "
+                        "pub=%s (ÓRFÃ — reconciliar p/ não duplicar): %s",
+                        tid, pub["id"], exc,
+                    )
                 n += 1
-            else:
-                logger.error(
-                    "publicacoes: criar tarefa falhou pub=%s: %s", pub["id"], det,
+            except Exception as exc:
+                logger.exception(
+                    "publicacoes: erro na tarefa da pub=%s: %s", pub.get("id"), exc,
                 )
     finally:
         cli.close()
@@ -370,11 +389,16 @@ def main() -> int:
         if not urgentes:
             return
 
-        # 1.1: publicação urgente com processo vira TAREFA rastreável no painel
-        # (não some no alerta). Gated/idempotente — ver _criar_tarefas_de_prazo.
-        n_tarefas = _criar_tarefas_de_prazo(settings, urgentes)
-        if n_tarefas:
-            logger.info("publicacoes: %d tarefa(s) de prazo criada(s)", n_tarefas)
+        # 1.1: publicação urgente com processo vira TAREFA rastreável no painel.
+        # Isolado em try/except: a criação de tarefa (feature nova) JAMAIS pode
+        # impedir o alerta urgente (feature crítica em produção) — rev. 15/jun.
+        n_tarefas = 0
+        try:
+            n_tarefas = _criar_tarefas_de_prazo(settings, urgentes)
+            if n_tarefas:
+                logger.info("publicacoes: %d tarefa(s) de prazo criada(s)", n_tarefas)
+        except Exception as exc:
+            logger.exception("publicacoes: criação de tarefas falhou (alerta segue): %s", exc)
 
         texto = montar_mensagem(urgentes, n_tarefas)
         logger.info("publicacoes:\n%s", texto)
