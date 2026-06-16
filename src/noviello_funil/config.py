@@ -152,6 +152,21 @@ class Settings(BaseSettings):
     # webhook cadastrado na ZapSign. Vazio = links de aprovação quebrados.
     funil_base_url: str = ""
 
+    # Asaas — cobrança de honorários no fechamento de contrato (pipeline 3.x).
+    # SÓ cria/cancela cobrança PENDENTE (faturamento do escritório) — NUNCA
+    # estorno/transferência/saque. contratos_asaas liga a feature (default OFF).
+    # Header de auth é ``access_token`` (não Bearer). Sandbox-first: a base de
+    # teste não cobra de verdade. Chave/token só no .env (gitignored).
+    contratos_asaas: bool = False
+    asaas_api_key: str = ""
+    asaas_base_url: str = "https://api-sandbox.asaas.com"
+    # Token compartilhado que volta no header ``asaas-access-token`` de cada
+    # webhook (a Asaas não assina com HMAC) — validado constant-time.
+    asaas_webhook_token: str = ""
+    asaas_user_agent: str = "noviello-bot/1.0"
+    # Vencimento default da cobrança quando o Mario não especifica (dias).
+    asaas_payment_due_days: int = Field(default=7, ge=1)
+
     # CUID do usuário "BOT IA" no Jurichat. Quando setado:
     #   1. start_human_support atribui conversas a ele (selectedUserId)
     #      em vez de sortear humano (isRandom) — conserta atribuição

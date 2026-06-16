@@ -141,3 +141,76 @@ async def test_register_webhook_inclui_header_secreto(respx_mock):
     assert body["type"] == "doc_signed"
     # header secreto (substitui a falta de HMAC da ZapSign)
     assert body["headers"][0]["value"] == "s3cr3t-bem-longo"
+
+
+# --- Caminho A: ler modelos + verificação humana -----------------------------
+
+@pytest.mark.asyncio
+async def test_list_templates(respx_mock):
+    respx_mock.get(f"{_BASE}/templates/").mock(
+        return_value=httpx.Response(200, json={"results": [
+            {"token": "tpl-1", "name": "Contrato plano de saúde"},
+            {"token": "tpl-2", "name": "Modelo Variável"},
+        ]}),
+    )
+    client = ZapSignClient("zs-test")
+    try:
+        tpls = await client.list_templates()
+    finally:
+        await client.aclose()
+    assert [t["name"] for t in tpls] == [
+        "Contrato plano de saúde", "Modelo Variável",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_template_inputs(respx_mock):
+    respx_mock.get(f"{_BASE}/templates/tpl-2/").mock(
+        return_value=httpx.Response(200, json={
+            "token": "tpl-2", "name": "Modelo Variável",
+            "inputs": [
+                {"variable": "{{NOME}}", "label": "Nome", "required": True},
+                {"variable": "{{HONORARIOS}}", "label": "Honorários",
+                 "required": True},
+            ],
+        }),
+    )
+    client = ZapSignClient("zs-test")
+    try:
+        tpl = await client.get_template("tpl-2")
+    finally:
+        await client.aclose()
+    variaveis = [i["variable"] for i in tpl["inputs"]]
+    assert "{{NOME}}" in variaveis and "{{HONORARIOS}}" in variaveis
+
+
+@pytest.mark.asyncio
+async def test_resend_notifications_bulk(respx_mock):
+    route = respx_mock.post(
+        f"{_BASE}/docs/doc-9/resend-notifications-bulk/"
+    ).mock(return_value=httpx.Response(200, json={
+        "success": True, "total_signers": 4, "sent_count": 1,
+    }))
+    client = ZapSignClient("zs-test")
+    try:
+        r = await client.resend_notifications_bulk("doc-9")
+    finally:
+        await client.aclose()
+    assert r["sent_count"] == 1                     # só o cliente (order 1)
+    assert route.calls.last.request.headers["authorization"] == "Bearer zs-test"
+
+
+@pytest.mark.asyncio
+async def test_refuse(respx_mock):
+    route = respx_mock.post(f"{_BASE}/refuse/").mock(
+        return_value=httpx.Response(200, json={"status": "refused"}),
+    )
+    client = ZapSignClient("zs-test")
+    try:
+        r = await client.refuse("doc-9", "valor de honorários errado")
+    finally:
+        await client.aclose()
+    assert r["status"] == "refused"
+    body = _json.loads(route.calls.last.request.read())
+    assert body["doc_token"] == "doc-9"
+    assert "honorários" in body["rejected_reason"]

@@ -279,6 +279,30 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     # escolha determinística (Signal 1.8), limpo ao confirmar/cancelar.
     # Tira o Claude do caminho crítico "lead escolhe horário → confirma".
     _ensure_column(conn, "leads", "horarios_oferecidos", "TEXT")
+    # Pipeline de fechamento escopos→Asaas→ZapSign com gate humano sobre o
+    # PDF REAL (roadmap 3.x). tipo_caso seleciona o escopo curado; cpf é PII
+    # obrigatória pro Asaas; asaas_* guardam a cobrança (dedupe + cancelamento);
+    # invoice_url vira o {{LINK_PAGAMENTO}} do contrato; cobranca_paga_em é
+    # carimbado pelo webhook Asaas; reprovacao_token é o link 1-toque de REPROVAR
+    # (distinto do aprovacao_token de aprovar).
+    _ensure_column(conn, "contrato", "tipo_caso", "TEXT")
+    _ensure_column(conn, "contrato", "cpf", "TEXT")
+    _ensure_column(conn, "contrato", "asaas_customer_id", "TEXT")
+    _ensure_column(conn, "contrato", "asaas_payment_id", "TEXT")
+    _ensure_column(conn, "contrato", "invoice_url", "TEXT")
+    _ensure_column(conn, "contrato", "cobranca_paga_em", "TEXT")
+    _ensure_column(conn, "contrato", "reprovacao_token", "TEXT")
+    # Idempotência por chave de negócio (cpf só-dígitos + tipo_caso) enquanto
+    # o contrato está ABERTO (montagem/criando_doc/pendente_revisao): impede
+    # que um duplo-comando "gerar contrato" crie 2 contratos/2 cobranças pro
+    # mesmo cliente/caso. cpf é gravado já normalizado (re.sub r'\D'); o índice
+    # parcial é a rede de defesa por baixo do lookup explícito do orquestrador.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_contrato_aberto "
+        "ON contrato(cpf, tipo_caso) WHERE estado IN ("
+        "'contrato_montagem', 'contrato_criando_doc', 'contrato_pendente_revisao'"
+        ")"
+    )
 
 
 def _ensure_column(

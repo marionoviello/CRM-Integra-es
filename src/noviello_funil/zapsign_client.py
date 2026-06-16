@@ -165,3 +165,94 @@ class ZapSignClient:
             return resp.json()
 
         return await with_retry(op, attempts=3, base_delay=base_delay)
+
+    # --- Caminho A: ler modelos + verificação humana ---------------------
+
+    async def list_templates(
+        self, *, page: int = 1, base_delay: float = 1.0,
+    ) -> list[dict[str, Any]]:
+        """GET /templates/ — lista os modelos (cada um com ``token``, ``name``).
+
+        Auto-descoberta: casa o NOME do modelo que o Mario escolhe com o
+        ``token`` (UUID que vira ``template_id`` no create-doc). Pagina 20/vez.
+        """
+
+        async def op() -> dict[str, Any]:
+            resp = await self._client.get(
+                f"{self._base_url}/templates/", params={"page": page},
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        data = await with_retry(op, attempts=3, base_delay=base_delay)
+        if isinstance(data, dict):
+            return list(data.get("results", []))
+        return list(data or [])
+
+    async def get_template(
+        self, token: str, *, base_delay: float = 1.0,
+    ) -> dict[str, Any]:
+        """GET /templates/{token}/ — detalhe do modelo com ``inputs[]``.
+
+        Cada input traz ``variable`` (o placeholder literal '{{...}}'),
+        ``label`` (texto do painel), ``required``, ``input_type``. É daqui que
+        o sistema descobre as variáveis a preencher — o Mario não digita nenhum
+        {{campo}} à mão.
+        """
+
+        async def op() -> dict[str, Any]:
+            resp = await self._client.get(f"{self._base_url}/templates/{token}/")
+            resp.raise_for_status()
+            return resp.json()
+
+        return await with_retry(op, attempts=3, base_delay=base_delay)
+
+    async def resend_notifications_bulk(
+        self, doc_token: str, *, base_delay: float = 1.0,
+    ) -> dict[str, Any]:
+        """POST /docs/{token}/resend-notifications-bulk/ — LIBERA a assinatura.
+
+        Depois da aprovação humana, dispara a notificação. Com
+        ``signature_order_active`` notifica APENAS o order_group 1 (cliente);
+        os demais entram quando o anterior assina. Tolera retry (efeito =
+        notificar; no pior caso reenvia ao mesmo cliente).
+        """
+
+        async def op() -> dict[str, Any]:
+            resp = await self._client.post(
+                f"{self._base_url}/docs/{doc_token}/resend-notifications-bulk/",
+            )
+            if resp.status_code >= 400:
+                logger.error(
+                    "zapsign resend-notifications status=%d body=%r",
+                    resp.status_code, resp.text[:300],
+                )
+            resp.raise_for_status()
+            return resp.json()
+
+        return await with_retry(op, attempts=3, base_delay=base_delay)
+
+    async def refuse(
+        self, doc_token: str, rejected_reason: str, *, base_delay: float = 1.0,
+    ) -> dict[str, Any]:
+        """POST /refuse/ — REPROVA o doc (verificação humana negada).
+
+        O doc vai a status 'recusado' e fica inassinável. Como foi criado em
+        silêncio (sem notificar), o cliente nunca soube que existiu. Exige doc
+        em andamento (não cancela um já assinado).
+        """
+        body = {"doc_token": doc_token, "rejected_reason": rejected_reason}
+
+        async def op() -> dict[str, Any]:
+            resp = await self._client.post(
+                f"{self._base_url}/refuse/", json=body,
+            )
+            if resp.status_code >= 400:
+                logger.error(
+                    "zapsign refuse status=%d body=%r",
+                    resp.status_code, resp.text[:300],
+                )
+            resp.raise_for_status()
+            return resp.json()
+
+        return await with_retry(op, attempts=3, base_delay=base_delay)

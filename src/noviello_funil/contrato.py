@@ -44,6 +44,17 @@ class EstadoContrato:
     ASSINADO: Final = "contrato_assinado"
     RECUSADO: Final = "contrato_recusado"
     EXPIRADO: Final = "contrato_expirado"
+    # Pipeline NOVO (escopos→Asaas→ZapSign silencioso→gate sobre o PDF real).
+    # O doc é criado EM SILÊNCIO (send_automatic_email=False) e fica em
+    # PENDENTE_REVISAO até o Mario aprovar (LIBERANDO→LIBERADO) ou reprovar
+    # (REPROVANDO→REPROVADO). MONTAGEM/CRIANDO_DOC são claims transitórios.
+    MONTAGEM: Final = "contrato_montagem"
+    CRIANDO_DOC: Final = "contrato_criando_doc"      # claim (create-doc em voo)
+    PENDENTE_REVISAO: Final = "contrato_pendente_revisao"
+    LIBERANDO: Final = "contrato_liberando"          # claim (resend em voo)
+    LIBERADO: Final = "contrato_liberado"
+    REPROVANDO: Final = "contrato_reprovando"        # claim (refuse+cancela em voo)
+    REPROVADO: Final = "contrato_reprovado"
 
 
 # --- Montagem da minuta (puro/testável) ----------------------------------
@@ -176,6 +187,164 @@ def link_aprovacao(base_url: str, token: str) -> str:
     PÁGINA de confirmação (GET, sem efeito) — a aprovação real é o POST do
     botão, pra prefetcher de link não 'tapar' sozinho."""
     return f"{base_url.rstrip('/')}/zapsign/aprovar/{token}"
+
+
+# --- Pipeline NOVO: montagem do data[] sobre o template real (puro) -------
+
+# Mapa EXATO {{VAR}} do template → chave do dict ``cliente`` (spec do Mario).
+# São os dados pessoais que o cliente forneceu; PII vem do comando/ficha,
+# nunca de código.
+_VARS_CLIENTE: Final[dict[str, str]] = {
+    "{{NOME_COMPLETO}}": "nome_completo",
+    "{{NACIONALIDADE}}": "nacionalidade",
+    "{{ESTADO_CIVIL}}": "estado_civil",
+    "{{PROFISSAO}}": "profissao",
+    "{{RG}}": "rg",
+    "{{ORGAO_EMISSOR}}": "orgao_emissor",
+    "{{CPF}}": "cpf",
+    "{{LOGRADOURO}}": "logradouro",
+    "{{NUMERO}}": "numero",
+    "{{COMPLEMENTO}}": "complemento",
+    "{{BAIRRO}}": "bairro",
+    "{{CIDADE}}": "cidade",
+    "{{UF}}": "uf",
+    "{{CEP}}": "cep",
+    "{{CELULAR}}": "celular",
+    "{{EMAIL}}": "email",
+}
+
+# Mapa {{VAR}} → chave do dict ``escopo`` (texto curado, vetado à IA).
+_VARS_ESCOPO: Final[dict[str, str]] = {
+    "{{AREA_ATUACAO}}": "area_atuacao",
+    "{{OBJETO_CONTRATO}}": "objeto_contrato",
+    "{{CONTEXTO_NORMATIVO}}": "contexto_normativo",
+    "{{DESCRICAO_HONORARIOS}}": "descricao_honorarios",
+}
+
+
+def montar_data_contrato(
+    cliente: dict[str, Any],
+    escopo: dict[str, Any],
+    *,
+    valor_fmt: str,
+    valor_extenso: str,
+    link_pagamento: str,
+) -> list[dict[str, str]]:
+    """Array ``data`` do create-doc: ``[{"de": "{{VAR}}", "para": valor}]``.
+
+    Mapeamento EXATO do template real (spec do Mario): dados pessoais de
+    ``cliente``, texto curado de ``escopo``, e os 3 valores monetários/link
+    passados à parte (o valor SEMPRE vem do humano, a IA nunca precifica).
+    Pares com valor vazio/None são OMITIDOS (o placeholder fica em branco no
+    doc) — mesma disciplina de ``montar_minuta``.
+    """
+    fontes: list[tuple[dict[str, str], dict[str, Any]]] = [
+        (_VARS_CLIENTE, cliente),
+        (_VARS_ESCOPO, escopo),
+    ]
+    extras: dict[str, Any] = {
+        "{{VALOR_HONORARIOS}}": valor_fmt,
+        "{{VALOR_HONORARIOS_EXTENSO}}": valor_extenso,
+        "{{LINK_PAGAMENTO}}": link_pagamento,
+    }
+    data: list[dict[str, str]] = []
+    for mapa, origem in fontes:
+        for var, chave in mapa.items():
+            val = str(origem.get(chave) or "").strip()
+            if val:
+                data.append({"de": var, "para": val})
+    for var, valor in extras.items():
+        val = str(valor or "").strip()
+        if val:
+            data.append({"de": var, "para": val})
+    return data
+
+
+def formatar_valor_brl(valor: float) -> str:
+    """3500.0 → ``"3.500,00"`` (milhar com ponto, decimal com vírgula).
+
+    Formata pro corpo do contrato e pro Asaas value (que recebe o float cru).
+    """
+    inteiro = f"{valor:,.2f}"           # 1234567.5 → '1,234,567.50' (locale en)
+    # troca os separadores en→pt: vírgula↔ponto.
+    return inteiro.replace(",", "_").replace(".", ",").replace("_", ".")
+
+
+# --- Pipeline NOVO: persistência da cobrança e do doc-preview -------------
+
+def registrar_cobranca(
+    conn: sqlite3.Connection,
+    contrato_id: int,
+    *,
+    customer_id: str | None,
+    payment_id: str | None,
+    invoice_url: str | None,
+) -> None:
+    """Salva a cobrança Asaas no contrato (após create/find do payment)."""
+    conn.execute(
+        "UPDATE contrato SET asaas_customer_id = ?, asaas_payment_id = ?, "
+        "invoice_url = ?, atualizado_em = datetime('now') WHERE id = ?",
+        (customer_id, payment_id, invoice_url, contrato_id),
+    )
+
+
+def registrar_doc_preview(
+    conn: sqlite3.Connection,
+    contrato_id: int,
+    *,
+    doc_token: str | None,
+    sign_url: str | None,
+) -> None:
+    """Salva o doc-preview da ZapSign (criado em silêncio, antes da revisão)."""
+    conn.execute(
+        "UPDATE contrato SET zapsign_doc_token = ?, sign_url = ?, "
+        "atualizado_em = datetime('now') WHERE id = ?",
+        (doc_token, sign_url, contrato_id),
+    )
+
+
+def criar_contrato_pipeline(
+    conn: sqlite3.Connection,
+    *,
+    cliente_nome: str,
+    cpf: str,
+    tipo_caso: str,
+    valor_honorarios_fmt: str,
+    template_id: str,
+    person_id: str | None = None,
+    lead_id: int | None = None,
+) -> sqlite3.Row:
+    """Cria o contrato do pipeline NOVO em estado MONTAGEM.
+
+    Dois tokens DISTINTOS: ``aprovacao_token`` (link 1-toque de APROVAR e
+    liberar a assinatura) e ``reprovacao_token`` (link 1-toque de REPROVAR).
+    valor_honorarios_fmt já formatado (humano sempre digitou). Registra a
+    transição inicial na trilha de auditoria.
+    """
+    if not (valor_honorarios_fmt or "").strip():
+        raise ValueError("valor_honorarios obrigatório (humano sempre digita)")
+    aprovacao_token = gerar_aprovacao_token()
+    reprovacao_token = gerar_aprovacao_token()
+    cur = conn.execute(
+        """
+        INSERT INTO contrato (
+            person_id, lead_id, cliente_nome, cpf, tipo_caso,
+            valor_honorarios, estado, template_id,
+            aprovacao_token, reprovacao_token
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            person_id, lead_id, cliente_nome, re.sub(r"\D", "", cpf), tipo_caso,
+            valor_honorarios_fmt, EstadoContrato.MONTAGEM, template_id,
+            aprovacao_token, reprovacao_token,
+        ),
+    )
+    contrato_id = cur.lastrowid
+    _inserir_transicao(
+        conn, contrato_id, None, EstadoContrato.MONTAGEM,
+        motivo="contrato em montagem (pipeline)", ator="sistema",
+    )
+    return get_contrato(conn, contrato_id)
 
 
 def _valores_do_contrato(contrato: sqlite3.Row) -> dict[str, str]:

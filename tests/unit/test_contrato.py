@@ -13,13 +13,16 @@ from noviello_funil.contrato import (
     EstadoContrato,
     aprovar,
     criar_contrato,
+    criar_contrato_pipeline,
     enviar_para_assinatura,
+    formatar_valor_brl,
     gerar_aprovacao_token,
     get_contrato,
     iniciar_contrato,
     link_aprovacao,
     montar_corpo_create_doc,
     montar_corpo_upload,
+    montar_data_contrato,
     montar_minuta,
     montar_signer,
     registrar_envio,
@@ -501,4 +504,135 @@ async def test_envio_concorrente_gera_um_doc():
     assert "ok" in detalhes                       # um venceu
     assert any("andamento" in d or "não aprovado" in d for d in detalhes)
     assert get_contrato(conn, c["id"])["estado"] == EstadoContrato.ENVIADO
+    conn.close()
+
+
+# --- Pipeline NOVO: montar_data_contrato (puro) ------------------------------
+
+_CLIENTE = {
+    "nome_completo": "Fulano Teste",
+    "nacionalidade": "brasileiro",
+    "estado_civil": "casado",
+    "profissao": "engenheiro",
+    "rg": "12.345.678-9",
+    "orgao_emissor": "SSP/SP",
+    "cpf": "00000000000",
+    "logradouro": "Rua Exemplo",
+    "numero": "100",
+    "complemento": "",                 # vazio → omitido
+    "bairro": "Centro",
+    "cidade": "São Paulo",
+    "uf": "SP",
+    "cep": "01000-000",
+    "celular": "11999990000",
+    "email": "fulano@exemplo.com",
+}
+_ESCOPO = {
+    "area_atuacao": "Direito Imobiliário",
+    "objeto_contrato": "Prestação de serviços advocatícios.",
+    "contexto_normativo": "Lei nº 12.016/2009.",
+    "descricao_honorarios": "R$ 3.500,00 em parcela única.",
+}
+
+
+def test_montar_data_contrato_mapeia_certo():
+    data = montar_data_contrato(
+        _CLIENTE, _ESCOPO,
+        valor_fmt="3.500,00", valor_extenso="três mil e quinhentos reais",
+        link_pagamento="https://asaas.com/i/abc",
+    )
+    pares = {d["de"]: d["para"] for d in data}
+    assert pares["{{NOME_COMPLETO}}"] == "Fulano Teste"
+    assert pares["{{CPF}}"] == "00000000000"
+    assert pares["{{EMAIL}}"] == "fulano@exemplo.com"
+    assert pares["{{OBJETO_CONTRATO}}"] == "Prestação de serviços advocatícios."
+    assert pares["{{AREA_ATUACAO}}"] == "Direito Imobiliário"
+    assert pares["{{VALOR_HONORARIOS}}"] == "3.500,00"
+    assert pares["{{VALOR_HONORARIOS_EXTENSO}}"] == "três mil e quinhentos reais"
+    assert pares["{{LINK_PAGAMENTO}}"] == "https://asaas.com/i/abc"
+
+
+def test_montar_data_contrato_omite_vazios():
+    data = montar_data_contrato(
+        _CLIENTE, _ESCOPO,
+        valor_fmt="3.500,00", valor_extenso="", link_pagamento="x",
+    )
+    des = {d["de"] for d in data}
+    # complemento do cliente é vazio → omitido
+    assert "{{COMPLEMENTO}}" not in des
+    # valor_extenso vazio → omitido
+    assert "{{VALOR_HONORARIOS_EXTENSO}}" not in des
+
+
+def test_montar_data_contrato_placeholder_residual_fica_cravado():
+    """med#6: se a descrição de honorários do escopo carrega um placeholder
+    NÃO-resolvido, montar_data_contrato o entrega CRAVADO no valor (a ZapSign
+    não substitui placeholder DENTRO de um valor). É por isso que o orquestrador
+    varre o data[] por \\{\\{...\\}\\} antes do create-doc e aborta — ver
+    test_placeholder_residual_aborta_create_doc."""
+    escopo_furado = {
+        **_ESCOPO,
+        "descricao_honorarios": "R$ {{VALOR_HONORARIOS}} ({{VALOR_HONORARIOS_EXTENSO}}).",
+    }
+    data = montar_data_contrato(
+        _CLIENTE, escopo_furado,
+        valor_fmt="3.500,00", valor_extenso="", link_pagamento="x",
+    )
+    pares = {d["de"]: d["para"] for d in data}
+    # o placeholder fica cravado no valor — gap real que o orquestrador defende
+    assert "{{VALOR_HONORARIOS_EXTENSO}}" in pares["{{DESCRICAO_HONORARIOS}}"]
+
+
+# --- Pipeline NOVO: formatar_valor_brl (puro) --------------------------------
+
+def test_formatar_valor_brl():
+    assert formatar_valor_brl(3500.0) == "3.500,00"
+    assert formatar_valor_brl(1234567.5) == "1.234.567,50"
+    assert formatar_valor_brl(0.0) == "0,00"
+
+
+def test_formatar_valor_brl_terceira_casa_arredonda():
+    """med#7: a função formata com .2f (arredonda a 3ª casa). A coerência com o
+    Asaas é garantida pela QUANTIZAÇÃO no orquestrador (ambos batem nos
+    centavos); aqui só documentamos o arredondamento da formatação."""
+    assert formatar_valor_brl(1234.999) == "1.235,00"
+    assert formatar_valor_brl(999.996) == "1.000,00"
+
+
+def test_formatar_valor_brl_negativo_documenta():
+    """med#8: formatar_valor_brl NÃO rejeita negativo (formata '-'); a
+    validação valor>0 fica na ENTRADA (gerar_contrato) — ver
+    test_invariante_validacoes_entrada_barram_cedo no orquestrador."""
+    assert formatar_valor_brl(-3500.0) == "-3.500,00"
+
+
+# --- Pipeline NOVO: criar_contrato_pipeline ----------------------------------
+
+def test_criar_contrato_pipeline_montagem_tokens_distintos():
+    conn = _db()
+    c = criar_contrato_pipeline(
+        conn, cliente_nome="Fulano Teste", cpf="000.000.000-00",
+        tipo_caso="urbanistico_iptu_regularizacao",
+        valor_honorarios_fmt="3.500,00", template_id="T1",
+    )
+    assert c["estado"] == EstadoContrato.MONTAGEM
+    assert c["tipo_caso"] == "urbanistico_iptu_regularizacao"
+    assert c["cpf"] == "00000000000"               # só dígitos
+    assert c["aprovacao_token"] and c["reprovacao_token"]
+    assert c["aprovacao_token"] != c["reprovacao_token"]
+    rows = conn.execute(
+        "SELECT estado_novo FROM contrato_transicao WHERE contrato_id = ?",
+        (c["id"],),
+    ).fetchall()
+    assert rows[0]["estado_novo"] == EstadoContrato.MONTAGEM
+    conn.close()
+
+
+def test_criar_contrato_pipeline_exige_valor():
+    conn = _db()
+    with pytest.raises(ValueError):
+        criar_contrato_pipeline(
+            conn, cliente_nome="Fulano Teste", cpf="00000000000",
+            tipo_caso="x", valor_honorarios_fmt="", template_id="T1",
+        )
     conn.close()
