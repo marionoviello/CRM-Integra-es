@@ -129,6 +129,29 @@ class Settings(BaseSettings):
     task_column_id: str = ""
     task_priority: str = "Alta"
 
+    # ZapSign — fechamento de contrato com assinatura eletrônica (3.x).
+    # Fluxo 1-TOQUE: o bot monta a minuta e o Mario aprova UM contrato por
+    # vez. O create-doc SÓ roda depois da aprovação humana — nunca 100%
+    # automático (Prov. 205/2021, mandato personalíssimo). contratos_zapsign
+    # liga a feature (default OFF). Token e secret no .env (gitignored),
+    # nunca no código. Escopo inicial: SÓ contrato de honorários (procuração
+    # fica fora até confirmar aceitação no foro — decisão 15/jun).
+    contratos_zapsign: bool = False
+    zapsign_api_token: str = ""
+    zapsign_base_url: str = "https://api.zapsign.com.br/api/v1"
+    # A ZapSign NÃO assina o webhook com HMAC — a segurança é um header
+    # secreto que cadastramos junto do webhook e ela devolve em cada POST.
+    # Validado constant-time no /webhooks/zapsign. Gerar valor longo aleatório.
+    zapsign_webhook_secret: str = ""
+    # Template DOCX de CONTRATO DE HONORÁRIOS no painel ZapSign (placeholders
+    # {{...}}). Vazio = não gera. O mapa placeholder→campo é injetado em
+    # runtime (não hardcodar os nomes do template do Mario).
+    zapsign_template_honorarios_id: str = ""
+    # Base URL pública do funil (ex.: https://funil.noviello.adv.br) — monta o
+    # link de aprovação 1-toque que vai pro WhatsApp do Mario e o endpoint do
+    # webhook cadastrado na ZapSign. Vazio = links de aprovação quebrados.
+    funil_base_url: str = ""
+
     # CUID do usuário "BOT IA" no Jurichat. Quando setado:
     #   1. start_human_support atribui conversas a ele (selectedUserId)
     #      em vez de sortear humano (isRandom) — conserta atribuição
