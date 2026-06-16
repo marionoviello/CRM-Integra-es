@@ -54,6 +54,37 @@ from .escopos import resolver_escopo
 
 logger = logging.getLogger(__name__)
 
+
+def montar_signers_padrao(settings: Any) -> list[dict[str, Any]]:
+    """Signatários FIXOS (da config) pro ``signers_extra`` do gerar_contrato:
+    escritório (order_group 2, contra-assina depois do cliente) + 2 testemunhas
+    (order_group 3). O cliente (order_group 1) é montado dentro do orquestrador.
+    Signatário sem e-mail é omitido (não teria como receber o link)."""
+    signers: list[dict[str, Any]] = []
+    if settings.contrato_escritorio_email:
+        signers.append(montar_signer(
+            name=settings.contrato_escritorio_nome or "Escritório",
+            email=settings.contrato_escritorio_email,
+            cpf=settings.contrato_escritorio_cpf or None,
+            qualification="Contratado", order_group=2,
+        ))
+    testemunhas = (
+        (settings.contrato_testemunha_1_nome,
+         settings.contrato_testemunha_1_email,
+         settings.contrato_testemunha_1_cpf),
+        (settings.contrato_testemunha_2_nome,
+         settings.contrato_testemunha_2_email,
+         settings.contrato_testemunha_2_cpf),
+    )
+    for nome, email, cpf in testemunhas:
+        if email:
+            signers.append(montar_signer(
+                name=nome or "Testemunha", email=email, cpf=cpf or None,
+                qualification="Testemunha", order_group=3,
+            ))
+    return signers
+
+
 # Estados ABERTOS (um contrato nesses estados ainda está em curso — é o que o
 # lookup de idempotência por chave de negócio considera "já em andamento").
 _ESTADOS_ABERTOS: tuple[str, ...] = (

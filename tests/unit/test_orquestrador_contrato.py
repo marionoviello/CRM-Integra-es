@@ -922,3 +922,43 @@ async def test_reprovar_apos_liberado_ja_processado():
     # NÃO tocou no Asaas (não há delete às cegas pós-liberação)
     assert asaas.called("delete_payment") == []
     conn.close()
+
+
+# --- montar_signers_padrao (signatários fixos da config) ---------------------
+
+def test_montar_signers_padrao_ordem_e_qualificacao():
+    from types import SimpleNamespace
+
+    from noviello_funil.orquestrador_contrato import montar_signers_padrao
+    s = SimpleNamespace(
+        contrato_escritorio_nome="Mario Noviello",
+        contrato_escritorio_email="mario@exemplo.com",
+        contrato_escritorio_cpf="111",
+        contrato_testemunha_1_nome="Hilde Teste",
+        contrato_testemunha_1_email="h@exemplo.com",
+        contrato_testemunha_1_cpf="222",
+        contrato_testemunha_2_nome="Marcio Teste",
+        contrato_testemunha_2_email="m@exemplo.com",
+        contrato_testemunha_2_cpf="333",
+    )
+    signers = montar_signers_padrao(s)
+    assert [x["order_group"] for x in signers] == [2, 3, 3]
+    assert signers[0]["qualification"] == "Contratado"
+    assert signers[1]["qualification"] == "Testemunha"
+    assert signers[0]["email"] == "mario@exemplo.com"
+
+
+def test_montar_signers_padrao_omite_sem_email():
+    from types import SimpleNamespace
+
+    from noviello_funil.orquestrador_contrato import montar_signers_padrao
+    s = SimpleNamespace(
+        contrato_escritorio_nome="", contrato_escritorio_email="",
+        contrato_escritorio_cpf="",
+        contrato_testemunha_1_nome="Hilde", contrato_testemunha_1_email="h@x.com",
+        contrato_testemunha_1_cpf="",
+        contrato_testemunha_2_nome="", contrato_testemunha_2_email="",
+        contrato_testemunha_2_cpf="",
+    )
+    signers = montar_signers_padrao(s)
+    assert len(signers) == 1 and signers[0]["qualification"] == "Testemunha"

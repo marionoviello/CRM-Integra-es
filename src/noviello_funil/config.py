@@ -167,6 +167,20 @@ class Settings(BaseSettings):
     # Vencimento default da cobrança quando o Mario não especifica (dias).
     asaas_payment_due_days: int = Field(default=7, ge=1)
 
+    # Signatários FIXOS do contrato (caminho A): o ESCRITÓRIO (Mario)
+    # contra-assina depois do cliente (order_group 2), e 2 TESTEMUNHAS
+    # (order_group 3) tornam o contrato executável (CPC 784 IV). CPF/email
+    # são PII — só no .env, nunca versionados. Vazio = signatário omitido.
+    contrato_escritorio_nome: str = ""
+    contrato_escritorio_email: str = ""
+    contrato_escritorio_cpf: str = ""
+    contrato_testemunha_1_nome: str = ""
+    contrato_testemunha_1_email: str = ""
+    contrato_testemunha_1_cpf: str = ""
+    contrato_testemunha_2_nome: str = ""
+    contrato_testemunha_2_email: str = ""
+    contrato_testemunha_2_cpf: str = ""
+
     # CUID do usuário "BOT IA" no Jurichat. Quando setado:
     #   1. start_human_support atribui conversas a ele (selectedUserId)
     #      em vez de sortear humano (isRandom) — conserta atribuição

@@ -1,0 +1,27 @@
+{
+  "tipo_caso": "urbanistico_iptu_regularizacao",
+  "template_id": "COLE_AQUI_O_TEMPLATE_ID_DO_SEU_MODELO_ZAPSIGN",
+  "cliente": {
+    "nome_completo": "Fulano de Tal",
+    "nacionalidade": "brasileiro",
+    "estado_civil": "casado",
+    "profissao": "engenheiro",
+    "rg": "00.000.000-0",
+    "orgao_emissor": "SSP/SP",
+    "cpf": "000.000.000-00",
+    "logradouro": "Rua Exemplo",
+    "numero": "100",
+    "complemento": "apto 12",
+    "bairro": "Vila Guarani",
+    "cidade": "São Paulo",
+    "uf": "SP",
+    "cep": "04311-000",
+    "celular": "11999999999",
+    "email": "cliente@email.com"
+  },
+  "honorarios": {
+    "valor": 3500.00,
+    "valor_extenso": "três mil e quinhentos reais",
+    "vencimento": "2026-06-23"
+  }
+}
