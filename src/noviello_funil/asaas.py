@@ -195,6 +195,48 @@ class AsaasClient:
 
         return await with_retry(op, attempts=3, base_delay=base_delay)
 
+    # --- Webhook ---------------------------------------------------------
+
+    async def register_webhook(
+        self,
+        *,
+        url: str,
+        auth_token: str,
+        email: str,
+        name: str = "Noviello Funil — cobrancas",
+        events: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """POST /v3/webhooks — cadastra o webhook de cobrança. SEM retry.
+
+        ``auth_token`` volta no header ``asaas-access-token`` de cada POST do
+        webhook (a Asaas não assina com HMAC) — validado constant-time no
+        ``/webhooks/asaas``. ``email`` recebe aviso da Asaas se o webhook
+        falhar repetidamente. ``events`` default cobre PIX (PAYMENT_RECEIVED)
+        e cartão/boleto (PAYMENT_CONFIRMED→RECEIVED). SEM with_retry: POST
+        não-idempotente (re-cadastrar duplica o webhook no painel).
+        """
+        body: dict[str, Any] = {
+            "name": name,
+            "url": url,
+            "email": email,
+            "enabled": True,
+            "interrupted": False,
+            "apiVersion": 3,
+            "sendType": "SEQUENTIALLY",
+            "authToken": auth_token,
+            "events": events or ["PAYMENT_CONFIRMED", "PAYMENT_RECEIVED"],
+        }
+        resp = await self._client.post(
+            f"{self._base_url}/v3/webhooks", json=body,
+        )
+        if resp.status_code >= 400:
+            logger.error(
+                "asaas register_webhook status=%d body=%r",
+                resp.status_code, resp.text[:300],
+            )
+        resp.raise_for_status()
+        return resp.json()
+
     async def delete_payment(
         self, payment_id: str, *, base_delay: float = 1.0,
     ) -> dict[str, Any]:

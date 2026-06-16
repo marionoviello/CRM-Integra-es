@@ -133,6 +133,31 @@ async def test_get_payment_status(respx_mock):
 
 
 @pytest.mark.asyncio
+async def test_register_webhook(respx_mock):
+    route = respx_mock.post(f"{_BASE}/v3/webhooks").mock(
+        return_value=httpx.Response(200, json={"id": "wh_1", "enabled": True}),
+    )
+    client = AsaasClient("$aact_hmlg_test")
+    try:
+        r = await client.register_webhook(
+            url="https://funil.exemplo/webhooks/asaas",
+            auth_token="segredo-longo-aleatorio-do-env",
+            email="escritorio@exemplo.com",
+        )
+    finally:
+        await client.aclose()
+    assert r["id"] == "wh_1"
+    req = route.calls.last.request
+    assert req.headers["access_token"] == "$aact_hmlg_test"      # não é Bearer
+    body = _json.loads(req.read())
+    assert body["url"] == "https://funil.exemplo/webhooks/asaas"
+    assert body["authToken"] == "segredo-longo-aleatorio-do-env"
+    assert body["sendType"] == "SEQUENTIALLY"
+    assert body["enabled"] is True
+    assert body["events"] == ["PAYMENT_CONFIRMED", "PAYMENT_RECEIVED"]
+
+
+@pytest.mark.asyncio
 async def test_delete_payment(respx_mock):
     respx_mock.delete(f"{_BASE}/v3/payments/pay_1").mock(
         return_value=httpx.Response(200, json={"deleted": True, "id": "pay_1"}),
