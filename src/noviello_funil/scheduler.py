@@ -27,6 +27,7 @@ from typing import Any
 
 import httpx
 
+from noviello_funil.agendamento_match import casar_horario_escolhido
 from noviello_funil.atendimento_processo import (
     MSG_NAO_CADASTRADO_CLIENTE,
     MSG_SIGILOSO_CLIENTE,
@@ -59,8 +60,10 @@ from noviello_funil.person_index import resolver_telefone
 from noviello_funil.state import (
     CLEAR_PROXIMA_ACAO,
     Estado,
+    clear_horarios_oferecidos,
     clear_reuniao,
     create_lead_if_absent,
+    get_horarios_oferecidos,
     get_lead_by_conversation,
     list_leads_com_reuniao_futura,
     list_leads_para_polling,
@@ -72,6 +75,7 @@ from noviello_funil.state import (
     mark_urgencia_alertada,
     register_error,
     schedule_next_action_seconds,
+    set_horarios_oferecidos,
     set_reuniao,
     transicao,
     update_transcript_hash,
@@ -190,6 +194,24 @@ def _last_lead_message(transcript: str) -> str:
     return ""
 
 
+def _extrair_email_do_lead(transcript: str) -> str:
+    """Email da linha ``Lead:`` MAIS RECENTE que contenha ``@``, ou "".
+
+    Diferente de ``_extrair_email`` (primeiro email do transcript inteiro):
+    varre só as linhas do LEAD, de baixo pra cima. Evita mandar o convite
+    Meet pro email do atendente/assinatura/terceiro citado no transcript
+    (auditoria 16/jun, falso-positivo crítico do Signal 1.8). "" quando
+    nenhuma linha do lead tem email → o guardrail de pedir-email atua.
+    """
+    for line in reversed(transcript.splitlines()):
+        stripped = line.lstrip()
+        if stripped.startswith("Lead:"):
+            m = _EMAIL_RE.search(stripped[len("Lead:") :])
+            if m:
+                return m.group(0)
+    return ""
+
+
 # --- Calendar handlers --------------------------------------------------
 
 def _parse_horario_confirmado(
@@ -299,6 +321,12 @@ async def _handle_oferecer_horarios(
         schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
         return
 
+    # Persiste os horários oferecidos pra escolha DETERMINÍSTICA no próximo
+    # turno (Signal 1.8) — não depende do Claude pra confirmar (bugfix Camila).
+    set_horarios_oferecidos(
+        conn, lead_id,
+        [{"iso": s.start.isoformat(), "label": s.format_human()} for s in slots],
+    )
     update_transcript_hash(conn, lead_id, new_hash)
     schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
 
@@ -371,10 +399,14 @@ async def _handle_confirmar_horario(
             iso, lead_id,
         )
         register_error(conn, lead_id, "horario_no_passado")
+        # S5 (16/jun): os slots oferecidos venceram junto — limpa pra não
+        # perpetuar o loop "já passou" (lead re-escolhe → casa de novo o slot
+        # morto). Mensagem direciona à agenda ATUALIZADA, não "um dos que te
+        # mandei" (que estão todos vencidos).
+        clear_horarios_oferecidos(conn, lead_id)
         msg = (
-            "Esse horário já passou! Me diz qual dos horários que te "
-            "mandei funciona, ou me avisa que eu te mostro a agenda "
-            "atualizada."
+            "Esse horário já passou! Vou te mostrar a agenda atualizada com "
+            "os próximos horários disponíveis."
         )
         try:
             await jurichat.start_human_support(conv_id)
@@ -400,9 +432,11 @@ async def _handle_confirmar_horario(
     # evento antigo antes de criar o novo — senão Mario fica com
     # double-booking e o lead com 2 convites (auditoria 2026-06-10).
     evento_antigo = lead["reuniao_event_id"]
+    evento_antigo_cancelado = False
     if evento_antigo:
         try:
             await calendar.client.cancel_event(evento_antigo)
+            evento_antigo_cancelado = True
             logger.info(
                 "lead=%s: evento antigo %s cancelado antes do novo",
                 lead_id, evento_antigo,
@@ -412,6 +446,15 @@ async def _handle_confirmar_horario(
                 "cancel evento antigo %s falhou (lead=%s): %s — segue",
                 evento_antigo, lead_id, exc,
             )
+
+    # S4 (idempotência, 16/jun): consome a escolha e marca o transcript como
+    # processado ANTES do create_event. Se o processo morrer logo após o
+    # create, o próximo start não re-casa (Signal 1.8 vê oferecidos vazio) nem
+    # reprocessa o mesmo transcript (hash já igual) → sem reunião duplicada.
+    # Vem DEPOIS dos guardrails de email/horario-no-passado (que dependem dos
+    # slots/hash ainda existirem pra reprocessar a resposta do lead).
+    clear_horarios_oferecidos(conn, lead_id)
+    update_transcript_hash(conn, lead_id, new_hash)
 
     # Criar o evento (a API do Google rejeita conflito hard se houver,
     # mas como freeBusy é eventualmente consistente, não validamos
@@ -436,6 +479,11 @@ async def _handle_confirmar_horario(
             "create_event failed for lead=%s: %s", lead_id, exc,
         )
         register_error(conn, lead_id, "calendar_create_event_failed")
+        # S7 (16/jun): se cancelamos o evento antigo e o create falhou, o DB
+        # ficaria apontando pra um evento CANCELADO (reminder_cycle dispararia
+        # lembretes fantasma). Limpa a reunião antes do handoff.
+        if evento_antigo_cancelado:
+            clear_reuniao(conn, lead_id)
         # Degradação: avisa lead, notifica Mario, handoff manual.
         await _handoff_sem_calendar(
             conn=conn, lead=lead, transcript=transcript, new_hash=new_hash,
@@ -493,8 +541,9 @@ async def _handle_confirmar_horario(
         conn, lead_id,
         reuniao_em_iso=iso_normalizado, event_id=event_id, meet_link=meet_link,
     )
+    # clear_horarios_oferecidos + update_transcript_hash já rodaram ANTES do
+    # create_event (S4, idempotência). Aqui só reagenda o próximo poll.
     schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
-    update_transcript_hash(conn, lead_id, new_hash)
     # Registra a "transição" no log de auditoria sem mudar estado.
     transicao(
         conn, lead_id, Estado.EM_CONVERSA,
@@ -658,6 +707,7 @@ async def _handle_cancelar_reuniao(
             )
 
     clear_reuniao(conn, lead_id)
+    clear_horarios_oferecidos(conn, lead_id)
 
     # Confirmação pro lead (mensagem do Claude, sem placeholders).
     try:
@@ -731,6 +781,9 @@ async def _handoff_sem_calendar(
         motivo=motivo,
         proxima_acao_horas=CLEAR_PROXIMA_ACAO,
     )
+    # S6 (16/jun): caminho terminal pra humano — não deixa slots órfãos
+    # pendentes (idempotente em quem não tem).
+    clear_horarios_oferecidos(conn, lead_id)
     update_transcript_hash(conn, lead_id, new_hash)
 
     try:
@@ -1002,6 +1055,10 @@ async def run_poll_cycle(
             lead["id"], lead["estado"],
         )
         mark_lead_activity_now(conn, lead["id"])
+        # S6 (16/jun): qualquer oferta de horário anterior já venceu depois de
+        # um ciclo de follow-up — limpa pra não re-disparar o Signal 1.8 sobre
+        # um slot velho. O Claude reabre a conversa do zero.
+        clear_horarios_oferecidos(conn, lead["id"])
         transicao(
             conn, lead["id"], Estado.EM_CONVERSA,
             motivo="lead_respondeu_reativacao",
@@ -1056,6 +1113,7 @@ async def run_poll_cycle(
                 "lead=%s: humano %r assumiu a conversa — bot pausado",
                 lead_id, conv_user.get("name"),
             )
+            clear_horarios_oferecidos(conn, lead_id)  # S6 (16/jun)
             transicao(
                 conn, lead_id, Estado.AGUARDANDO_HUMANO,
                 motivo="humano_assumiu_conversa",
@@ -1102,6 +1160,7 @@ async def run_poll_cycle(
                     motivo="pediu no WhatsApp",
                 )
                 logger.info("lead=%s pediu opt-out — suprimindo", lead_id)
+                clear_horarios_oferecidos(conn, lead_id)  # S6 (16/jun)
                 transicao(
                     conn, lead_id, Estado.AGUARDANDO_HUMANO, motivo="opt_out",
                     proxima_acao_horas=CLEAR_PROXIMA_ACAO,
@@ -1292,8 +1351,77 @@ async def run_poll_cycle(
             if tratou:
                 continue
 
+        # Signal 1.8 (bugfix Camila 16/jun): ESCOLHA DE HORÁRIO determinística.
+        # Se o bot ofereceu horários e a resposta do lead casa com um deles,
+        # CONFIRMA direto — sem depender do Claude, que pode derrapar pro intake
+        # e dropar a confirmação até bater o teto de turnos (causa-raiz do bug).
+        # Vem ANTES do teto: confirmar é melhor que handoff. Os guardrails de
+        # email e data-no-passado seguem no _handle_confirmar_horario.
+        #
+        # S2 (16/jun): só dispara se o lead AINDA NÃO tem reunião marcada —
+        # senão um comentário casual ("aquela terça que você falou") cancelaria
+        # e recriaria o evento (remarcação não pedida). Com reunião viva, defere
+        # ao Claude (que distingue remarcar de comentário).
+        oferecidos = get_horarios_oferecidos(conn, lead_id)
+        if oferecidos and not lead["reuniao_event_id"]:
+            cal_cfg = calendar or CalendarConfig(
+                client=None, business_hours_start=14,
+                business_hours_end=19, slot_min=30, buffer_min=0,
+                lookahead_days=5, num_slots=4,
+            )
+            # S5 (16/jun): descarta slots cujo ISO já passou (oferta velha de
+            # uma conversa retomada dias depois). Se TODOS venceram, limpa e
+            # NÃO casa — segue pro Claude reabrir a agenda (sem loop "já passou").
+            oferecidos = [
+                s for s in oferecidos
+                if _parse_horario_confirmado(s["iso"], cal_cfg.timezone)[0]
+                is not None
+            ]
+            if not oferecidos:
+                clear_horarios_oferecidos(conn, lead_id)
+            else:
+                msg_lead = _last_lead_message(transcript)
+                iso_escolhido = casar_horario_escolhido(msg_lead, oferecidos)
+                # S3 (16/jun): email-gap. Se há EXATAMENTE 1 slot oferecido, o
+                # matcher devolveu None (lead escolheu antes, faltava o email) e
+                # agora o lead mandou o email → confirma esse slot único. Só com
+                # 1 slot (evita confirmar cego em ambiguidade).
+                if (
+                    iso_escolhido is None
+                    and len(oferecidos) == 1
+                    and _extrair_email_do_lead(transcript)
+                ):
+                    iso_escolhido = oferecidos[0]["iso"]
+                if iso_escolhido:
+                    logger.info(
+                        "lead=%s: horário casado deterministicamente (%s) — "
+                        "confirmando sem Claude", lead_id, iso_escolhido,
+                    )
+                    decisao_det = Decisao(
+                        acao="confirmar_horario",
+                        mensagem=(
+                            "Perfeito! Agendado pra {{HORARIO_CONFIRMADO}}. Te "
+                            "enviei o convite no seu email com o link da "
+                            "videochamada: {{MEET_LINK}}\n\nAté lá!"
+                        ),
+                        horario_escolhido_iso=iso_escolhido,
+                        lead_email=_extrair_email_do_lead(transcript),
+                        resumo_caso="(horário confirmado pela escolha do lead)",
+                    )
+                    await _handle_confirmar_horario(
+                        conn=conn, lead=lead, decisao=decisao_det,
+                        transcript=transcript, new_hash=new_hash,
+                        jurichat=jurichat,
+                        calendar=cal_cfg,
+                        mario_conversation_id=mario_conversation_id,
+                        poll_interval_seconds=poll_interval_seconds,
+                        juridiq=juridiq,
+                    )
+                    continue
+
         # Signal 2: turn cap reached → hand off to Mario.
         if _count_lead_lines(transcript) >= max_turnos:
+            clear_horarios_oferecidos(conn, lead_id)  # S6 (16/jun)
             transicao(
                 conn, lead_id, Estado.AGUARDANDO_HUMANO,
                 motivo="max_turnos",
@@ -1374,6 +1502,10 @@ async def run_poll_cycle(
             schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
 
         elif decisao.acao == "propor":
+            # S6 (16/jun): limpa qualquer oferta anterior pendente em todos
+            # os ramos. No ramo que oferece horários, o _handle_oferecer_horarios
+            # grava slots frescos logo em seguida (clear + set = overwrite).
+            clear_horarios_oferecidos(conn, lead_id)
             # Guardrail (bug 2026-06-09): Claude usa "propor" pra leads
             # prontos pra fechar em vez de oferecer agendamento direto.
             # Se temos calendar configurado, REDIRECIONAMOS pra fluxo
@@ -1517,6 +1649,7 @@ async def run_poll_cycle(
             )
 
         elif decisao.acao == "handoff":
+            clear_horarios_oferecidos(conn, lead_id)  # S6 (16/jun)
             transicao(
                 conn, lead_id, Estado.AGUARDANDO_HUMANO,
                 motivo="claude_handoff",

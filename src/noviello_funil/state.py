@@ -359,6 +359,51 @@ def mark_cliente_checado(conn: sqlite3.Connection, lead_id: int) -> None:
     )
 
 
+# --- Horários oferecidos (escolha determinística, bugfix Camila 16/jun) ---
+
+def set_horarios_oferecidos(
+    conn: sqlite3.Connection, lead_id: int, slots: list[dict],
+) -> None:
+    """Persiste os horários que o bot acabou de oferecer (JSON [{iso,label}])."""
+    conn.execute(
+        "UPDATE leads SET horarios_oferecidos = ?, "
+        "atualizado_em = datetime('now') WHERE id = ?",
+        (json.dumps(slots), lead_id),
+    )
+
+
+def get_horarios_oferecidos(
+    conn: sqlite3.Connection, lead_id: int,
+) -> list[dict]:
+    """Horários pendentes de escolha (vazio se nenhum/ inválido)."""
+    row = conn.execute(
+        "SELECT horarios_oferecidos FROM leads WHERE id = ?", (lead_id,),
+    ).fetchone()
+    if not row or not row["horarios_oferecidos"]:
+        return []
+    try:
+        dados = json.loads(row["horarios_oferecidos"])
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(dados, list):
+        return []
+    # Filtra itens inválidos (strings soltas, None, dicts sem "iso") na borda
+    # de leitura — o consumidor (matcher / Signal 1.8) só vê dicts com iso.
+    return [
+        d for d in dados
+        if isinstance(d, dict) and isinstance(d.get("iso"), str) and d["iso"]
+    ]
+
+
+def clear_horarios_oferecidos(conn: sqlite3.Connection, lead_id: int) -> None:
+    """Limpa os horários pendentes (após confirmar/cancelar)."""
+    conn.execute(
+        "UPDATE leads SET horarios_oferecidos = NULL, "
+        "atualizado_em = datetime('now') WHERE id = ?",
+        (lead_id,),
+    )
+
+
 def list_leads_vencidos(
     conn: sqlite3.Connection, *, fu1_apos_horas: int = 48,
 ) -> list[sqlite3.Row]:

@@ -179,6 +179,55 @@ CREATE TABLE IF NOT EXISTS boletim_competencia (
     total       INTEGER,
     enviado_em  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Contrato de honorários com assinatura eletrônica (ZapSign, roadmap 3.x).
+-- Fluxo 1-TOQUE: o bot monta a minuta (estado pendente_aprovacao); o Mario
+-- aprova UM contrato (estado aprovado); SÓ então o create-doc é chamado
+-- (estado enviado); o webhook confirma (assinado). O create-doc NUNCA roda
+-- fora do estado 'aprovado' — garantia OAB testada. valor_honorarios é
+-- SEMPRE digitado por humano (a IA não precifica). zapsign_doc_token também
+-- é a chave de idempotência do envio (não re-chama create-doc se já tem).
+CREATE TABLE IF NOT EXISTS contrato (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id            TEXT,           -- ficha Juridiq do cliente (se já existe)
+    lead_id              INTEGER,        -- vínculo ao lead do funil (se veio de lá)
+    cliente_nome         TEXT NOT NULL,
+    cliente_email        TEXT,
+    cliente_telefone     TEXT,
+    objeto               TEXT,           -- objeto do contrato (área/caso)
+    valor_honorarios     TEXT NOT NULL,  -- texto livre, digitado pelo Mario
+    estado               TEXT NOT NULL,  -- _pendente_aprovacao|_aprovado|_enviando|_enviado|_assinado|_recusado|_expirado
+    template_id          TEXT,
+    aprovacao_token      TEXT UNIQUE,    -- token único do link de aprovação 1-toque
+    aprovado_em          TEXT,
+    aprovado_por         TEXT,           -- auditoria: quem aprovou
+    zapsign_doc_token    TEXT,           -- token do doc na ZapSign (após enviar) + idempotência
+    zapsign_signer_token TEXT,
+    sign_url             TEXT,
+    signed_file_url      TEXT,           -- URL do PDF assinado (efêmero) → arquivamos
+    criado_em            TEXT NOT NULL DEFAULT (datetime('now')),
+    atualizado_em        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_contrato_estado ON contrato(estado);
+CREATE INDEX IF NOT EXISTS idx_contrato_doc_token
+    ON contrato(zapsign_doc_token) WHERE zapsign_doc_token IS NOT NULL;
+
+-- Trilha de auditoria de CADA transição do contrato (quem, quando, por quê).
+-- É isto que torna o 1-toque defensável perante a OAB: prova que o envio só
+-- aconteceu depois de uma aprovação humana registrada.
+CREATE TABLE IF NOT EXISTS contrato_transicao (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    contrato_id     INTEGER NOT NULL REFERENCES contrato(id),
+    estado_anterior TEXT,
+    estado_novo     TEXT NOT NULL,
+    motivo          TEXT,
+    ator            TEXT,                -- 'mario' | 'webhook' | 'sistema'
+    criado_em       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_contrato_transicao_contrato
+    ON contrato_transicao(contrato_id);
 """
 
 
@@ -225,6 +274,11 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     # Reconhecer cliente existente (roadmap 1.6). Timestamp do check
     # contra o person_index — NULL = ainda não checado. Roda 1x por lead.
     _ensure_column(conn, "leads", "cliente_checado_em", "TEXT")
+    # Horários que o bot ACABOU de oferecer (bugfix Camila 16/jun). JSON
+    # ``[{"iso","label"}]`` — preenchido em oferecer_horarios, lido pela
+    # escolha determinística (Signal 1.8), limpo ao confirmar/cancelar.
+    # Tira o Claude do caminho crítico "lead escolhe horário → confirma".
+    _ensure_column(conn, "leads", "horarios_oferecidos", "TEXT")
 
 
 def _ensure_column(
