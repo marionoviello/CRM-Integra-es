@@ -66,13 +66,21 @@ class Settings(BaseSettings):
     # Horário comercial pra slots oferecidos ao lead (decisão Mario
     # 2026-06-08: 14h-19h, slots de 30min, sem buffer).
     calendar_business_hours_start: int = Field(default=14, ge=0, le=23)
-    calendar_business_hours_end: int = Field(default=19, ge=1, le=24)
+    # le=23: o gerador faz datetime.time(end, 0), e time(24,0) é ValueError.
+    # O último slot precisa caber ANTES da hora cheia (fim 19 → 18h30-19h).
+    calendar_business_hours_end: int = Field(default=19, ge=1, le=23)
     calendar_slot_min: int = Field(default=30, ge=15, le=180)
     calendar_buffer_min: int = Field(default=0, ge=0, le=60)
     calendar_lookahead_days: int = Field(default=5, ge=1, le=30)
     # Teto de slots oferecidos. Estratégia "escassez" (2 do primeiro dia
     # + 1 do seguinte + 1 do próximo) produz até 4.
     calendar_num_slots: int = Field(default=4, ge=1, le=10)
+    # Janela de MANHÃ opcional (2026-06-16): o gerador oferece manhã + tarde.
+    # Default 0/0 = desligada (só tarde, como antes). Mario pôs 10-12h no .env.
+    # As audiências dele já estão na agenda → o free/busy as pula, nunca
+    # oferecendo um horário ocupado. Só vale se end > start > 0.
+    calendar_morning_start: int = Field(default=0, ge=0, le=23)
+    calendar_morning_end: int = Field(default=0, ge=0, le=23)  # le=23: time(24,0) é ValueError
 
     # SMTP (Google Workspace) — disparo de email de aniversário aos
     # clientes. smtp_password é uma SENHA DE APP do Google (não a senha

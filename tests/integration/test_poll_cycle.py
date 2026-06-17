@@ -28,7 +28,12 @@ from noviello_funil.scheduler import (
     run_poll_cycle,
     sync_jurichat_conversations,
 )
-from noviello_funil.state import Estado, get_lead_by_conversation
+from noviello_funil.state import (
+    Estado,
+    get_horarios_oferecidos,
+    get_lead_by_conversation,
+    set_horarios_oferecidos,
+)
 
 # --- Test helpers ---------------------------------------------------------
 
@@ -177,7 +182,7 @@ async def test_hash_changed_handoff_transitions_and_notifies(db_conn):
     triagem_fn = await _triagem_returning(
         Decisao(
             acao="handoff",
-            mensagem="(unused for handoff)",
+            mensagem="Vou te conectar com a nossa equipe pra resolver isso, tá?",
             motivo_handoff="Lead pediu humano",
         )
     )
@@ -194,9 +199,19 @@ async def test_hash_changed_handoff_transitions_and_notifies(db_conn):
     assert lead["estado"] == Estado.AGUARDANDO_HUMANO
     assert lead["proxima_acao_em"] is None
     assert lead["ultimo_transcript_hash"] == _sha(transcript)
-    # Only the notify_mario send, no message to the lead on handoff.
-    jurichat.send_message.assert_awaited_once()
-    assert jurichat.send_message.await_args.args[0] == "mario-conv"
+    # G4 (2026-06-16): handoff NÃO é mais mudo — avisa o LEAD (com a mensagem
+    # do Claude) E notifica o Mario. Dois envios.
+    assert jurichat.send_message.await_count == 2
+    destinos = [c.args[0] for c in jurichat.send_message.await_args_list]
+    assert "C-1" in destinos          # lead recebeu o aviso
+    assert "mario-conv" in destinos   # Mario foi notificado
+    msg_lead = next(
+        c.args[1] for c in jurichat.send_message.await_args_list
+        if c.args[0] == "C-1"
+    )
+    assert "nossa equipe" in msg_lead
+    # G4 fix (revisão): abre human-support ANTES do send (senão Jurichat 400).
+    jurichat.start_human_support.assert_any_await("C-1")
 
 
 @pytest.mark.asyncio
@@ -316,9 +331,14 @@ async def test_max_turnos_reached_notifies_and_handoff(db_conn):
     assert lead["estado"] == Estado.AGUARDANDO_HUMANO
     assert lead["proxima_acao_em"] is None
     assert lead["ultimo_transcript_hash"] == _sha(transcript)
-    # Notification to Mario fired
-    jurichat.send_message.assert_awaited_once()
-    assert jurichat.send_message.await_args.args[0] == "mario-conv"
+    # G4 (2026-06-16): max_turnos agora AVISA o lead antes do handoff +
+    # notifica o Mario. Dois envios (lead não fica mais no vácuo).
+    assert jurichat.send_message.await_count == 2
+    destinos = [c.args[0] for c in jurichat.send_message.await_args_list]
+    assert "C-1" in destinos          # lead avisado
+    assert "mario-conv" in destinos   # Mario notificado
+    # G4 fix (revisão): abre human-support ANTES do send (senão Jurichat 400).
+    jurichat.start_human_support.assert_any_await("C-1")
 
 
 @pytest.mark.asyncio
@@ -522,6 +542,55 @@ async def test_oferecer_horarios_substitui_placeholder_e_envia(db_conn):
     assert "qua (10/jun) às 15h" in sent_text
     lead = get_lead_by_conversation(db_conn, "C-1")
     assert lead["estado"] == Estado.EM_CONVERSA  # ainda em conversa
+
+
+@pytest.mark.asyncio
+async def test_reoferta_exclui_ja_oferecidos_e_acumula(db_conn):
+    """G1 (2026-06-16): ao re-oferecer, o bot exclui os horários já
+    oferecidos (passa exclude_isos) e ACUMULA no horarios_oferecidos —
+    o lead vê horários NOVOS e o Signal 1.8 ainda casa qualquer ofertado.
+    Datas FUTURAS pra o filtro S5 (expirados) não limpar a oferta anterior."""
+    transcript = (
+        "Atendente: Tenho esses horários\nLead: não estou disponível nesses"
+    )
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+    lead_id = get_lead_by_conversation(db_conn, "C-1")["id"]
+
+    ja = [
+        {"iso": "2026-06-23T14:00:00-03:00", "label": "ter (23/jun) às 14h"},
+        {"iso": "2026-06-23T18:30:00-03:00", "label": "ter (23/jun) às 18h30"},
+    ]
+    set_horarios_oferecidos(db_conn, lead_id, ja)
+
+    tz = ZoneInfo("America/Sao_Paulo")
+    novos = [Slot(start=datetime.datetime(2026, 6, 24, 10, 0, tzinfo=tz),
+                  duration_min=30)]
+    fake_cal = _make_calendar(novos)
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="oferecer_horarios",
+            mensagem="Sem problema! Tenho também:\n\n{{HORARIOS}}\n\nQual prefere?",
+        )
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+        calendar=_calendar_config(client=fake_cal),
+    )
+
+    # 1. find_available_slots recebeu os ISOs já oferecidos pra EXCLUIR.
+    kwargs = fake_cal.find_available_slots.call_args.kwargs
+    assert kwargs["exclude_isos"] == {
+        "2026-06-23T14:00:00-03:00", "2026-06-23T18:30:00-03:00",
+    }
+    # 2. ACUMULOU: os 2 antigos + o novo (re-oferta não apaga o histórico).
+    acumulado = {o["iso"] for o in get_horarios_oferecidos(db_conn, lead_id)}
+    assert acumulado == {
+        "2026-06-23T14:00:00-03:00", "2026-06-23T18:30:00-03:00",
+        "2026-06-24T10:00:00-03:00",
+    }
 
 
 @pytest.mark.asyncio

@@ -424,3 +424,60 @@ async def test_freebusy_com_errors_levanta_excecao(respx_mock):
             )
     finally:
         await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_find_slots_inclui_manha_quando_janela_ligada(respx_mock):
+    """G2 (2026-06-16): com janela de manhã (10-12h), o 1º slot do dia é de
+    manhã (10h) — o gerador oferece manhã + tarde, em ordem crescente."""
+    respx_mock.post("https://oauth2.googleapis.com/token").mock(
+        return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600}),
+    )
+    respx_mock.post(
+        "https://www.googleapis.com/calendar/v3/freeBusy",
+    ).mock(return_value=httpx.Response(
+        200, json={"calendars": {"primary": {"busy": []}}},
+    ))
+    now = _dt(2026, 6, 9, 8, 0)  # terça 8h — antes da janela da manhã
+    client = GoogleCalendarClient(client_id="c", client_secret="s", refresh_token="r")
+    try:
+        slots = await client.find_available_slots(
+            business_hours_start=14, business_hours_end=19,
+            slot_min=30, buffer_min=0,
+            lookahead_days=5, num_slots=4, now=now,
+            morning_start=10, morning_end=12,
+        )
+    finally:
+        await client.aclose()
+    # dia1: 10h (1º = manhã) + 18h30 (último = tarde); o gerador inclui manhã.
+    assert slots[0].start == _dt(2026, 6, 9, 10, 0)
+    assert slots[1].start == _dt(2026, 6, 9, 18, 30)
+    assert any(s.start.hour < 12 for s in slots)
+
+
+@pytest.mark.asyncio
+async def test_find_slots_exclui_horarios_ja_oferecidos(respx_mock):
+    """G1 (2026-06-16): re-oferta exclui horários já oferecidos — o 14h
+    excluído não reaparece; o gerador escolhe o próximo livre (14h30)."""
+    respx_mock.post("https://oauth2.googleapis.com/token").mock(
+        return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600}),
+    )
+    respx_mock.post(
+        "https://www.googleapis.com/calendar/v3/freeBusy",
+    ).mock(return_value=httpx.Response(
+        200, json={"calendars": {"primary": {"busy": []}}},
+    ))
+    now = _dt(2026, 6, 9, 10, 0)
+    client = GoogleCalendarClient(client_id="c", client_secret="s", refresh_token="r")
+    try:
+        slots = await client.find_available_slots(
+            business_hours_start=14, business_hours_end=19,
+            slot_min=30, buffer_min=0,
+            lookahead_days=5, num_slots=4, now=now,
+            exclude_isos={"2026-06-09T14:00:00-03:00"},
+        )
+    finally:
+        await client.aclose()
+    isos = {s.start.isoformat() for s in slots}
+    assert "2026-06-09T14:00:00-03:00" not in isos   # excluído não volta
+    assert slots[0].start == _dt(2026, 6, 9, 14, 30)  # próximo livre do dia

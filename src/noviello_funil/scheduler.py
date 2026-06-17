@@ -136,6 +136,10 @@ class CalendarConfig:
     buffer_min: int
     lookahead_days: int
     num_slots: int
+    # Janela de manhã opcional (0/0 = desligada). Quando ligada, o gerador
+    # oferece manhã + tarde. Default 0 mantém os fallbacks (sem Google) intactos.
+    morning_start: int = 0
+    morning_end: int = 0
     # Timezone dos horários da agenda (e dos ISO vindos do Claude sem
     # offset). Auditoria 2026-06-10: naive astimezone() assumia UTC do
     # VPS — evento criado 3h errado.
@@ -251,6 +255,21 @@ def _format_slots_human(slots: list[Slot]) -> str:
     return "\n".join(f"• {s.format_human()}" for s in slots)
 
 
+# G4 (2026-06-16): mensagem que o bot manda ao lead ANTES de um handoff
+# humano (claude_handoff / max_turnos) — antes esses caminhos eram MUDOS e o
+# lead ficava sem resposta até alguém assumir. GENÉRICA de propósito: o
+# max_turnos dispara em qualquer conversa longa (nem sempre agendamento) e o
+# claude_handoff já manda a mensagem do Claude antes, usando esta só de
+# fallback. Marca-segura ("nossa equipe", nunca "Dr. Mario").
+_MSG_HANDOFF_LEAD = (
+    "Vou pedir pra alguém da nossa equipe continuar seu atendimento por "
+    "aqui, tá? Já já te respondem. 🙏"
+)
+# Remove placeholder cru ({{HORARIOS}}, {{MEET_LINK}}, ...) de uma mensagem
+# antes de mandar pro lead — usado no handoff, único send sem replace dedicado.
+_RE_PLACEHOLDER = re.compile(r"\s*\{\{[^}]+\}\}")
+
+
 async def _handle_oferecer_horarios(
     *,
     conn: Any,
@@ -276,6 +295,12 @@ async def _handle_oferecer_horarios(
         )
         return
 
+    # G1 (2026-06-16): re-oferta NÃO repete horário já oferecido (e recusado).
+    # Acumula o histórico de oferecidos e exclui da nova geração — o lead
+    # sempre vê horários NOVOS. Se esgotar, find_available_slots devolve []
+    # → handoff avisado abaixo.
+    ja_oferecidos = get_horarios_oferecidos(conn, lead_id)
+    exclude_isos = {o["iso"] for o in ja_oferecidos}
     try:
         slots = await calendar.client.find_available_slots(
             business_hours_start=calendar.business_hours_start,
@@ -284,6 +309,9 @@ async def _handle_oferecer_horarios(
             buffer_min=calendar.buffer_min,
             lookahead_days=calendar.lookahead_days,
             num_slots=calendar.num_slots,
+            morning_start=calendar.morning_start,
+            morning_end=calendar.morning_end,
+            exclude_isos=exclude_isos,
         )
     except (GoogleCalendarError, Exception) as exc:
         logger.exception(
@@ -323,10 +351,19 @@ async def _handle_oferecer_horarios(
 
     # Persiste os horários oferecidos pra escolha DETERMINÍSTICA no próximo
     # turno (Signal 1.8) — não depende do Claude pra confirmar (bugfix Camila).
-    set_horarios_oferecidos(
-        conn, lead_id,
-        [{"iso": s.start.isoformat(), "label": s.format_human()} for s in slots],
-    )
+    # ACUMULA com os já oferecidos (G1): o Signal 1.8 casa qualquer slot já
+    # ofertado, e a próxima re-oferta exclui todos eles. De-dup por iso +
+    # teto defensivo (o acúmulo já é limitado por max_turnos + esgotamento).
+    combinados = ja_oferecidos + [
+        {"iso": s.start.isoformat(), "label": s.format_human()} for s in slots
+    ]
+    vistos: set[str] = set()
+    unicos: list[dict] = []
+    for o in combinados:
+        if o["iso"] not in vistos:
+            vistos.add(o["iso"])
+            unicos.append(o)
+    set_horarios_oferecidos(conn, lead_id, unicos[-40:])
     update_transcript_hash(conn, lead_id, new_hash)
     schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
 
@@ -1422,6 +1459,18 @@ async def run_poll_cycle(
         # Signal 2: turn cap reached → hand off to Mario.
         if _count_lead_lines(transcript) >= max_turnos:
             clear_horarios_oferecidos(conn, lead_id)  # S6 (16/jun)
+            # G4 (2026-06-16): avisa o lead antes do handoff por teto de turnos
+            # — antes sumia em silêncio (causa do vácuo no caso Daniel).
+            # start_human_support ANTES do send (idempotente): sem isso o
+            # Jurichat responde 400 e o lead ficaria mudo no handoff a frio.
+            try:
+                await jurichat.start_human_support(conv_id)
+                await jurichat.send_message(conv_id, _MSG_HANDOFF_LEAD)
+            except Exception as exc:
+                logger.exception(
+                    "send_message(max_turnos lead) failed for lead=%s: %s",
+                    lead_id, exc,
+                )
             transicao(
                 conn, lead_id, Estado.AGUARDANDO_HUMANO,
                 motivo="max_turnos",
@@ -1650,6 +1699,23 @@ async def run_poll_cycle(
 
         elif decisao.acao == "handoff":
             clear_horarios_oferecidos(conn, lead_id)  # S6 (16/jun)
+            # G4 (2026-06-16): handoff NÃO é mais mudo — avisa o lead antes de
+            # passar pro humano. Usa a mensagem do Claude se houver; senão o
+            # padrão. (Causa-raiz do silêncio de ~1h no caso Daniel.)
+            msg_lead = (decisao.mensagem or "").strip() or _MSG_HANDOFF_LEAD
+            # Defesa: handoff é o único send que não passa por replace — tira
+            # placeholder cru ({{HORARIOS}} etc.) que o Claude possa ter deixado.
+            msg_lead = _RE_PLACEHOLDER.sub("", msg_lead).strip() or _MSG_HANDOFF_LEAD
+            try:
+                # start_human_support ANTES do send (idempotente): sem isso o
+                # Jurichat responde 400 e o lead ficaria mudo no handoff a frio.
+                await jurichat.start_human_support(conv_id)
+                await jurichat.send_message(conv_id, msg_lead)
+            except Exception as exc:
+                logger.exception(
+                    "send_message(handoff lead) failed for lead=%s: %s",
+                    lead_id, exc,
+                )
             transicao(
                 conn, lead_id, Estado.AGUARDANDO_HUMANO,
                 motivo="claude_handoff",
@@ -2000,6 +2066,8 @@ def main() -> int:
             buffer_min=settings.calendar_buffer_min,
             lookahead_days=settings.calendar_lookahead_days,
             num_slots=settings.calendar_num_slots,
+            morning_start=settings.calendar_morning_start,
+            morning_end=settings.calendar_morning_end,
             timezone=settings.calendar_timezone,
         )
     else:

@@ -177,6 +177,9 @@ class GoogleCalendarClient:
         buffer_min: int,
         lookahead_days: int,
         num_slots: int,
+        morning_start: int = 0,
+        morning_end: int = 0,
+        exclude_isos: set[str] | None = None,
         now: datetime.datetime | None = None,
     ) -> list[Slot]:
         """Slots livres com estratégia de ESCASSEZ (decisão Mario 2026-06-10).
@@ -195,6 +198,13 @@ class GoogleCalendarClient:
         ``now`` é injetável pra testes; default = ``datetime.now(tz)``.
         Pula sábado, domingo e horários já passados de hoje (com 30 min
         de antecedência mínima).
+
+        ``morning_start``/``morning_end`` (2026-06-16): se válidos (>0 e
+        end>start), o gerador oferece a janela da manhã ANTES da tarde —
+        ``do_dia`` fica em ordem crescente, então o 1º slot do dia é o mais
+        cedo (manhã) e o último o mais tarde. ``exclude_isos``: horários já
+        oferecidos (e recusados) que NÃO devem reaparecer — a re-oferta
+        sempre traz horários novos (não repete os que o lead já recusou).
         """
         tz = self._tz
         now = (now or datetime.datetime.now(tz)).astimezone(tz)
@@ -204,6 +214,14 @@ class GoogleCalendarClient:
         end_window = now + datetime.timedelta(days=lookahead_days * 2)
 
         busy = await self._fetch_busy_intervals(start=now, end=end_window)
+
+        exclude = exclude_isos or set()
+        # Janelas do dia: manhã (se ligada e válida) + tarde. Em ordem
+        # crescente → do_dia[0] = mais cedo (manhã), do_dia[-1] = mais tarde.
+        windows: list[tuple[int, int]] = []
+        if morning_start and morning_end and morning_end > morning_start:
+            windows.append((morning_start, morning_end))
+        windows.append((business_hours_start, business_hours_end))
 
         # 1. Coleta slots livres AGRUPADOS POR DIA (até 3 dias com vaga).
         dias_com_vagas: list[list[Slot]] = []
@@ -221,24 +239,30 @@ class GoogleCalendarClient:
             dias_uteis_visitados += 1
 
             do_dia: list[Slot] = []
-            slot_start = datetime.datetime.combine(
-                cursor_day,
-                datetime.time(business_hours_start, 0),
-                tzinfo=tz,
-            )
-            day_end = datetime.datetime.combine(
-                cursor_day,
-                datetime.time(business_hours_end, 0),
-                tzinfo=tz,
-            )
-            while slot_start + datetime.timedelta(minutes=slot_min) <= day_end:
-                slot_end = slot_start + datetime.timedelta(minutes=slot_min)
-                if slot_start <= now + datetime.timedelta(minutes=30):
+            do_dia_isos: set[str] = set()
+            for win_start, win_end in windows:
+                slot_start = datetime.datetime.combine(
+                    cursor_day, datetime.time(win_start, 0), tzinfo=tz,
+                )
+                win_end_dt = datetime.datetime.combine(
+                    cursor_day, datetime.time(win_end, 0), tzinfo=tz,
+                )
+                while slot_start + datetime.timedelta(minutes=slot_min) <= win_end_dt:
+                    slot_end = slot_start + datetime.timedelta(minutes=slot_min)
+                    iso = slot_start.isoformat()
+                    # Pula: já passou (margem 30min), já oferecido (G1, exclude),
+                    # ou duplicado de janelas sobrepostas (config manhã×tarde).
+                    if (
+                        slot_start <= now + datetime.timedelta(minutes=30)
+                        or iso in exclude
+                        or iso in do_dia_isos
+                    ):
+                        slot_start = slot_end + datetime.timedelta(minutes=buffer_min)
+                        continue
+                    if not _overlaps_any(slot_start, slot_end, busy):
+                        do_dia.append(Slot(start=slot_start, duration_min=slot_min))
+                        do_dia_isos.add(iso)
                     slot_start = slot_end + datetime.timedelta(minutes=buffer_min)
-                    continue
-                if not _overlaps_any(slot_start, slot_end, busy):
-                    do_dia.append(Slot(start=slot_start, duration_min=slot_min))
-                slot_start = slot_end + datetime.timedelta(minutes=buffer_min)
 
             if do_dia:
                 dias_com_vagas.append(do_dia)
