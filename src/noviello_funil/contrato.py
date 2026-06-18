@@ -238,6 +238,12 @@ def montar_data_contrato(
     Pares com valor vazio/None são OMITIDOS (o placeholder fica em branco no
     doc) — mesma disciplina de ``montar_minuta``.
     """
+    # COMPLEMENTO carrega a própria vírgula: no template o trecho é
+    # "nº {{NUMERO}}{{COMPLEMENTO}}, {{BAIRRO}}" (SEM vírgula antes do
+    # placeholder). Assim endereço sem complemento sai "nº 100, Bairro" em vez
+    # de "nº 100, , Bairro"; com complemento sai "nº 100, apto 12, Bairro".
+    _compl = str(cliente.get("complemento") or "").strip()
+    cliente = {**cliente, "complemento": f", {_compl}" if _compl else ""}
     fontes: list[tuple[dict[str, str], dict[str, Any]]] = [
         (_VARS_CLIENTE, cliente),
         (_VARS_ESCOPO, escopo),

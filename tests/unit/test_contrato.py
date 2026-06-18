@@ -564,6 +564,20 @@ def test_montar_data_contrato_omite_vazios():
     assert "{{VALOR_HONORARIOS_EXTENSO}}" not in des
 
 
+def test_montar_data_contrato_complemento_leva_virgula():
+    """COMPLEMENTO presente vem com ", " no início: o template tem
+    "nº {{NUMERO}}{{COMPLEMENTO}}, {{BAIRRO}}" SEM vírgula antes do placeholder,
+    então a vírgula precisa vir no valor. Endereço sem complemento continua
+    omitido (testado em omite_vazios) → não vira "nº 100, , Bairro"."""
+    cliente = {**_CLIENTE, "complemento": "apto 12"}
+    data = montar_data_contrato(
+        cliente, _ESCOPO,
+        valor_fmt="3.500,00", valor_extenso="x", link_pagamento="x",
+    )
+    pares = {d["de"]: d["para"] for d in data}
+    assert pares["{{COMPLEMENTO}}"] == ", apto 12"
+
+
 def test_montar_data_contrato_placeholder_residual_fica_cravado():
     """med#6: se a descrição de honorários do escopo carrega um placeholder
     NÃO-resolvido, montar_data_contrato o entrega CRAVADO no valor (a ZapSign
