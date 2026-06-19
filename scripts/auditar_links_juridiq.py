@@ -30,6 +30,7 @@ from noviello_funil.config import Settings
 
 _PAINEL_BASE = "https://dashboard.juridiq.com.br/law-suits"
 _OUT_CSV = "processos_sem_link.csv"
+_OUT_CSV_SUB = "sem_link_sem_monitoramento.csv"  # subset: sem link E sem monitoringId
 _THROTTLE_S = 0.2
 
 
@@ -127,6 +128,24 @@ def main() -> int:
             ])
 
     print(f"CSV gravado: {_OUT_CSV} ({len(sem_link)} processos sem link)")
+
+    # Subset ACIONÁVEL: sem link E sem monitoringId (monitoramento NUNCA
+    # configurado) → é a lista pra LIGAR o monitoramento no painel. Diferente
+    # de "tem monitoringId mas link não gerou" (sync/credencial travada).
+    sub = [p for p in sem_link if not p["monitoringId"]]
+    with open(_OUT_CSV_SUB, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "processNumber", "status", "monitoringStatus", "court",
+            "id", "painel_url",
+        ])
+        for p in sub:
+            pid = p["id"]
+            w.writerow([
+                p["processNumber"], p["status"], p["monitoringStatus"],
+                p["court"], pid, f"{_PAINEL_BASE}/{pid}" if pid else "",
+            ])
+    print(f"CSV gravado: {_OUT_CSV_SUB} ({len(sub)} SEM link E SEM monitoramento)")
     print("A API NÃO liga monitoramento — use o painel_url do CSV pra ligar no")
     print("painel, ou peça a automação de navegador (Chrome).")
     return 0
