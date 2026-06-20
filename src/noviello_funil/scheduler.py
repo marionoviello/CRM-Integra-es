@@ -1751,11 +1751,93 @@ async def run_poll_cycle(
             schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
 
 
+_RE_CANCELAMENTO = re.compile(r"\b(?:cancel|desmarc)\w*", re.IGNORECASE)
+
+
+async def _lead_pediu_cancelamento(
+    jurichat: JurichatClient, conv_id: str,
+) -> str | None:
+    """Devolve a ÚLTIMA fala do LEAD se ela pede cancelamento; senão None.
+
+    Roda DENTRO do ciclo de lembretes — rede de segurança pro lead que o brain
+    NÃO reprocessa (modo-humano / agendado manual), origem do bug Daniel
+    (19/jun): o lembrete saía mesmo depois do "cancela". Conservador: só a
+    última linha ``Lead:`` conta, e só dispara em palavra clara (cancel*/
+    desmarc*). Em erro de rede devolve None → degrada pra mandar o lembrete (não
+    "engole" a reunião por uma falha transitória).
+    """
+    try:
+        conv = await jurichat.get_conversation(conv_id)
+        transcript = (
+            (conv.get("transcription") or "") if isinstance(conv, dict) else ""
+        )
+        for line in reversed(transcript.splitlines()):
+            s = line.strip()
+            if s.startswith("Lead:"):
+                fala = s[len("Lead:"):].strip()
+                return fala if _RE_CANCELAMENTO.search(fala) else None
+    except Exception as exc:  # noqa: BLE001 — nunca derruba o ciclo de lembretes
+        logger.warning("cancelamento-check conv=%s: %s — segue", conv_id, exc)
+    return None
+
+
+async def _cancelar_reuniao_auto(
+    *,
+    conn: Any,
+    lead: dict[str, Any],
+    jurichat: JurichatClient,
+    calendar: "CalendarConfig | None",
+    mario_conversation_id: str,
+    horario_human: str,
+    ultima_msg: str,
+) -> None:
+    """Cancelamento detectado FORA do brain, no ciclo de lembretes.
+
+    Cancela o evento (se houver), limpa a reunião (zera reuniao_em + flags → os
+    lembretes param) e AVISA O MARIO. NÃO responde ao lead — a conversa está com
+    atendimento humano; quem responde é o Mario.
+    """
+    lead_id = lead["id"]
+    event_id = lead["reuniao_event_id"]
+    if (
+        calendar is not None
+        and getattr(calendar, "client", None) is not None
+        and event_id
+    ):
+        try:
+            await calendar.client.cancel_event(event_id)
+        except Exception as exc:  # noqa: BLE001 — falha no Calendar não trava o resto
+            logger.warning(
+                "cancel_event(auto-lembrete) lead=%s event=%s: %s — segue",
+                lead_id, event_id, exc,
+            )
+    clear_reuniao(conn, lead_id)
+    logger.info(
+        "auto-cancelamento via lembrete: lead=%s pediu cancelamento — reuniao limpa",
+        lead_id,
+    )
+    if mario_conversation_id:
+        await notify_mario(
+            jurichat,
+            mario_conversation_id=mario_conversation_id,
+            mensagem=(
+                "❌ *Reunião auto-cancelada*\n\n"
+                f"Lead: {lead['contato_nome']}\n"
+                f"Tel: {lead['contato_telefone']}\n"
+                f"Era: {horario_human}\n\n"
+                f"O lead pediu cancelamento (\"{ultima_msg[:140]}\") e a conversa "
+                "está com atendimento humano. Parei os lembretes e limpei a "
+                "reunião — responda o lead você. Se foi engano, é só reagendar."
+            ),
+        )
+
+
 async def run_reminder_cycle(
     *,
     get_db: Callable[[], Any],
     jurichat: JurichatClient,
     mario_conversation_id: str = "",
+    calendar: "CalendarConfig | None" = None,
 ) -> None:
     """Manda lembretes 24h / 2h / 30min de cada reunião agendada.
 
@@ -1803,48 +1885,59 @@ async def run_reminder_cycle(
         # Decide quais lembretes disparar neste tick. Ordem importa:
         # se faltam 5 min e nenhum foi enviado, manda APENAS o 30min
         # (não faria sentido mandar "24h" agora).
+        # Qual lembrete está pendente neste tick (ordem: 30min > 2h > 24h).
+        tag: str | None = None
         if delta <= datetime.timedelta(minutes=30):
-            if lead["lembrete_30min_enviado_em"] is None:
-                msg = _msg_lembrete_30min(nome, horario_human, meet_link)
-                if await _enviar_lembrete(
-                    jurichat, conv_id, msg, lead["id"], "30min",
-                ):
-                    mark_lembrete_enviado(conn, lead["id"], "30min")
+            tag = "30min" if lead["lembrete_30min_enviado_em"] is None else None
         elif delta <= datetime.timedelta(hours=2):
-            if lead["lembrete_2h_enviado_em"] is None:
-                msg = _msg_lembrete_2h(nome, horario_human, meet_link)
-                if await _enviar_lembrete(
-                    jurichat, conv_id, msg, lead["id"], "2h",
-                ):
-                    mark_lembrete_enviado(conn, lead["id"], "2h")
-                    # Signal 3.2: briefing pré-reunião pra EQUIPE (interno),
-                    # junto do lembrete de 2h. Se cliente, lista os processos
-                    # (do cliente_processo, instantâneo). try/except: nunca
-                    # derruba o ciclo de lembretes.
-                    if mario_conversation_id:
-                        try:
-                            procs = consultar_processos_do_telefone(
-                                conn, lead["contato_telefone"]
-                            )
-                            await notify_mario(
-                                jurichat,
-                                mario_conversation_id=mario_conversation_id,
-                                mensagem=montar_briefing(
-                                    lead["contato_nome"], lead["contato_telefone"],
-                                    horario_human, meet_link, procs,
-                                ),
-                            )
-                        except Exception as exc:
-                            logger.exception(
-                                "briefing 3.2 falhou lead=%s: %s", lead["id"], exc,
-                            )
+            tag = "2h" if lead["lembrete_2h_enviado_em"] is None else None
         elif delta <= datetime.timedelta(hours=24):
-            if lead["lembrete_24h_enviado_em"] is None:
-                msg = _msg_lembrete_24h(nome, horario_human, meet_link)
-                if await _enviar_lembrete(
-                    jurichat, conv_id, msg, lead["id"], "24h",
-                ):
-                    mark_lembrete_enviado(conn, lead["id"], "24h")
+            tag = "24h" if lead["lembrete_24h_enviado_em"] is None else None
+        if tag is None:
+            continue
+
+        # ANTES de mandar QUALQUER lembrete: o lead pediu cancelamento? Rede de
+        # segurança pro lead que o brain NÃO reprocessa (modo-humano / agendado
+        # manual) — origem do bug Daniel (19/jun): o lembrete saía depois do
+        # "cancela". Se pediu, cancela a reunião + avisa o Mario e NÃO manda o
+        # lembrete. (Lead em em_conversa: o brain já limpou reuniao_em antes →
+        # nem entra na lista deste ciclo.)
+        ultima = await _lead_pediu_cancelamento(jurichat, conv_id)
+        if ultima is not None:
+            await _cancelar_reuniao_auto(
+                conn=conn, lead=lead, jurichat=jurichat, calendar=calendar,
+                mario_conversation_id=mario_conversation_id,
+                horario_human=horario_human, ultima_msg=ultima,
+            )
+            continue
+
+        msg = {
+            "30min": _msg_lembrete_30min,
+            "2h": _msg_lembrete_2h,
+            "24h": _msg_lembrete_24h,
+        }[tag](nome, horario_human, meet_link)
+        if await _enviar_lembrete(jurichat, conv_id, msg, lead["id"], tag):
+            mark_lembrete_enviado(conn, lead["id"], tag)
+            # Signal 3.2: briefing pré-reunião pra EQUIPE (interno), junto do
+            # lembrete de 2h. Se cliente, lista os processos (do
+            # cliente_processo, instantâneo). try/except: nunca derruba o ciclo.
+            if tag == "2h" and mario_conversation_id:
+                try:
+                    procs = consultar_processos_do_telefone(
+                        conn, lead["contato_telefone"]
+                    )
+                    await notify_mario(
+                        jurichat,
+                        mario_conversation_id=mario_conversation_id,
+                        mensagem=montar_briefing(
+                            lead["contato_nome"], lead["contato_telefone"],
+                            horario_human, meet_link, procs,
+                        ),
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "briefing 3.2 falhou lead=%s: %s", lead["id"], exc,
+                    )
 
 
 def _format_reuniao_human(dt: datetime.datetime) -> str:
@@ -2126,6 +2219,7 @@ def main() -> int:
             get_db=lambda: conn,
             jurichat=jurichat,
             mario_conversation_id=settings.mario_conversation_id,
+            calendar=calendar_config,
         )
         # 4. Follow-up cycle nudges idle leads.
         await run_followup_cycle(

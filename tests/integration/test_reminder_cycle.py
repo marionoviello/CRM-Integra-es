@@ -29,10 +29,79 @@ def _make_jurichat():
     fake = MagicMock()
     fake.send_message = AsyncMock(return_value={"id": "msg-x"})
     fake.start_human_support = AsyncMock(return_value={"success": True})
+    # Sem cancelamento por padrão — a última fala do lead não pede cancelar.
+    fake.get_conversation = AsyncMock(
+        return_value={"transcription": "Lead: oi\nAtendente: ola"}
+    )
     return fake
 
 
 # --- Cases ---------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_lembrete_cancela_quando_lead_pediu_cancelamento(db_conn):
+    """BUG Daniel (19/jun): lead com reunião agendada que o brain NÃO
+    reprocessa (modo-humano / agendado manual) pede cancelamento. O ciclo NÃO
+    deve mandar o lembrete — deve cancelar a reunião (limpa reuniao_em → para
+    os lembretes) e avisar o Mario, sem mensagem ao lead."""
+    lead_id = _insert_lead(db_conn, nome="Daniel")
+    reuniao = datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=20)
+    db_conn.execute(
+        """UPDATE leads SET reuniao_em=?, reuniao_event_id='evt-1',
+           reuniao_meet_link='https://meet.google.com/x', estado=?,
+           lembrete_24h_enviado_em=datetime('now','-23 hours'),
+           lembrete_2h_enviado_em=datetime('now','-2 hours')
+           WHERE id=?""",
+        (reuniao.isoformat(), Estado.AGUARDANDO_HUMANO, lead_id),
+    )
+    jurichat = _make_jurichat()
+    jurichat.get_conversation = AsyncMock(return_value={
+        "transcription": "Atendente: em 30 min começa...\nLead: Cancela por gentileza",
+    })
+
+    await run_reminder_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat,
+        mario_conversation_id="MARIO-1",
+    )
+
+    # NÃO mandou lembrete pro lead (conversa C-1).
+    para_lead = [c for c in jurichat.send_message.call_args_list if c.args[0] == "C-1"]
+    assert para_lead == [], f"não devia mandar lembrete ao lead: {para_lead}"
+    # Reunião limpa → não dispara mais.
+    lead = db_conn.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+    assert lead["reuniao_em"] is None
+    assert lead["lembrete_30min_enviado_em"] is None
+    # Mario foi avisado (mensagem pra MARIO-1).
+    para_mario = [c for c in jurichat.send_message.call_args_list if c.args[0] == "MARIO-1"]
+    assert len(para_mario) >= 1
+    assert "cancel" in para_mario[0].args[1].lower()
+
+
+@pytest.mark.asyncio
+async def test_lembrete_dispara_normal_se_checagem_cancelamento_falha(db_conn):
+    """Robustez: se a checagem de cancelamento falha (Jurichat fora do ar), o
+    ciclo NÃO engole a reunião — degrada e manda o lembrete normalmente."""
+    lead_id = _insert_lead(db_conn, nome="Maria")
+    reuniao = datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=20)
+    db_conn.execute(
+        """UPDATE leads SET reuniao_em=?, reuniao_event_id='evt-1',
+           reuniao_meet_link='https://meet.google.com/x',
+           lembrete_24h_enviado_em=datetime('now','-23 hours'),
+           lembrete_2h_enviado_em=datetime('now','-2 hours')
+           WHERE id=?""",
+        (reuniao.isoformat(), lead_id),
+    )
+    jurichat = _make_jurichat()
+    jurichat.get_conversation = AsyncMock(side_effect=RuntimeError("jurichat down"))
+
+    await run_reminder_cycle(get_db=lambda: db_conn, jurichat=jurichat)
+
+    para_lead = [c for c in jurichat.send_message.call_args_list if c.args[0] == "C-1"]
+    assert len(para_lead) == 1  # mandou o lembrete mesmo com a checagem falhando
+    lead = db_conn.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+    assert lead["lembrete_30min_enviado_em"] is not None
+    assert lead["reuniao_em"] is not None  # NÃO limpou a reunião
+
 
 @pytest.mark.asyncio
 async def test_reminder_30min_dispara_quando_falta_menos_de_30min(db_conn):
