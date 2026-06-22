@@ -131,6 +131,40 @@ async def test_reminder_5min_dispara_com_aviso_de_cancelamento(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_noshow_ping_dispara_5min_apos_inicio_uma_vez(db_conn):
+    """No-show: 5 min APÓS o início, sem ter avisado, o ciclo PINGA o Mario com
+    o link de cancelamento (grava o token = avisa uma vez só), sem msg ao lead."""
+    lead_id = _insert_lead(db_conn, nome="Pedro")
+    reuniao = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=6)
+    db_conn.execute(
+        "UPDATE leads SET reuniao_em=?, reuniao_event_id='evt-1' WHERE id=?",
+        (reuniao.isoformat(), lead_id),
+    )
+    jurichat = _make_jurichat()
+    await run_reminder_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat,
+        mario_conversation_id="MARIO-1", base_url="https://funil.example",
+    )
+    para_mario = [c for c in jurichat.send_message.call_args_list if c.args[0] == "MARIO-1"]
+    assert len(para_mario) == 1
+    msg = para_mario[0].args[1]
+    assert "no-show" in msg.lower()
+    assert "/reuniao/cancelar/" in msg
+    para_lead = [c for c in jurichat.send_message.call_args_list if c.args[0] == "C-1"]
+    assert para_lead == []
+    lead = db_conn.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+    assert lead["noshow_token"] is not None
+
+    # Segundo tick: NÃO pinga de novo (token já setado).
+    jurichat2 = _make_jurichat()
+    await run_reminder_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat2,
+        mario_conversation_id="MARIO-1", base_url="https://funil.example",
+    )
+    assert jurichat2.send_message.call_args_list == []
+
+
+@pytest.mark.asyncio
 async def test_reminder_30min_dispara_quando_falta_menos_de_30min(db_conn):
     """Cenário: reunião marcada com antecedência (24h+), tempo passou,
     agora faltam 20 min. Cycle deve disparar 30min."""

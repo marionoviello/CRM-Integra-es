@@ -37,7 +37,12 @@ from .contrato import (
 )
 from .orquestrador_contrato import aprovar_e_liberar, reprovar_contrato
 from .outbound import notify_mario
-from .state import is_webhook_processed, mark_webhook_processed
+from .state import (
+    clear_reuniao,
+    get_lead_by_noshow_token,
+    is_webhook_processed,
+    mark_webhook_processed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +219,71 @@ def register_contrato_routes(
         return _pagina_resultado(
             "Não foi possível reprovar",
             f"Houve um problema ao reprovar ({status}). Tente novamente.",
+        )
+
+    # --- No-show: cancelar reunião em 1 toque (link do ping do Mario) ------
+
+    @app.get("/reuniao/cancelar/{token}", response_class=HTMLResponse)
+    async def pagina_cancelar_reuniao(token: str) -> HTMLResponse:
+        lead = get_lead_by_noshow_token(get_db(), token)
+        if lead is None:
+            return _pagina_resultado(
+                "Link inválido", "Este link já foi usado ou expirou.",
+            )
+        nome = html.escape(lead["contato_nome"] or "")
+        tok = html.escape(token)
+        corpo = (
+            "<h1>Cancelar reunião (no-show)</h1>"
+            f"<p>Lead: <b>{nome}</b>.</p>"
+            "<p>Confirma o cancelamento da reunião e o envio de uma oferta de "
+            "remarcação ao lead?</p>"
+            f"<form method='post' action='/reuniao/cancelar/{tok}'>"
+            "<button type='submit' style='font-size:1.1rem;padding:12px 20px;"
+            "background:#7a1f2b;color:#fff;border:0;border-radius:8px;"
+            "cursor:pointer'>Cancelar e oferecer remarcação</button></form>"
+        )
+        return _pagina("Cancelar reunião", corpo)
+
+    @app.post("/reuniao/cancelar/{token}", response_class=HTMLResponse)
+    async def post_cancelar_reuniao(token: str) -> HTMLResponse:
+        conn = get_db()
+        lead = get_lead_by_noshow_token(conn, token)
+        if lead is None:
+            return _pagina_resultado(
+                "Link inválido", "Este link já foi usado ou expirou.",
+            )
+        nome = lead["contato_nome"] or ""
+        conv_id = lead["jurichat_conversation_id"]
+        # Limpa a reunião (zera reuniao_em + noshow_token = single-use). O evento
+        # do Calendar já é passado (no-show) — não precisa cancelar lá.
+        clear_reuniao(conn, lead["id"])
+        if jurichat is not None:
+            try:
+                await jurichat.start_human_support(conv_id)
+                await jurichat.send_message(
+                    conv_id,
+                    f"Oi {nome}! Vimos que não conseguimos nos encontrar na "
+                    "videochamada. Sem problema — quando puder, é só me chamar "
+                    "aqui que a gente remarca. 🗓️",
+                )
+            except Exception as exc:  # noqa: BLE001 — a página não pode quebrar
+                logger.warning(
+                    "cancelar no-show: msg ao lead falhou (lead=%s): %s",
+                    lead["id"], exc,
+                )
+            if settings.mario_conversation_id:
+                await notify_mario(
+                    jurichat,
+                    mario_conversation_id=settings.mario_conversation_id,
+                    mensagem=(
+                        f"✅ Reunião de {nome} cancelada (no-show) e remarcação "
+                        "oferecida ao lead."
+                    ),
+                )
+        return _pagina_resultado(
+            "Reunião cancelada",
+            f"A reunião de {nome} foi cancelada e a remarcação foi oferecida "
+            "ao lead.",
         )
 
     # --- Webhook ZapSign (assinatura confirmada) --------------------------

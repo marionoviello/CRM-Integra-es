@@ -169,6 +169,64 @@ def _build_app(conn, zapsign, asaas):
     return app
 
 
+class _FakeJurichatRoute:
+    """Jurichat falso pra rota de no-show — registra envios."""
+
+    def __init__(self):
+        self.sent: list[tuple] = []
+        self.starts: list[str] = []
+
+    async def start_human_support(self, conv_id, **kw):
+        self.starts.append(conv_id)
+        return {"success": True}
+
+    async def send_message(self, conv_id, text, **kw):
+        self.sent.append((conv_id, text))
+        return {"id": "m"}
+
+
+def _insert_lead_noshow(conn, *, token):
+    conn.execute(
+        """INSERT INTO leads (jurichat_lead_id, jurichat_conversation_id,
+           contato_telefone, contato_nome, estado, reuniao_em, noshow_token)
+           VALUES ('L-9','C-9','5511999990000','Pedro Teste','aguardando_humano',
+                   '2026-06-22T10:00:00+00:00', ?)""",
+        (token,),
+    )
+    return conn.execute(
+        "SELECT id FROM leads WHERE jurichat_lead_id='L-9'"
+    ).fetchone()["id"]
+
+
+def test_post_cancelar_reuniao_noshow_limpa_e_oferece_remarcacao():
+    """POST /reuniao/cancelar/{token}: limpa a reunião, oferece remarcação ao
+    lead e consome o token (idempotente — 2º POST = link inválido)."""
+    conn = _db()
+    token = "tok-noshow-abc"
+    lead_id = _insert_lead_noshow(conn, token=token)
+    jurichat = _FakeJurichatRoute()
+    app = FastAPI()
+    register_contrato_routes(
+        app, get_db=lambda: conn, settings=FakeSettings(),
+        zapsign=None, asaas=None, jurichat=jurichat,
+    )
+    client = TestClient(app)
+
+    resp = client.post(f"/reuniao/cancelar/{token}")
+    assert resp.status_code == 200
+    assert "cancelada" in resp.text.lower()
+    lead = conn.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+    assert lead["reuniao_em"] is None
+    assert lead["noshow_token"] is None
+    assert any(c == "C-9" for c, _ in jurichat.sent)
+    assert any("remarca" in t.lower() for _, t in jurichat.sent)
+
+    # Token consumido → 2º POST devolve "link inválido".
+    resp2 = client.post(f"/reuniao/cancelar/{token}")
+    txt = resp2.text.lower()
+    assert "inválido" in txt or "expirou" in txt
+
+
 async def _criar_contrato_pendente(conn, asaas, zapsign):
     """Gera um contrato real em PENDENTE_REVISAO via a engine."""
     out = await gerar_contrato(

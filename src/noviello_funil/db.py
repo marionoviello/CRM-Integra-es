@@ -268,6 +268,9 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "leads", "lembrete_2h_enviado_em", "TEXT")
     _ensure_column(conn, "leads", "lembrete_30min_enviado_em", "TEXT")
     _ensure_column(conn, "leads", "lembrete_5min_enviado_em", "TEXT")
+    # No-show: token do link de 1 toque que o Mario recebe 5 min após o
+    # início (NULL = ping ainda não enviado; setado = já avisado + link vivo).
+    _ensure_column(conn, "leads", "noshow_token", "TEXT")
     # Escalonamento de urgência jurídica (roadmap 1.12). Timestamp do
     # alerta 🚨 ao Mario — NULL = ainda não escalado. Evita repetir o
     # alerta a cada mensagem do lead urgente.

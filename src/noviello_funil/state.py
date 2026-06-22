@@ -527,6 +527,7 @@ def set_reuniao(
             lembrete_2h_enviado_em = ?,
             lembrete_30min_enviado_em = ?,
             lembrete_5min_enviado_em = ?,
+            noshow_token = NULL,
             atualizado_em = datetime('now')
         WHERE id = ?
         """,
@@ -551,6 +552,7 @@ def clear_reuniao(conn: sqlite3.Connection, lead_id: int) -> None:
             lembrete_2h_enviado_em = NULL,
             lembrete_30min_enviado_em = NULL,
             lembrete_5min_enviado_em = NULL,
+            noshow_token = NULL,
             atualizado_em = datetime('now')
         WHERE id = ?
         """,
@@ -592,6 +594,28 @@ def list_leads_com_reuniao_futura(
         ORDER BY reuniao_em ASC
         """,
     ).fetchall()
+
+
+def marcar_noshow_avisado(
+    conn: sqlite3.Connection, lead_id: int, token: str,
+) -> None:
+    """Grava o token do link de cancelamento de no-show (= ping já enviado)."""
+    conn.execute(
+        "UPDATE leads SET noshow_token = ?, atualizado_em = datetime('now') "
+        "WHERE id = ?",
+        (token, lead_id),
+    )
+
+
+def get_lead_by_noshow_token(
+    conn: sqlite3.Connection, token: str,
+) -> sqlite3.Row | None:
+    """Lead pelo token do link de cancelamento de no-show (None se inválido)."""
+    if not token:
+        return None
+    return conn.execute(
+        "SELECT * FROM leads WHERE noshow_token = ?", (token,),
+    ).fetchone()
 
 
 def list_leads_para_polling(conn: sqlite3.Connection) -> list[sqlite3.Row]:

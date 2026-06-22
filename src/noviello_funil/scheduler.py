@@ -21,6 +21,7 @@ import datetime
 import hashlib
 import logging
 import re
+import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -69,6 +70,7 @@ from noviello_funil.state import (
     list_leads_para_polling,
     list_leads_para_reativacao,
     list_leads_vencidos,
+    marcar_noshow_avisado,
     mark_cliente_checado,
     mark_lead_activity_now,
     mark_lembrete_enviado,
@@ -1832,12 +1834,62 @@ async def _cancelar_reuniao_auto(
         )
 
 
+_NOSHOW_GRACE = datetime.timedelta(hours=1)
+
+
+async def _ping_noshow(
+    conn: Any,
+    lead: dict[str, Any],
+    jurichat: JurichatClient,
+    mario_conversation_id: str,
+    base_url: str,
+) -> None:
+    """Ping de no-show ao Mario, 5 min após o início, com link de 1 toque pra
+    cancelar + remarcar. Grava o token (= avisado → dispara UMA vez). O bot NÃO
+    cancela sozinho — quem decide é o Mario (ele está na reunião e sabe se a
+    pessoa apareceu). Semi-auto pedido por ele em 20/jun.
+    """
+    token = secrets.token_urlsafe(24)
+    marcar_noshow_avisado(conn, lead["id"], token)
+    if not mario_conversation_id:
+        return
+    horario = ""
+    if lead["reuniao_em"]:
+        try:
+            horario = _format_reuniao_human(
+                datetime.datetime.fromisoformat(
+                    lead["reuniao_em"]
+                ).astimezone(datetime.UTC)
+            )
+        except (ValueError, TypeError):
+            horario = lead["reuniao_em"]
+    link = (
+        f"{base_url.rstrip('/')}/reuniao/cancelar/{token}"
+        if base_url else "(FUNIL_BASE_URL não configurada)"
+    )
+    await notify_mario(
+        jurichat,
+        mario_conversation_id=mario_conversation_id,
+        mensagem=(
+            "⏰ *Possível no-show*\n\n"
+            f"Lead: {lead['contato_nome']}\n"
+            f"Tel: {lead['contato_telefone']}\n"
+            f"Reunião: {horario}\n\n"
+            "A videochamada começou há 5 min. O lead compareceu?\n\n"
+            "✅ Se SIM, é só ignorar esta mensagem.\n"
+            "❌ Se foi no-show, cancele + ofereça remarcação em 1 toque:\n"
+            f"{link}"
+        ),
+    )
+
+
 async def run_reminder_cycle(
     *,
     get_db: Callable[[], Any],
     jurichat: JurichatClient,
     mario_conversation_id: str = "",
     calendar: "CalendarConfig | None" = None,
+    base_url: str = "",
 ) -> None:
     """Manda lembretes 24h / 2h / 30min de cada reunião agendada.
 
@@ -1871,10 +1923,23 @@ async def run_reminder_cycle(
 
         delta = reuniao_dt - now
 
-        # Reunião já passou — limpa.
+        # Reunião já começou/passou.
         if delta.total_seconds() < 0:
-            logger.info("lead=%s reuniao passou, limpando", lead["id"])
-            clear_reuniao(conn, lead["id"])
+            passou = -delta
+            if passou >= _NOSHOW_GRACE:
+                # Bem passada (além da janela de no-show) → limpa.
+                logger.info("lead=%s reuniao passou, limpando", lead["id"])
+                clear_reuniao(conn, lead["id"])
+            elif (
+                passou >= datetime.timedelta(minutes=5)
+                and lead["noshow_token"] is None
+            ):
+                # 5+ min após o início, ainda sem avisar → ping de no-show ao
+                # Mario com link de 1 toque (semi-auto: ele decide se cancela).
+                await _ping_noshow(
+                    conn, lead, jurichat, mario_conversation_id, base_url,
+                )
+            # else: <5min (em andamento) ou já avisado → espera.
             continue
 
         meet_link = lead["reuniao_meet_link"] or ""
@@ -2237,6 +2302,7 @@ def main() -> int:
             jurichat=jurichat,
             mario_conversation_id=settings.mario_conversation_id,
             calendar=calendar_config,
+            base_url=settings.funil_base_url,
         )
         # 4. Follow-up cycle nudges idle leads.
         await run_followup_cycle(
