@@ -515,6 +515,7 @@ def set_reuniao(
     lembrete_24h_sent = now_str if delta < timedelta(hours=24) else None
     lembrete_2h_sent = now_str if delta < timedelta(hours=2) else None
     lembrete_30min_sent = now_str if delta < timedelta(minutes=30) else None
+    lembrete_5min_sent = now_str if delta < timedelta(minutes=5) else None
 
     conn.execute(
         """
@@ -525,12 +526,14 @@ def set_reuniao(
             lembrete_24h_enviado_em = ?,
             lembrete_2h_enviado_em = ?,
             lembrete_30min_enviado_em = ?,
+            lembrete_5min_enviado_em = ?,
             atualizado_em = datetime('now')
         WHERE id = ?
         """,
         (
             reuniao_em_iso, event_id, meet_link,
             lembrete_24h_sent, lembrete_2h_sent, lembrete_30min_sent,
+            lembrete_5min_sent,
             lead_id,
         ),
     )
@@ -547,6 +550,7 @@ def clear_reuniao(conn: sqlite3.Connection, lead_id: int) -> None:
             lembrete_24h_enviado_em = NULL,
             lembrete_2h_enviado_em = NULL,
             lembrete_30min_enviado_em = NULL,
+            lembrete_5min_enviado_em = NULL,
             atualizado_em = datetime('now')
         WHERE id = ?
         """,
@@ -557,11 +561,12 @@ def clear_reuniao(conn: sqlite3.Connection, lead_id: int) -> None:
 def mark_lembrete_enviado(
     conn: sqlite3.Connection, lead_id: int, lembrete: str,
 ) -> None:
-    """``lembrete`` ∈ {'24h', '2h', '30min'}. Idempotente."""
+    """``lembrete`` ∈ {'24h', '2h', '30min', '5min'}. Idempotente."""
     coluna_map = {
         "24h": "lembrete_24h_enviado_em",
         "2h": "lembrete_2h_enviado_em",
         "30min": "lembrete_30min_enviado_em",
+        "5min": "lembrete_5min_enviado_em",
     }
     coluna = coluna_map[lembrete]
     conn.execute(

@@ -104,6 +104,33 @@ async def test_lembrete_dispara_normal_se_checagem_cancelamento_falha(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_reminder_5min_dispara_com_aviso_de_cancelamento(db_conn):
+    """Lembrete de 5 min antes: dispara quando faltam <5min (mais novo da fila)
+    e inclui o aviso de cancelamento por no-show."""
+    lead_id = _insert_lead(db_conn, nome="Joao")
+    reuniao = datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=3)
+    db_conn.execute(
+        """UPDATE leads SET reuniao_em=?, reuniao_event_id='evt-1',
+           reuniao_meet_link='https://meet.google.com/abc',
+           lembrete_24h_enviado_em=datetime('now','-23 hours'),
+           lembrete_2h_enviado_em=datetime('now','-2 hours'),
+           lembrete_30min_enviado_em=datetime('now','-25 minutes')
+           WHERE id=?""",
+        (reuniao.isoformat(), lead_id),
+    )
+    jurichat = _make_jurichat()
+    await run_reminder_cycle(get_db=lambda: db_conn, jurichat=jurichat)
+
+    jurichat.send_message.assert_awaited_once()
+    msg = jurichat.send_message.call_args.args[1]
+    assert "5 minutos" in msg
+    assert "https://meet.google.com/abc" in msg
+    assert "cancelada" in msg.lower()  # o aviso de no-show
+    lead = db_conn.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+    assert lead["lembrete_5min_enviado_em"] is not None
+
+
+@pytest.mark.asyncio
 async def test_reminder_30min_dispara_quando_falta_menos_de_30min(db_conn):
     """Cenário: reunião marcada com antecedência (24h+), tempo passou,
     agora faltam 20 min. Cycle deve disparar 30min."""

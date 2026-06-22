@@ -1887,7 +1887,9 @@ async def run_reminder_cycle(
         # (não faria sentido mandar "24h" agora).
         # Qual lembrete está pendente neste tick (ordem: 30min > 2h > 24h).
         tag: str | None = None
-        if delta <= datetime.timedelta(minutes=30):
+        if delta <= datetime.timedelta(minutes=5):
+            tag = "5min" if lead["lembrete_5min_enviado_em"] is None else None
+        elif delta <= datetime.timedelta(minutes=30):
             tag = "30min" if lead["lembrete_30min_enviado_em"] is None else None
         elif delta <= datetime.timedelta(hours=2):
             tag = "2h" if lead["lembrete_2h_enviado_em"] is None else None
@@ -1912,6 +1914,7 @@ async def run_reminder_cycle(
             continue
 
         msg = {
+            "5min": _msg_lembrete_5min,
             "30min": _msg_lembrete_30min,
             "2h": _msg_lembrete_2h,
             "24h": _msg_lembrete_24h,
@@ -1983,6 +1986,20 @@ def _msg_lembrete_30min(nome: str, horario: str, meet_link: str) -> str:
     )
     if meet_link:
         base += f"\n\nLink Meet: {meet_link}"
+    return base
+
+
+def _msg_lembrete_5min(nome: str, horario: str, meet_link: str) -> str:
+    base = (
+        f"{nome}, sua videochamada com o Mario começa em 5 minutos! 🎥"
+    )
+    if meet_link:
+        base += f"\n\nLink Meet: {meet_link}"
+    base += (
+        "\n\n⚠️ Importante: se você não conseguir entrar em até 5 minutos após "
+        "o horário, a reunião será cancelada automaticamente — mas é só falar "
+        "com a gente pra remarcar. Te esperamos!"
+    )
     return base
 
 
