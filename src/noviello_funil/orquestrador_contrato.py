@@ -85,6 +85,19 @@ def montar_signers_padrao(settings: Any) -> list[dict[str, Any]]:
     return signers
 
 
+def _payload_add_signer(signer: dict[str, Any]) -> dict[str, Any]:
+    """Corpo do add-signer (escritório/testemunha) a partir de um dict
+    ``montar_signer``. Mantém os campos que a API documenta (name/email/phone/
+    qualification) + ``send_automatic_email`` SEMPRE False (silêncio até a
+    aprovação). order_group/cpf NÃO entram (a API do add-signer não os expõe; a
+    ordem vem da própria sequência de adição)."""
+    out: dict[str, Any] = {"name": signer["name"], "send_automatic_email": False}
+    for chave in ("email", "phone_country", "phone_number", "qualification"):
+        if signer.get(chave):
+            out[chave] = signer[chave]
+    return out
+
+
 # Estados ABERTOS (um contrato nesses estados ainda está em curso — é o que o
 # lookup de idempotência por chave de negócio considera "já em andamento").
 _ESTADOS_ABERTOS: tuple[str, ...] = (
@@ -459,14 +472,13 @@ async def _criar_doc_silencioso(
             return {"status": "erro_placeholder_residual",
                     "contrato_id": contrato_id, "campo": par["de"]}
 
-    cliente_signer = montar_signer(
-        name=cliente["nome_completo"],
-        email=cliente.get("email"),
-        telefone=cliente.get("celular"),
-        qualification="Contratante",
-        order_group=1,
-        cpf=cliente.get("cpf"),
-    )
+    # O create-doc-from-template só registra o signatário PRIMÁRIO via
+    # signer_name (a API IGNORA qualquer array `signers`). O CLIENTE é o
+    # primário (assina 1º). Escritório + testemunhas entram via add-signer
+    # DEPOIS, na ORDEM de adição (= ordem de assinatura, signature_order_active).
+    # A API não expõe CPF/order_group no primário — o CPF do cliente segue no
+    # TEXTO do contrato (data[]); a ordem sai da sequência primário→add-signers.
+    cliente_tel = re.sub(r"\D", "", str(cliente.get("celular") or ""))
     corpo: dict[str, Any] = {
         "template_id": template_id,
         "lang": "pt-br",
@@ -474,15 +486,14 @@ async def _criar_doc_silencioso(
         "signature_order_active": True,
         # INVARIANTE: silêncio total até a aprovação humana. NUNCA True.
         "send_automatic_email": False,
+        "signer_name": cliente["nome_completo"],
         "data": data,
-        "signers": [cliente_signer, *signers_extra],
     }
-    # INVARIANTE (defesa em profundidade): força send_automatic_email=False em
-    # TODOS os signers — a flag por-signer (montar_signer liga se há email)
-    # vazaria o e-mail de assinatura ao cliente ANTES da aprovação se a ZapSign
-    # a honrar por signatário. Preserva o campo email (pra liberação/resend).
-    for s in corpo["signers"]:
-        s["send_automatic_email"] = False
+    if cliente.get("email"):
+        corpo["signer_email"] = cliente["email"]
+    if cliente_tel:
+        corpo["signer_phone_country"] = "55"
+        corpo["signer_phone_number"] = cliente_tel
 
     # CLAIM atômico: MONTAGEM→CRIANDO_DOC sob lock (igual ao enviar_para_
     # assinatura). Só o vencedor (rowcount==1) chama a ZapSign.
@@ -528,6 +539,27 @@ async def _criar_doc_silencioso(
         )
         return {"status": "erro_zapsign", "contrato_id": contrato_id,
                 "detalhe": "resposta_sem_token"}
+
+    # Escritório + testemunhas via add-signer, NA ORDEM (= ordem de assinatura).
+    # Se QUALQUER um falhar, o doc fica incompleto → apaga + reverte pra MONTAGEM
+    # (Mario retenta e recria limpo). Por isso o token só é PERSISTIDO depois de
+    # todos entrarem — assim o retry não acha um doc parcial e o marca pronto.
+    try:
+        for extra in signers_extra:
+            await zapsign.add_signer(doc_token, _payload_add_signer(extra))
+    except Exception as exc:  # noqa: BLE001 — add-signer parcial não pode "vazar"
+        logger.exception(
+            "add-signer falhou (contrato=%s, doc=%s): %s",
+            contrato_id, doc_token, exc,
+        )
+        with contextlib.suppress(Exception):
+            await zapsign.delete_doc(doc_token)
+        transicao_contrato(
+            conn, contrato_id, EstadoContrato.MONTAGEM,
+            motivo=f"falha no add-signer: {type(exc).__name__}", ator="sistema",
+        )
+        return {"status": "erro_zapsign", "contrato_id": contrato_id,
+                "detalhe": f"add_signer_{type(exc).__name__}"}
 
     signers = resp.get("signers") or []
     signer = signers[0] if signers else {}

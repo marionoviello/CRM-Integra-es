@@ -77,6 +77,8 @@ class FakeZapSign:
         self.resend_calls: list[str] = []
         self.refuse_calls: list[tuple] = []
         self.get_doc_calls: list[str] = []
+        self.add_signer_calls: list[tuple] = []
+        self.delete_calls: list[str] = []
 
     async def create_doc_from_template(self, corpo):
         self.create_calls.append(corpo)
@@ -84,6 +86,13 @@ class FakeZapSign:
             "token": self.doc_token,
             "signers": [{"token": "sg", "sign_url": self.sign_url}],
         }
+
+    async def add_signer(self, doc_token, signer):
+        self.add_signer_calls.append((doc_token, signer))
+        return {"token": "added", "name": signer.get("name")}
+
+    async def delete_doc(self, doc_token):
+        self.delete_calls.append(doc_token)
 
     async def get_doc(self, doc_token):
         self.get_doc_calls.append(doc_token)

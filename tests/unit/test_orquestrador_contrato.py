@@ -149,6 +149,8 @@ class FakeZapSign:
         self.create_calls: list[dict] = []
         self.resend_calls: list[str] = []
         self.refuse_calls: list[tuple] = []
+        self.add_signer_calls: list[tuple] = []
+        self.delete_calls: list[str] = []
 
     async def create_doc_from_template(self, corpo):
         self.create_calls.append(corpo)
@@ -156,6 +158,13 @@ class FakeZapSign:
             "token": self.doc_token,
             "signers": [{"token": "sg", "sign_url": self.sign_url}],
         }
+
+    async def add_signer(self, doc_token, signer):
+        self.add_signer_calls.append((doc_token, signer))
+        return {"token": "added", "name": signer.get("name")}
+
+    async def delete_doc(self, doc_token):
+        self.delete_calls.append(doc_token)
 
     async def resend_notifications_bulk(self, doc_token):
         if self.slow:
@@ -237,12 +246,37 @@ async def test_send_automatic_email_false():
     corpo = zap.create_calls[0]
     assert corpo["send_automatic_email"] is False
     assert corpo["signature_order_active"] is True
-    # cliente é o order_group 1 (Contratante) + signers_extra
-    assert corpo["signers"][0]["order_group"] == 1
-    assert corpo["signers"][0]["qualification"] == "Contratante"
+    # cliente é o signatário PRIMÁRIO (signer_name) — assina 1º; extras entram
+    # via add-signer (ordem de adição = ordem de assinatura).
+    assert corpo["signer_name"]
+    assert "signers" not in corpo   # NÃO manda array signers (a API ignora)
+    assert zap.add_signer_calls     # escritório + testemunhas via add-signer
     # o LINK_PAGAMENTO (invoiceUrl) entra no data[]
     pares = {d["de"]: d["para"] for d in corpo["data"]}
     assert pares["{{LINK_PAGAMENTO}}"] == "https://asaas.com/i/fake"
+    conn.close()
+
+
+@pytest.mark.asyncio
+async def test_multi_signatario_primario_mais_add_signer_em_ordem():
+    """create-doc-from-template registra SÓ o cliente (signer_name, primário).
+    Escritório + testemunhas entram via add-signer DEPOIS, no mesmo doc e NA
+    ORDEM (= ordem de assinatura). O corpo NÃO manda array `signers` (a API
+    ignora). É o fix do bug do multi-signatário (diagnóstico 18/jun)."""
+    conn = _db()
+    asaas, zap = FakeAsaas(), FakeZapSign()
+
+    await _gerar(conn, asaas, zap)
+
+    # 1 create-doc, com o cliente primário e SEM array signers.
+    assert len(zap.create_calls) == 1
+    assert "signers" not in zap.create_calls[0]
+    assert zap.create_calls[0]["signer_name"]
+    # 1 add-signer por extra, todos no doc criado, na ordem dos signers_extra.
+    assert len(zap.add_signer_calls) == len(SIGNERS_EXTRA)
+    assert all(tok == "doc_fake" for tok, _ in zap.add_signer_calls)
+    assert [p["name"] for _, p in zap.add_signer_calls] == \
+        [s["name"] for s in SIGNERS_EXTRA]
     conn.close()
 
 
@@ -418,21 +452,23 @@ async def test_escopo_realmente_cadastrado():
 
 @pytest.mark.asyncio
 async def test_invariante_signer_send_automatic_email_false():
-    """INVARIANTE (1): no create-doc silencioso, send_automatic_email=False em
-    TODOS os signers — inclusive o cliente (order_group 1, COM email), que via
-    montar_signer viria True e vazaria o e-mail de assinatura antes da
-    aprovação."""
+    """INVARIANTE (1): silêncio total até a aprovação. O create-doc tem
+    send_automatic_email=False no GLOBAL (cobre o cliente, que é o signatário
+    PRIMÁRIO via signer_name), e CADA add-signer (escritório + testemunhas) entra
+    com send_automatic_email=False. Sem isso, o link de assinatura vazaria antes
+    da aprovação."""
     conn = _db()
     asaas, zap = FakeAsaas(), FakeZapSign()
 
     await _gerar(conn, asaas, zap)
 
     corpo = zap.create_calls[0]
-    # TODOS os signers em silêncio (defesa em profundidade)
-    assert all(s["send_automatic_email"] is False for s in corpo["signers"])
-    # especificamente o cliente (com email) — o gap fechado
-    assert corpo["signers"][0]["send_automatic_email"] is False
-    assert corpo["signers"][0]["email"] == "fulano@exemplo.com"   # email preservado
+    # Global = silêncio (cobre o cliente, primário via signer_name).
+    assert corpo["send_automatic_email"] is False
+    assert corpo["signer_email"] == "fulano@exemplo.com"   # email do cliente preservado
+    # Cada add-signer (escritório + testemunhas) também em silêncio.
+    assert zap.add_signer_calls, "deve adicionar os signatários extras"
+    assert all(p["send_automatic_email"] is False for _, p in zap.add_signer_calls)
     conn.close()
 
 
@@ -594,6 +630,9 @@ async def test_retry_apos_erro_zapsign_reusa_cobranca():
         def __init__(self):
             self.create_calls: list[dict] = []
             self.falhar = True
+
+        async def add_signer(self, doc_token, signer):
+            return {"token": "added"}
 
         async def create_doc_from_template(self, corpo):
             self.create_calls.append(corpo)

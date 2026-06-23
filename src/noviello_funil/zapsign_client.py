@@ -73,6 +73,41 @@ class ZapSignClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def add_signer(
+        self, doc_token: str, signer: dict[str, Any],
+    ) -> dict[str, Any]:
+        """POST /docs/{token}/add-signer/ — adiciona um signatário a um doc já
+        criado.
+
+        O create-doc-from-template só registra o signatário PRIMÁRIO
+        (``signer_name``); escritório + testemunhas entram por aqui, na ORDEM de
+        adição (= ordem de assinatura quando ``signature_order_active`` está
+        ligado no doc). SEM with_retry: POST não-idempotente — re-tentar cego
+        adicionaria o mesmo signatário 2x.
+        """
+        resp = await self._client.post(
+            f"{self._base_url}/docs/{doc_token}/add-signer/", json=signer,
+        )
+        if resp.status_code >= 400:
+            logger.error(
+                "zapsign add-signer falhou status=%d doc=%s",
+                resp.status_code, doc_token,
+            )
+            logger.debug("zapsign add-signer resp_body=%r", resp.text[:300])
+        resp.raise_for_status()
+        return resp.json()
+
+    async def delete_doc(self, doc_token: str) -> None:
+        """DELETE /docs/{token}/ — apaga um doc. Usado pra limpar um doc parcial
+        quando um add-signer falha no meio (doc incompleto → recria limpo no
+        retry). Best-effort: falha aqui só loga (warning)."""
+        resp = await self._client.delete(f"{self._base_url}/docs/{doc_token}/")
+        if resp.status_code >= 400:
+            logger.warning(
+                "zapsign delete-doc status=%d doc=%s",
+                resp.status_code, doc_token,
+            )
+
     async def create_doc_from_pdf(
         self, corpo: dict[str, Any],
     ) -> dict[str, Any]:
