@@ -24,6 +24,35 @@ VALID_ACOES = frozenset({
     "cancelar_reuniao",
 })
 
+# JSON Schema do Decisao para STRUCTURED OUTPUTS (output_config.format).
+# Garante, na API, que a resposta é JSON válido com `acao` no enum e
+# `mensagem` presente — elimina a classe de falha de JSON malformado (que
+# deixava o lead mudo) e o retry. Os campos opcionais entram como nullable
+# (o modelo emite null quando não se aplicam). A regra de mensagem não-vazia
+# fica no parse_decisao (structured outputs não suporta minLength).
+DECISAO_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "acao", "mensagem", "resumo_caso", "motivo_handoff",
+        "horario_escolhido_iso", "lead_email",
+    ],
+    "properties": {
+        "acao": {
+            "type": "string",
+            "enum": [
+                "responder", "propor", "handoff", "oferecer_horarios",
+                "confirmar_horario", "remarcar_reuniao", "cancelar_reuniao",
+            ],
+        },
+        "mensagem": {"type": "string"},
+        "resumo_caso": {"type": ["string", "null"]},
+        "motivo_handoff": {"type": ["string", "null"]},
+        "horario_escolhido_iso": {"type": ["string", "null"]},
+        "lead_email": {"type": ["string", "null"]},
+    },
+}
+
 
 @dataclass
 class Decisao:
@@ -139,6 +168,31 @@ def _build_system(skill_content: str) -> list[dict[str, Any]]:
     ]
 
 
+def _contexto_temporal() -> str:
+    """Âncora de data/hora pro modelo gerar ISO de horário com a data certa
+    (sem isto ele chuta ano/dia em remarcações e virada de ano)."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    agora = datetime.now(ZoneInfo("America/Sao_Paulo"))
+    return (
+        f"CONTEXTO TEMPORAL: agora é {agora.strftime('%Y-%m-%d %H:%M')} "
+        "(America/Sao_Paulo). Use isto como referência pra qualquer data/horário."
+    )
+
+
+def _primeiro_texto(resp: Any) -> str | None:
+    """Texto do 1º bloco de tipo 'text' da resposta, ou None.
+
+    None quando não há bloco de texto — um refusal de segurança ou truncamento
+    por max_tokens NÃO geram bloco de texto. O caller trata como falha
+    explícita, em vez de estourar IndexError/AttributeError em silêncio."""
+    for block in getattr(resp, "content", None) or []:
+        if getattr(block, "type", None) == "text":
+            return block.text
+    return None
+
+
 async def triagem(
     *,
     client: Any,
@@ -148,52 +202,35 @@ async def triagem(
 ) -> Decisao:
     """Send the conversation to Claude and parse a Decisao.
 
-    Retries once on invalid JSON with a stricter instruction.
+    Usa structured outputs (output_config.format): o Opus 4.8 garante JSON
+    válido conforme DECISAO_SCHEMA, então não há mais retry nem a classe de
+    falha de JSON malformado (que deixava o lead mudo). parse_decisao valida a
+    2ª linha — mensagem não-vazia, que o schema não cobre.
     """
     user_text = (
+        f"{_contexto_temporal()}\n\n"
         "Abaixo está a transcrição completa da conversa atual com o lead. "
-        "Decida a próxima ação seguindo as regras da skill e responda APENAS "
-        "com o objeto JSON especificado, sem texto fora dele.\n\n"
+        "Decida a próxima ação seguindo as regras da skill.\n\n"
         "=== TRANSCRIÇÃO ===\n"
         f"{conversation_transcript}"
     )
 
-    first = await client.messages.create(
+    resp = await client.messages.create(
         model=model,
         max_tokens=1024,
         system=_build_system(skill_content),
         messages=[{"role": "user", "content": user_text}],
+        output_config={
+            "format": {"type": "json_schema", "schema": DECISAO_SCHEMA},
+        },
     )
-    raw = first.content[0].text
-
-    try:
-        return parse_decisao(raw)
-    except DecisaoInvalida:
-        pass
-
-    retry_text = (
-        "Sua resposta anterior não foi JSON válido. Responda AGORA apenas com "
-        "o objeto JSON especificado, sem texto antes ou depois, sem markdown."
-    )
-    second = await client.messages.create(
-        model=model,
-        max_tokens=1024,
-        system=_build_system(skill_content),
-        messages=[
-            {"role": "user", "content": user_text},
-            {"role": "assistant", "content": raw},
-            {"role": "user", "content": retry_text},
-        ],
-    )
-    second_raw = second.content[0].text
-    try:
-        return parse_decisao(second_raw)
-    except DecisaoInvalida as exc:
-        # Enrich the error with both raw responses so prod debugging
-        # doesn't require log archaeology.
+    texto = _primeiro_texto(resp)
+    if texto is None:
+        stop = getattr(resp, "stop_reason", None)
         raise DecisaoInvalida(
-            f"after retry: {exc}; first_raw={raw!r}; second_raw={second_raw!r}"
-        ) from exc
+            f"triagem: resposta sem bloco de texto (stop_reason={stop})"
+        )
+    return parse_decisao(texto)
 
 
 async def gerar_followup_msg(
@@ -224,4 +261,7 @@ async def gerar_followup_msg(
         system=_build_system(skill_content),
         messages=[{"role": "user", "content": user_text}],
     )
-    return resp.content[0].text.strip()
+    texto = _primeiro_texto(resp)
+    if texto is None:
+        raise DecisaoInvalida("follow-up: resposta sem bloco de texto (refusal?)")
+    return texto.strip()

@@ -12,6 +12,15 @@ from noviello_funil.brain import (
 )
 
 
+def _text_block(text: str):
+    """Mock de um content block de texto (type='text' + .text), como a API
+    real devolve — o brain agora filtra por block.type == 'text'."""
+    block = MagicMock()
+    block.type = "text"
+    block.text = text
+    return block
+
+
 def test_load_skill_returns_nonempty_string():
     content = load_skill("saude_suplementar")
     assert "Noviello" in content
@@ -86,12 +95,12 @@ def test_parse_decisao_extracts_bare_json_from_prose():
 async def test_triagem_returns_decision_on_first_call():
     fake_client = MagicMock()
     fake_response = MagicMock()
-    fake_response.content = [MagicMock(text='{"acao":"responder","mensagem":"ok"}')]
+    fake_response.content = [_text_block('{"acao":"responder","mensagem":"ok"}')]
     fake_client.messages.create = AsyncMock(return_value=fake_response)
 
     decisao = await triagem(
         client=fake_client,
-        model="claude-sonnet-4-5",
+        model="claude-opus-4-8",
         skill_content="SKILL",
         conversation_transcript="Lead: oi",
     )
@@ -102,41 +111,46 @@ async def test_triagem_returns_decision_on_first_call():
 
 
 @pytest.mark.asyncio
-async def test_triagem_retries_once_on_invalid_json():
+async def test_triagem_usa_structured_outputs_sem_retry():
+    """A triagem manda output_config.format com o schema do Decisao e faz UMA
+    chamada só (o antigo retry de JSON inválido foi removido — a API garante
+    o JSON)."""
     fake_client = MagicMock()
-    bad_resp = MagicMock()
-    bad_resp.content = [MagicMock(text="not json")]
-    good_resp = MagicMock()
-    good_resp.content = [MagicMock(text='{"acao":"responder","mensagem":"ok"}')]
-    fake_client.messages.create = AsyncMock(side_effect=[bad_resp, good_resp])
+    fake_response = MagicMock()
+    fake_response.content = [_text_block('{"acao":"responder","mensagem":"ok"}')]
+    fake_client.messages.create = AsyncMock(return_value=fake_response)
 
-    decisao = await triagem(
+    await triagem(
         client=fake_client,
-        model="claude-sonnet-4-5",
+        model="claude-opus-4-8",
         skill_content="SKILL",
         conversation_transcript="Lead: oi",
     )
 
-    assert decisao.acao == "responder"
-    assert fake_client.messages.create.call_count == 2
+    fake_client.messages.create.assert_called_once()
+    fmt = fake_client.messages.create.call_args.kwargs["output_config"]["format"]
+    assert fmt["type"] == "json_schema"
+    assert "acao" in fmt["schema"]["properties"]
+    assert "responder" in fmt["schema"]["properties"]["acao"]["enum"]
 
 
 @pytest.mark.asyncio
-async def test_triagem_gives_up_after_second_invalid():
+async def test_triagem_sem_bloco_de_texto_raises():
+    """Refusal / truncamento por max_tokens → resposta sem bloco de texto →
+    DecisaoInvalida (caminho que avisa o Mario), nunca IndexError mudo."""
     fake_client = MagicMock()
-    bad_resp = MagicMock()
-    bad_resp.content = [MagicMock(text="not json")]
-    fake_client.messages.create = AsyncMock(return_value=bad_resp)
+    fake_response = MagicMock()
+    fake_response.content = []          # sem bloco de texto
+    fake_response.stop_reason = "refusal"
+    fake_client.messages.create = AsyncMock(return_value=fake_response)
 
     with pytest.raises(DecisaoInvalida):
         await triagem(
             client=fake_client,
-            model="claude-sonnet-4-5",
+            model="claude-opus-4-8",
             skill_content="SKILL",
             conversation_transcript="Lead: oi",
         )
-
-    assert fake_client.messages.create.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -145,7 +159,7 @@ async def test_followup_message_returns_text():
 
     fake_client = MagicMock()
     fake_response = MagicMock()
-    fake_response.content = [MagicMock(text="Oi Maria, retomando nosso papo...")]
+    fake_response.content = [_text_block("Oi Maria, retomando nosso papo...")]
     fake_client.messages.create = AsyncMock(return_value=fake_response)
 
     text = await gerar_followup_msg(
