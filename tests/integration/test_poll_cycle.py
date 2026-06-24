@@ -1688,6 +1688,95 @@ async def test_fu_proprio_nao_reativa_lead(db_conn):
     assert lead["ultimo_transcript_hash"] != "stale"
 
 
+# --- Auditoria 2026-06-24: re-engaje de AGUARDANDO_HUMANO (P1) --------------
+
+def _insert_transicao_ah(conn, lead_id, motivo):
+    """Registra uma transição para AGUARDANDO_HUMANO com um motivo (define se o
+    lead pode reabrir quando volta a falar)."""
+    conn.execute(
+        "INSERT INTO transicoes (lead_id, estado_novo, motivo) VALUES (?, ?, ?)",
+        (lead_id, Estado.AGUARDANDO_HUMANO, motivo),
+    )
+
+
+@pytest.mark.asyncio
+async def test_aguardando_humano_reabre_em_motivo_reabrivel(db_conn):
+    """P1 (24/jun): lead em AGUARDANDO_HUMANO por motivo REABRÍVEL (ex:
+    max_turnos) que volta a falar é reaberto pro bot + Mario re-alertado — em
+    vez de virar vácuo (bot é o único atendimento)."""
+    transcript = (
+        "Atendente: vou te conectar com a equipe\n"
+        "Lead: opa, mudei de ideia, quero marcar mesmo!"
+    )
+    _insert_lead_estado(
+        db_conn, Estado.AGUARDANDO_HUMANO, hash_="stale", turnos=20,
+    )
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    _insert_transicao_ah(db_conn, lead["id"], "max_turnos")
+
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = AsyncMock(
+        return_value=Decisao(acao="responder", mensagem="Que bom que voltou!")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA   # reaberto
+    assert lead["turnos"] in (0, 1)               # teto zerado (e talvez +1 bump)
+    destinos = [c.args[0] for c in jurichat.send_message.await_args_list]
+    assert "mario-conv" in destinos               # Mario re-alertado
+
+
+@pytest.mark.asyncio
+async def test_aguardando_humano_fica_mudo_em_motivo_terminal(db_conn):
+    """Lead em AGUARDANDO_HUMANO por motivo TERMINAL (ex: opt_out) que volta a
+    falar NÃO é reaberto — fica mudo de propósito (respeita o pedido de parar /
+    o humano que assumiu)."""
+    transcript = "Atendente: ok, não te mando mais\nLead: na verdade me manda sim"
+    _insert_lead_estado(db_conn, Estado.AGUARDANDO_HUMANO, hash_="stale")
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    _insert_transicao_ah(db_conn, lead["id"], "opt_out")
+
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = AsyncMock(side_effect=AssertionError("terminal não reabre"))
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.AGUARDANDO_HUMANO   # NÃO reabriu
+    assert lead["ultimo_transcript_hash"] == _sha(transcript)  # só registrou hash
+    jurichat.send_message.assert_not_called()           # mudo
+
+
+@pytest.mark.asyncio
+async def test_aguardando_humano_ultima_linha_atendente_nao_reabre(db_conn):
+    """Mesmo com motivo reabrível, se a última linha é Atendente: (humano
+    respondeu pelo painel) o bot NÃO reabre por cima — só registra o hash."""
+    transcript = "Lead: ainda dá pra agendar?\nAtendente: já te respondo!"
+    _insert_lead_estado(db_conn, Estado.AGUARDANDO_HUMANO, hash_="stale")
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    _insert_transicao_ah(db_conn, lead["id"], "max_turnos")  # reabrível, mas...
+
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = AsyncMock(side_effect=AssertionError("última linha atendente"))
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.AGUARDANDO_HUMANO   # não reabriu
+    assert lead["ultimo_transcript_hash"] == _sha(transcript)
+
+
 # --- 1.12 escalonamento de urgência jurídica --------------------------------
 
 @pytest.mark.asyncio

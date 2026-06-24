@@ -489,6 +489,37 @@ def list_leads_para_reativacao(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def list_leads_aguardando_humano(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Leads em AGUARDANDO_HUMANO — candidatos a RE-ENGAJE (P1 auditoria 24/jun).
+
+    Antes AGUARDANDO_HUMANO era um buraco negro: o bot (único atendimento) nunca
+    mais tocava o lead. Agora a FASE 0 do poll varre esses leads; se o lead manda
+    mensagem nova, o bot reabre — exceto motivos terminais (opt-out, humano
+    assumiu, etc.), checados via ``ultimo_motivo_transicao``."""
+    return conn.execute(
+        """
+        SELECT * FROM leads
+        WHERE estado = ?
+        ORDER BY atualizado_em ASC
+        """,
+        (Estado.AGUARDANDO_HUMANO,),
+    ).fetchall()
+
+
+def ultimo_motivo_transicao(
+    conn: sqlite3.Connection, lead_id: int,
+) -> str | None:
+    """Motivo da transição MAIS RECENTE do lead (None se não houver).
+
+    Usado pra decidir se um lead em AGUARDANDO_HUMANO pode reabrir quando volta a
+    falar — motivos terminais (opt_out, humano_assumiu_conversa) nunca reabrem."""
+    row = conn.execute(
+        "SELECT motivo FROM transicoes WHERE lead_id = ? ORDER BY id DESC LIMIT 1",
+        (lead_id,),
+    ).fetchone()
+    return row["motivo"] if row else None
+
+
 # --- Reuniões agendadas + lembretes -------------------------------------
 
 def set_reuniao(

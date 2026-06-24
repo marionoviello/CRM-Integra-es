@@ -67,6 +67,7 @@ from noviello_funil.state import (
     create_lead_if_absent,
     get_horarios_oferecidos,
     get_lead_by_conversation,
+    list_leads_aguardando_humano,
     list_leads_com_reuniao_futura,
     list_leads_para_polling,
     list_leads_para_reativacao,
@@ -82,6 +83,7 @@ from noviello_funil.state import (
     set_horarios_oferecidos,
     set_reuniao,
     transicao,
+    ultimo_motivo_transicao,
     update_transcript_hash,
 )
 from noviello_funil.urgencia import detectar_urgencia
@@ -850,6 +852,22 @@ EXCLUDED_TAGS_FOR_BOT = frozenset({
     "Desqualificado",
 })
 
+# Motivos de transição para AGUARDANDO_HUMANO que são TERMINAIS — o lead NÃO
+# deve ser reaberto pelo bot mesmo que volte a falar (P1 auditoria 24/jun):
+# pediu pra parar (opt_out), humano assumiu pelo painel (Signal 0), é o canal
+# de alertas, ou não é lead de funil (baseline/filtros). Qualquer outro motivo
+# (max_turnos, claude_handoff/propor, falhas de calendar, atendimento_processo)
+# é REABRÍVEL: bot único → re-engajar é melhor que ghostar.
+_MOTIVOS_AH_TERMINAIS = frozenset({
+    "opt_out",
+    "humano_assumiu_conversa",
+    "canal_alertas_mario",
+    "baseline_first_sync",
+    "filtro_tem_responsavel",
+    "filtro_tag_exclusao",
+    "excluido_followup_etiqueta",
+})
+
 
 async def sync_jurichat_conversations(
     *,
@@ -1101,6 +1119,70 @@ async def run_poll_cycle(
         # capar o lead reativado na 1a mensagem nova.
         reset_turnos(conn, lead["id"])
         schedule_next_action_seconds(conn, lead["id"], 0)
+
+    # FASE 0.5 — RE-ENGAJE de AGUARDANDO_HUMANO (P1 auditoria 24/jun): o estado
+    # era um buraco negro (bot é o ÚNICO atendimento → "handoff" virava "vácuo").
+    # Se o lead em espera manda mensagem NOVA, reabre pro bot retomar + re-alerta
+    # o Mario — EXCETO motivos terminais (opt-out, humano assumiu, não-lead).
+    for lead in list_leads_aguardando_humano(conn):
+        conv_id_ah = lead["jurichat_conversation_id"]
+        if conv_id_ah in canais_alertas:
+            continue
+        try:
+            conv = await jurichat.get_conversation(conv_id_ah)
+        except Exception as exc:
+            logger.warning(
+                "re-engaje AH: get_conversation falhou lead=%s: %s",
+                lead["id"], exc,
+            )
+            continue
+        transcript = conv.get("transcription", "") or ""
+        new_hash = _compute_hash(transcript)
+        if new_hash == lead["ultimo_transcript_hash"]:
+            continue
+        if _last_line_from_atendente(transcript):
+            # Mudança veio do nosso lado (ou do humano que assumiu) — registra o
+            # hash pra não re-checar, sem reabrir.
+            update_transcript_hash(conn, lead["id"], new_hash)
+            continue
+        motivo_ah = ultimo_motivo_transicao(conn, lead["id"])
+        if motivo_ah in _MOTIVOS_AH_TERMINAIS:
+            # opt-out / humano assumiu / não-lead → fica mudo de propósito.
+            update_transcript_hash(conn, lead["id"], new_hash)
+            continue
+        # Motivo reabrível → reabre pro bot + re-alerta o Mario. NÃO atualiza o
+        # hash: o tick de polling seguinte faz a triagem da mensagem nova
+        # (espelha a FASE 0 de reativação de FU/encerrado).
+        logger.info(
+            "lead=%s em AGUARDANDO_HUMANO respondeu (motivo=%s) — reabrindo",
+            lead["id"], motivo_ah,
+        )
+        mark_lead_activity_now(conn, lead["id"])
+        clear_horarios_oferecidos(conn, lead["id"])
+        transicao(
+            conn, lead["id"], Estado.EM_CONVERSA,
+            motivo="lead_respondeu_em_espera",
+        )
+        reset_turnos(conn, lead["id"])
+        schedule_next_action_seconds(conn, lead["id"], 0)
+        try:
+            await notify_mario(
+                jurichat,
+                mario_conversation_id=mario_conversation_id,
+                mensagem=(
+                    f"🔔 *Lead em espera voltou a falar*\n\n"
+                    f"Lead: {lead['contato_nome']}\n"
+                    f"Tel: {lead['contato_telefone']}\n\n"
+                    f"Última: {_last_lead_message(transcript)}\n\n"
+                    f"Estava em espera humana ({motivo_ah}). "
+                    f"Reabri pro bot retomar — assuma se preferir."
+                ),
+            )
+        except Exception as exc:
+            logger.exception(
+                "notify_mario(lead_voltou_espera) falhou lead=%s: %s",
+                lead["id"], exc,
+            )
 
     leads = list_leads_para_polling(conn)
     logger.info("poll tick: %d leads em_conversa due", len(leads))

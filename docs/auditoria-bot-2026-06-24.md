@@ -11,9 +11,9 @@ Status: `[ ]` aberto · `[x]` corrigido + deployado.
 
 ## Frente A — Leads perdidos (máquina de estados)  ⟵ COMEÇAR AQUI
 
-- [ ] **P0** Teto de turnos conta `Lead:` do transcript VITALÍCIO (`_count_lead_lines`) e nunca reseta → lead engajado (≥20 msgs) que volta semanas depois ("mudei de ideia, quero marcar") é jogado pra `aguardando_humano` SEM o bot ler a mensagem. Neutraliza a reativação justo no lead de maior intenção. `scheduler.py:1462`. **Fix:** contar só `Lead:` após a última `Atendente:` de fechamento, OU ativar a coluna `turnos` (hoje código morto) com reset na reativação.
-- [ ] **P1** `AGUARDANDO_HUMANO` é buraco negro: lead entra e nunca mais é tocado (nem reativa, nem alerta). Sem atendente humano, "handoff" vira "ninguém responde". `scheduler.py` + `state.py:621,458,407`. **Fix:** fase de reativação p/ AH por motivo (opt_out/canal = mudo; propor/handoff/max_turnos/calendar = reabre ou re-alerta Mario).
-- [ ] **P1** Reativação (FASE 0) ignora `AGUARDANDO_HUMANO` mesmo só pra alertar → lead quentíssimo ("fechou, manda o contrato") após handoff não gera sinal nenhum. `scheduler.py:1070`. (mesma raiz da anterior)
+- [x] **P0** Teto de turnos conta `Lead:` do transcript VITALÍCIO (`_count_lead_lines`) e nunca reseta → lead engajado (≥20 msgs) que volta semanas depois ("mudei de ideia, quero marcar") é jogado pra `aguardando_humano` SEM o bot ler a mensagem. Neutraliza a reativação justo no lead de maior intenção. `scheduler.py:1462`. **Fix:** contar só `Lead:` após a última `Atendente:` de fechamento, OU ativar a coluna `turnos` (hoje código morto) com reset na reativação.
+- [x] **P1** `AGUARDANDO_HUMANO` é buraco negro: lead entra e nunca mais é tocado (nem reativa, nem alerta). Sem atendente humano, "handoff" vira "ninguém responde". `scheduler.py` + `state.py:621,458,407`. **Fix:** fase de reativação p/ AH por motivo (opt_out/canal = mudo; propor/handoff/max_turnos/calendar = reabre ou re-alerta Mario).
+- [x] **P1** Reativação (FASE 0) ignora `AGUARDANDO_HUMANO` mesmo só pra alertar → lead quentíssimo ("fechou, manda o contrato") após handoff não gera sinal nenhum. `scheduler.py:1070`. (mesma raiz da anterior)
 
 ## Frente B — Cérebro robusto (structured outputs)
 
