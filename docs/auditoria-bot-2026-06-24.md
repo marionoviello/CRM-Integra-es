@@ -17,9 +17,9 @@ Status: `[ ]` aberto · `[x]` corrigido + deployado.
 
 ## Frente B — Cérebro robusto (structured outputs)
 
-- [ ] **P1** Triagem depende de parse de texto + 1 retry; sem structured outputs. JSON malformado nas 2 tentativas = lead MUDO no tick + 2 chamadas Opus desperdiçadas; parser aceita ação com campo faltando. `brain.py:161-196`. **Fix:** migrar p/ tool use (`tool_choice` forçado + `input_schema` por ação), elimina retry e campo-faltando-silencioso.
-- [ ] **P2** `first.content[0].text` sem validar → resposta vazia/refusal vira `IndexError`/`AttributeError` que cai no except genérico (sem retry, sem alerta Mario). `brain.py:167,227`. **Fix:** validar bloco de texto → levantar `DecisaoInvalida` (vai pro caminho que avisa o Mario).
-- [ ] **P2** Claude precisa gerar ISO com ano/data, mas o transcript não tem âncora "hoje é AAAA-MM-DD" e os slots não têm ano. Risco de data errada em remarcação/virada de ano. `brain.py:153` + `calendar_client.py:58`. **Fix:** injetar data/hora atual no `user_text` + cross-validar o ISO contra `get_horarios_oferecidos` no confirmar.
+- [x] **P1** Triagem depende de parse de texto + 1 retry; sem structured outputs. JSON malformado nas 2 tentativas = lead MUDO no tick + 2 chamadas Opus desperdiçadas; parser aceita ação com campo faltando. `brain.py:161-196`. **Fix:** migrar p/ tool use (`tool_choice` forçado + `input_schema` por ação), elimina retry e campo-faltando-silencioso.
+- [x] **P2** `first.content[0].text` sem validar → resposta vazia/refusal vira `IndexError`/`AttributeError` que cai no except genérico (sem retry, sem alerta Mario). `brain.py:167,227`. **Fix:** validar bloco de texto → levantar `DecisaoInvalida` (vai pro caminho que avisa o Mario).
+- [x] **P2** Claude precisa gerar ISO com ano/data, mas o transcript não tem âncora "hoje é AAAA-MM-DD" e os slots não têm ano. Risco de data errada em remarcação/virada de ano. `brain.py:153` + `calendar_client.py:58`. **Fix:** injetar data/hora atual no `user_text` + cross-validar o ISO contra `get_horarios_oferecidos` no confirmar.
 
 ## Frente C — Colisão bot×humano (integração Jurichat)
 
