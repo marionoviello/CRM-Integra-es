@@ -28,6 +28,27 @@ def test_settings_loads_from_env(monkeypatch):
     assert s.anthropic_model.startswith("claude-")
 
 
+def test_modelos_triagem_e_followup_separados():
+    """A triagem (decisão + resposta ao lead) roda no modelo mais capaz; o
+    follow-up automático roda num modelo mais leve. Os dois NÃO podem apontar
+    pro mesmo campo — senão o split de precisão/custo é só decorativo.
+
+    ``_env_file=None`` isola o teste do ``.env`` real (testa os defaults do
+    código, não a config de produção)."""
+    s = Settings(
+        _env_file=None,
+        anthropic_api_key="sk-test",
+        jurichat_api_key="jk-test",
+        jurichat_webhook_secret="whsec-test",
+        notificacao_telefone="5511999999999",
+        mario_conversation_id="C-MARIO",
+        jurichat_inbox_id="inbox-test",
+    )
+    assert s.anthropic_model == "claude-opus-4-8"
+    assert s.anthropic_model_followup == "claude-sonnet-4-6"
+    assert s.anthropic_model != s.anthropic_model_followup
+
+
 def test_settings_missing_required_fails(monkeypatch):
     for var in [
         "ANTHROPIC_API_KEY",

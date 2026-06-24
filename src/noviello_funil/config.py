@@ -18,7 +18,12 @@ class Settings(BaseSettings):
 
     # External APIs
     anthropic_api_key: str
-    anthropic_model: str = "claude-sonnet-4-5"
+    # Modelo da TRIAGEM (decisão + resposta ao lead): o mais capaz, pra máxima
+    # precisão no atendimento — é o único atendimento do escritório.
+    anthropic_model: str = "claude-opus-4-8"
+    # Modelo dos FOLLOW-UPs automáticos (mensagens de retomada): mais leve/barato,
+    # a tarefa é mais simples que a triagem.
+    anthropic_model_followup: str = "claude-sonnet-4-6"
     jurichat_api_key: str
     jurichat_webhook_secret: str
     jurichat_base_url: str = "https://api.jurichat.com"

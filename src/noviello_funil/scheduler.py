@@ -2262,7 +2262,7 @@ def main() -> int:
     bound_followup = partial(
         gen,
         client=anthropic_client,
-        model=settings.anthropic_model,
+        model=settings.anthropic_model_followup,
         skill_content=skill,
     )
     bound_triagem = partial(
