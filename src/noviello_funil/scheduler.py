@@ -61,6 +61,7 @@ from noviello_funil.person_index import resolver_telefone
 from noviello_funil.state import (
     CLEAR_PROXIMA_ACAO,
     Estado,
+    bump_turnos,
     clear_horarios_oferecidos,
     clear_reuniao,
     create_lead_if_absent,
@@ -76,6 +77,7 @@ from noviello_funil.state import (
     mark_lembrete_enviado,
     mark_urgencia_alertada,
     register_error,
+    reset_turnos,
     schedule_next_action_seconds,
     set_horarios_oferecidos,
     set_reuniao,
@@ -167,13 +169,6 @@ def is_eligible_for_followup(tags: list[str]) -> bool:
 def _compute_hash(transcript: str) -> str:
     """sha256 hex of the transcript bytes."""
     return hashlib.sha256(transcript.encode("utf-8")).hexdigest()
-
-
-def _count_lead_lines(transcript: str) -> int:
-    """Number of lines starting with ``Lead:`` (whitespace tolerated)."""
-    return sum(
-        1 for line in transcript.splitlines() if line.lstrip().startswith("Lead:")
-    )
 
 
 def _last_line_from_atendente(transcript: str) -> bool:
@@ -1102,6 +1097,9 @@ async def run_poll_cycle(
             conn, lead["id"], Estado.EM_CONVERSA,
             motivo="lead_respondeu_reativacao",
         )
+        # P0 (auditoria 24/jun): zera o teto — o histórico vitalício não pode
+        # capar o lead reativado na 1a mensagem nova.
+        reset_turnos(conn, lead["id"])
         schedule_next_action_seconds(conn, lead["id"], 0)
 
     leads = list_leads_para_polling(conn)
@@ -1458,8 +1456,10 @@ async def run_poll_cycle(
                     )
                     continue
 
-        # Signal 2: turn cap reached → hand off to Mario.
-        if _count_lead_lines(transcript) >= max_turnos:
+        # Signal 2: turn cap reached → hand off to Mario. Conta a coluna
+        # `turnos` (zerada na reativação), NÃO o histórico vitalício de linhas
+        # `Lead:` — senão o lead que volta é capado na 1a msg nova (P0 24/jun).
+        if lead["turnos"] >= max_turnos:
             clear_horarios_oferecidos(conn, lead_id)  # S6 (16/jun)
             # G4 (2026-06-16): avisa o lead antes do handoff por teto de turnos
             # — antes sumia em silêncio (causa do vácuo no caso Daniel).
@@ -1533,6 +1533,11 @@ async def run_poll_cycle(
             register_error(conn, lead_id, "triagem_unexpected_error")
             schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
             continue
+
+        # P0 (auditoria 24/jun): cada triagem bem-sucedida conta um turno. É o
+        # que alimenta o teto de forma RESETÁVEL na reativação (antes contava
+        # `Lead:` do transcript vitalício e capava o lead que voltava).
+        bump_turnos(conn, lead_id)
 
         # Dispatch on Claude's decision.
         if decisao.acao == "responder":

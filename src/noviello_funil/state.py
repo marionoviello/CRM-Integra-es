@@ -217,6 +217,16 @@ def bump_turnos(conn: sqlite3.Connection, lead_id: int) -> None:
     )
 
 
+def reset_turnos(conn: sqlite3.Connection, lead_id: int) -> None:
+    """Zera o contador de turnos. Usado na reativação de um lead — o teto de
+    turnos mede a conversa ATIVA, não o histórico vitalício (P0 24/jun)."""
+    conn.execute(
+        "UPDATE leads SET turnos = 0, atualizado_em = datetime('now') "
+        "WHERE id = ?",
+        (lead_id,),
+    )
+
+
 def record_lead_message_received(
     conn: sqlite3.Connection,
     lead_id: int,

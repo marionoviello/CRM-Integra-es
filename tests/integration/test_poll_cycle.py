@@ -44,6 +44,7 @@ def _insert_lead_due_for_poll(
     conversation_id: str = "C-1",
     transcript_hash: str | None = None,
     ultima_msg_lead_em: str | None = None,
+    turnos: int = 0,
 ):
     """Insert an em_conversa lead with proxima_acao_em in the past."""
     past = (
@@ -53,11 +54,12 @@ def _insert_lead_due_for_poll(
         """INSERT INTO leads
            (jurichat_lead_id, jurichat_conversation_id, contato_telefone,
             contato_nome, estado, proxima_acao_em, ultimo_transcript_hash,
-            ultima_msg_lead_em)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            ultima_msg_lead_em, turnos)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             jurichat_lead_id, conversation_id, "5511999999999", "Maria",
             Estado.EM_CONVERSA, past, transcript_hash, ultima_msg_lead_em,
+            turnos,
         ),
     )
 
@@ -311,10 +313,11 @@ async def test_outbound_multiline_last_message_does_not_reinvoke_claude(
 
 @pytest.mark.asyncio
 async def test_max_turnos_reached_notifies_and_handoff(db_conn):
-    # 20 Lead: lines triggers cap when max_turnos = 20.
-    lines = [f"Lead: msg {i}" for i in range(20)]
-    transcript = "\n".join(lines)
-    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+    # P0 (24/jun): o teto agora conta a coluna `turnos` (resetável na
+    # reativação), não o histórico vitalício de linhas `Lead:`. turnos >=
+    # max_turnos dispara o handoff.
+    transcript = "Lead: ainda estou pensando\nLead: me ajuda a decidir?"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale", turnos=20)
 
     jurichat = _make_jurichat(transcript)
     triagem_fn = AsyncMock(side_effect=AssertionError("must not call Claude"))
@@ -339,6 +342,86 @@ async def test_max_turnos_reached_notifies_and_handoff(db_conn):
     assert "mario-conv" in destinos   # Mario notificado
     # G4 fix (revisão): abre human-support ANTES do send (senão Jurichat 400).
     jurichat.start_human_support.assert_any_await("C-1")
+
+
+@pytest.mark.asyncio
+async def test_historico_longo_mas_turnos_zerado_nao_e_capado(db_conn):
+    """P0 (auditoria 24/jun): o teto contava `Lead:` do transcript VITALÍCIO,
+    então um lead reativado (turnos=0) com histórico longo (>=20 msgs) era
+    jogado pra humano SEM o bot ler a mensagem nova. Agora o teto conta a
+    coluna `turnos` (zerada na reativação), então ele é atendido normalmente."""
+    transcript = "\n".join(f"Lead: msg {i}" for i in range(25))
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale", turnos=0)
+
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = AsyncMock(
+        return_value=Decisao(acao="responder", mensagem="Claro, vamos lá!")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    triagem_fn.assert_awaited_once()              # o bot LEU a mensagem nova
+    assert lead["estado"] == Estado.EM_CONVERSA   # NÃO foi capado pra humano
+
+
+@pytest.mark.asyncio
+async def test_triagem_incrementa_turnos(db_conn):
+    """Cada triagem bem-sucedida conta um turno (bump_turnos) — é o que
+    alimenta o teto de forma resetável."""
+    transcript = "Lead: oi, tudo bem?"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale", turnos=3)
+
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = AsyncMock(
+        return_value=Decisao(acao="responder", mensagem="Oi! Tudo ótimo.")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["turnos"] == 4   # 3 -> 4 após a triagem
+
+
+@pytest.mark.asyncio
+async def test_reativacao_zera_turnos(db_conn):
+    """Lead que volta (encerrado/FU) com turnos altos é reativado com o teto
+    zerado, pra não bater o teto na 1a mensagem nova (raiz do P0 24/jun)."""
+    transcript = "Lead: oi, voltei! mudei de ideia, quero marcar mesmo"
+    _insert_lead_estado(
+        db_conn, Estado.ENCERRADO_SEM_RESPOSTA, hash_="stale", turnos=19,
+    )
+
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = AsyncMock(
+        return_value=Decisao(acao="responder", mensagem="Que bom que voltou!")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA   # reativado
+    # Zerado na reativação (0); se o mesmo ciclo já reprocessou no polling, a
+    # triagem bumpa pra 1 — qualquer um dos dois confirma o reset (≠ 19).
+    assert lead["turnos"] in (0, 1)
 
 
 @pytest.mark.asyncio
@@ -1521,13 +1604,13 @@ async def test_confirmar_segunda_reuniao_cancela_evento_antigo(db_conn):
 
 # --- Auditoria 2026-06-11: reativação de leads (Grupo A) ------------------
 
-def _insert_lead_estado(conn, estado, *, conv="C-1", hash_=None):
+def _insert_lead_estado(conn, estado, *, conv="C-1", hash_=None, turnos=0):
     conn.execute(
         """INSERT INTO leads
            (jurichat_lead_id, jurichat_conversation_id, contato_telefone,
-            contato_nome, estado, ultimo_transcript_hash)
-           VALUES ('L-1', ?, '5511999999999', 'Maria', ?, ?)""",
-        (conv, estado, hash_),
+            contato_nome, estado, ultimo_transcript_hash, turnos)
+           VALUES ('L-1', ?, '5511999999999', 'Maria', ?, ?, ?)""",
+        (conv, estado, hash_, turnos),
     )
 
 
@@ -2070,7 +2153,7 @@ async def test_terminal_path_limpa_horarios_oferecidos(db_conn, cenario):
     from noviello_funil.state import set_horarios_oferecidos
 
     if cenario == "max_turnos":
-        transcript = "\n".join(f"Lead: msg {i}" for i in range(20))
+        transcript = "Lead: ainda na dúvida\nLead: tem mais alguma opção?"
         triagem_fn = AsyncMock(side_effect=AssertionError("não chama Claude"))
     elif cenario == "handoff":
         transcript = "Lead: preciso falar com um atendente humano"
@@ -2081,7 +2164,10 @@ async def test_terminal_path_limpa_horarios_oferecidos(db_conn, cenario):
         transcript = "Lead: pode parar de me mandar mensagem, por favor"
         triagem_fn = AsyncMock(side_effect=AssertionError("não chama Claude"))
 
-    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+    _insert_lead_due_for_poll(
+        db_conn, transcript_hash="stale",
+        turnos=20 if cenario == "max_turnos" else 0,
+    )
     lead = get_lead_by_conversation(db_conn, "C-1")
     set_horarios_oferecidos(db_conn, lead["id"], [
         {"iso": "2099-06-16T14:00:00-03:00", "label": "ter (16/jun) às 14h"},
