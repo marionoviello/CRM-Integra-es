@@ -23,11 +23,11 @@ Status: `[ ]` aberto · `[x]` corrigido + deployado.
 
 ## Frente C — Colisão bot×humano (integração Jurichat)
 
-- [ ] **P1** `JURICHAT_BOT_USER_ID` default vazio E ausente do `.env.example` → Signal 0 (detecção "humano assumiu") desligado; restore/redeploy reintroduz o estado quebrado silenciosamente. `config.py:204`. **Fix:** add no `.env.example` + WARNING alto/validação no boot.
-- [ ] **P1** Follow-up NÃO checa "humano assumiu" e re-reivindica a conversa via `start_human_support` → FU dispara por cima do humano + rouba a conversa de volta pro bot. `scheduler.py:2131-2171`. **Fix:** aplicar o predicado do Signal 0 antes de enviar FU; passar `bot_user_id` ao `run_followup_cycle`.
+- [x] **P1** `JURICHAT_BOT_USER_ID` default vazio E ausente do `.env.example` → Signal 0 (detecção "humano assumiu") desligado; restore/redeploy reintroduz o estado quebrado silenciosamente. `config.py:204`. **Fix:** add no `.env.example` + WARNING alto/validação no boot.
+- [x] **P1** Follow-up NÃO checa "humano assumiu" e re-reivindica a conversa via `start_human_support` → FU dispara por cima do humano + rouba a conversa de volta pro bot. `scheduler.py:2131-2171`. **Fix:** aplicar o predicado do Signal 0 antes de enviar FU; passar `bot_user_id` ao `run_followup_cycle`.
 - [ ] **P1** Mensagem do lead que chega entre o fetch e o envio fica órfã: o Signal 1 vê a própria resposta do bot e pula → escolha de horário / email / opt-out nessa janela são ignorados. `scheduler.py:1127-1138,1538-1552`. **Fix:** no Signal 1, NÃO pular se houver `Lead:` após a última `Atendente:`.
 - [ ] **P1** Humano respondendo pelo Jurichat web sem reatribuir não pausa o bot → bot retoma por cima. `scheduler.py:1174-1188`. **Fix:** capturar autor da última OUTBOUND e, se ≠ bot, transicionar pra AH (depende do payload expor senderId — verificar).
-- [ ] **P2** Signal 0 só roda em leads "due" no poll → humano que assume um lead não-due passa na janela. `scheduler.py:1107-1163`. **Fix:** sweep leve de Signal 0 p/ todo EM_CONVERSA (ou follow-up herdar Signal 0).
+- [x] **P2** Signal 0 só roda em leads "due" no poll → (coberto pelo C2: follow-up herda Signal 0) humano que assume um lead não-due passa na janela. `scheduler.py:1107-1163`. **Fix:** sweep leve de Signal 0 p/ todo EM_CONVERSA (ou follow-up herdar Signal 0).
 
 ## Frente D — Durabilidade do agendamento
 

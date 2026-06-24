@@ -99,6 +99,10 @@ async def test_cycle_sends_second_followup_when_in_follow_up_1(db_conn):
 
     fake_jurichat = MagicMock()
     fake_jurichat.get_lead_tags = AsyncMock(return_value=[])
+    # FU1 agora também busca a conversa (Signal 0 do C2, auditoria 24/jun).
+    fake_jurichat.get_conversation = AsyncMock(return_value={
+        "transcription": "Lead: oi (há 2 dias)",
+    })
     fake_jurichat.start_human_support = AsyncMock(return_value={"success": True})
     fake_jurichat.send_message = AsyncMock(return_value={"id": "x"})
 

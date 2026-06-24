@@ -1777,6 +1777,72 @@ async def test_aguardando_humano_ultima_linha_atendente_nao_reabre(db_conn):
     assert lead["ultimo_transcript_hash"] == _sha(transcript)
 
 
+# --- Auditoria 2026-06-24: follow-up herda o Signal 0 (C2) -----------------
+
+def _insert_lead_vencido_em_conversa(conn, *, conv="C-1"):
+    """EM_CONVERSA sem atividade há 72h → vencido pro follow-up."""
+    velho = (
+        datetime.datetime.utcnow() - datetime.timedelta(hours=72)
+    ).strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        """INSERT INTO leads
+           (jurichat_lead_id, jurichat_conversation_id, contato_telefone,
+            contato_nome, estado, ultima_msg_lead_em)
+           VALUES ('L-1', ?, '5511999999999', 'Maria', ?, ?)""",
+        (conv, Estado.EM_CONVERSA, velho),
+    )
+
+
+def _jurichat_followup(conv_user_id=None):
+    j = MagicMock()
+    j.get_lead_tags = AsyncMock(return_value=[])
+    payload = {"transcription": "Lead: oi"}
+    if conv_user_id is not None:
+        payload["user"] = {"id": conv_user_id, "name": "X"}
+    j.get_conversation = AsyncMock(return_value=payload)
+    j.start_human_support = AsyncMock()
+    j.send_message = AsyncMock()
+    return j
+
+
+@pytest.mark.asyncio
+async def test_followup_nao_dispara_quando_humano_assumiu(db_conn):
+    """C2: humano assumiu a conversa pelo painel (conv.user != bot_user_id) → o
+    follow-up pausa pra AGUARDANDO_HUMANO em vez de disparar FU por cima."""
+    _insert_lead_vencido_em_conversa(db_conn)
+    jurichat = _jurichat_followup(conv_user_id="humano-456")
+    gerar = AsyncMock(side_effect=AssertionError("não deve gerar FU"))
+
+    await run_followup_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, gerar_followup_msg=gerar,
+        followup_2_apos_horas=72, encerramento_apos_horas=24,
+        followup_1_apos_horas=48, bot_user_id="bot-123",
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.AGUARDANDO_HUMANO
+    jurichat.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_followup_dispara_quando_bot_e_responsavel(db_conn):
+    """Quando o responsável é o próprio bot, o follow-up dispara normalmente
+    (o guard do C2 não bloqueia à toa)."""
+    _insert_lead_vencido_em_conversa(db_conn)
+    jurichat = _jurichat_followup(conv_user_id="bot-123")
+    gerar = AsyncMock(return_value="Oi Maria, retomando nosso papo!")
+
+    await run_followup_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, gerar_followup_msg=gerar,
+        followup_2_apos_horas=72, encerramento_apos_horas=24,
+        followup_1_apos_horas=48, bot_user_id="bot-123",
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.FOLLOW_UP_1_ENVIADO
+    jurichat.send_message.assert_awaited()
+
+
 # --- 1.12 escalonamento de urgência jurídica --------------------------------
 
 @pytest.mark.asyncio

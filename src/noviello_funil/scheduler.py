@@ -2178,6 +2178,17 @@ async def _enviar_lembrete(
         return False
 
 
+def _humano_assumiu_conv(conv: dict[str, Any], bot_user_id: str) -> bool:
+    """True se o responsável ATUAL da conversa não é o bot (humano assumiu pelo
+    painel) — mesmo predicado do Signal 0 do poll cycle. False se bot_user_id
+    vazio (feature desligada) ou sem ``user`` identificável."""
+    if not bot_user_id:
+        return False
+    user = conv.get("user") or {}
+    user_id = user.get("id") if isinstance(user, dict) else None
+    return bool(user_id and user_id != bot_user_id)
+
+
 async def run_followup_cycle(
     *,
     get_db: Callable[[], Any],
@@ -2186,6 +2197,7 @@ async def run_followup_cycle(
     followup_2_apos_horas: int,
     encerramento_apos_horas: int,
     followup_1_apos_horas: int = 48,
+    bot_user_id: str = "",
 ) -> None:
     """Process all due leads in a single pass."""
     conn = get_db()
@@ -2220,6 +2232,20 @@ async def run_followup_cycle(
                 conv = await jurichat.get_conversation(
                     lead["jurichat_conversation_id"]
                 )
+                # C2 (auditoria 24/jun): não dispara follow-up por cima de um
+                # humano que assumiu pelo painel (Signal 0). Pausa pra
+                # AGUARDANDO_HUMANO em vez de mandar FU1.
+                if _humano_assumiu_conv(conv, bot_user_id):
+                    logger.info(
+                        "followup: humano assumiu lead=%s — pausa (sem FU1)",
+                        lead["id"],
+                    )
+                    transicao(
+                        conn, lead["id"], Estado.AGUARDANDO_HUMANO,
+                        motivo="humano_assumiu_conversa",
+                        proxima_acao_horas=CLEAR_PROXIMA_ACAO,
+                    )
+                    continue
                 texto = await gerar_followup_msg(
                     conversation_transcript=conv.get("transcription", ""),
                 )
@@ -2243,6 +2269,22 @@ async def run_followup_cycle(
                 )
 
             elif estado == Estado.FOLLOW_UP_1_ENVIADO:
+                # C2: idem — checa Signal 0 antes do FU2 (humano pode ter
+                # assumido depois do FU1).
+                conv = await jurichat.get_conversation(
+                    lead["jurichat_conversation_id"]
+                )
+                if _humano_assumiu_conv(conv, bot_user_id):
+                    logger.info(
+                        "followup: humano assumiu lead=%s — pausa (sem FU2)",
+                        lead["id"],
+                    )
+                    transicao(
+                        conn, lead["id"], Estado.AGUARDANDO_HUMANO,
+                        motivo="humano_assumiu_conversa",
+                        proxima_acao_horas=CLEAR_PROXIMA_ACAO,
+                    )
+                    continue
                 nome = lead["contato_nome"] or "Olá"
                 texto = FOLLOWUP_2_TEXT.format(nome=nome)
                 transicao(
@@ -2296,6 +2338,16 @@ def main() -> int:
 
     conn = connect(settings.database_path)
     run_migrations(conn)
+
+    # C1 (auditoria 24/jun): sem JURICHAT_BOT_USER_ID o Signal 0 (detecção de
+    # "humano assumiu") fica desligado e um restore/redeploy reintroduz o estado
+    # quebrado em silêncio. Avisa alto no boot.
+    if not settings.jurichat_bot_user_id:
+        logger.warning(
+            "JURICHAT_BOT_USER_ID VAZIO no .env — detecção de 'humano assumiu' "
+            "(Signal 0) DESLIGADA; o bot pode atropelar atendimento humano. "
+            "Configure (ver .env.example)."
+        )
 
     jurichat = JurichatClient(
         api_key=settings.jurichat_api_key,
@@ -2399,6 +2451,7 @@ def main() -> int:
             followup_2_apos_horas=settings.followup_2_apos_horas,
             encerramento_apos_horas=settings.encerramento_apos_horas,
             followup_1_apos_horas=settings.followup_1_apos_horas,
+            bot_user_id=settings.jurichat_bot_user_id,
         )
 
     async def _full_cycle_with_cleanup() -> int:
