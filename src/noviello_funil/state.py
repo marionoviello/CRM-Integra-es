@@ -584,11 +584,28 @@ def list_leads_aguardando_humano(
 def marcar_ah_checado(conn: sqlite3.Connection, lead_id: int) -> None:
     """H2 (auditoria 24/jun): carimba ah_checado_em = now → rotaciona o lead pro
     fim da fila da sweep de re-engaje. NÃO toca atualizado_em (que é 'última
-    modificação de negócio')."""
-    conn.execute(
-        "UPDATE leads SET ah_checado_em = datetime('now') WHERE id = ?",
-        (lead_id,),
-    )
+    modificação de negócio').
+
+    BEST-EFFORT (revisão adversarial 24/jun): roda até 25×/tick no topo da sweep.
+    Se colidir com 'database is locked' (web×scheduler = processos separados),
+    re-tenta curto e, se persistir, ENGOLE — o carimbo é só uma marca de rotação;
+    falhar significa só que o lead é re-checado no tick seguinte (rotação
+    levemente menos justa, sem dano). NUNCA propaga: senão um lock AQUI abortaria
+    o tick inteiro (pulando lembretes/follow-up), justo o que o H2 evita. Erro
+    inesperado (não-lock) propaga normalmente."""
+    for tentativa in range(_MAX_RETRY_LOCK):
+        try:
+            conn.execute(
+                "UPDATE leads SET ah_checado_em = datetime('now') WHERE id = ?",
+                (lead_id,),
+            )
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
+            if tentativa < _MAX_RETRY_LOCK - 1:
+                time.sleep(_RETRY_LOCK_BASE * (2 ** tentativa))
+    # Esgotou o retry sob lock persistente — best-effort, não aborta o tick.
 
 
 def ultimo_motivo_transicao(

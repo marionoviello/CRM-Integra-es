@@ -257,6 +257,29 @@ def test_ah_sweep_limite_e_rotacao_round_robin(db_conn):
     assert len(list_leads_aguardando_humano(db_conn)) == 3
 
 
+def test_marcar_ah_checado_best_effort_engole_lock(db_conn, monkeypatch):
+    """H2 (revisão adversarial 24/jun): o carimbo de rotação é BEST-EFFORT —
+    sob 'database is locked' persistente NÃO propaga (senão abortaria o tick
+    inteiro, pulando lembretes/follow-up). Erro não-lock propaga."""
+    monkeypatch.setattr(time, "sleep", lambda *_: None)
+    lead = create_lead_if_absent(db_conn, "L-1", "C-1", "5511...", "Maria")
+
+    class _SempreLocked:
+        def execute(self, *a, **k):
+            raise sqlite3.OperationalError("database is locked")
+
+    # Lock persistente → engole (não levanta).
+    marcar_ah_checado(_SempreLocked(), lead["id"])
+
+    class _OutroErro:
+        def execute(self, *a, **k):
+            raise sqlite3.OperationalError("no such column: xpto")
+
+    # Erro inesperado (não-lock) → propaga.
+    with pytest.raises(sqlite3.OperationalError):
+        marcar_ah_checado(_OutroErro(), lead["id"])
+
+
 def test_register_error_conta_consecutivos_e_hash_zera(db_conn):
     """F1 (auditoria 24/jun): register_error conta falhas consecutivas;
     update_transcript_hash (= progresso) zera o contador + o carimbo de alerta."""
