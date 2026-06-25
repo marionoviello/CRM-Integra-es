@@ -3,7 +3,11 @@
 Dados fictícios ("Fulano Teste") por regra do CLAUDE.md do projeto.
 """
 
-from noviello_funil.redacao import lint_contrato, lint_ok
+from noviello_funil.redacao import (
+    contem_promessa_resultado,
+    lint_contrato,
+    lint_ok,
+)
 
 VALOR = "R$ 5.000,00"
 
@@ -46,6 +50,36 @@ def test_b1_promessa_de_exito():
 
 def test_b2_slogan():
     assert "B2" in _regras(LIMPO + "\n100% de êxito ou seu dinheiro de volta.")
+
+
+# --- E3: backstop de promessa de resultado nas mensagens AO LEAD -------------
+
+def test_contem_promessa_resultado_dispara_em_promessa():
+    """E3 (auditoria 24/jun): pega promessa/garantia (B1) e slogan de êxito
+    (B2) em mensagem de chat ao lead."""
+    for t in (
+        "Pode ficar tranquilo, garanto o êxito da sua ação.",
+        "Com toda certeza você ganha essa causa.",
+        "A gente assegura a procedência do recurso.",
+        "É 100% de êxito ou você não paga nada.",
+        "Só cobro se a gente ganhar a ação.",
+    ):
+        assert contem_promessa_resultado(t), t
+
+
+def test_contem_promessa_resultado_nao_dispara_em_chat_normal():
+    """E3: chat coloquial legítimo da Julia NÃO pode tropeçar (os padrões são
+    tunados pra contrato, então este guard é o que importa)."""
+    for t in (
+        "Oi! Posso te ajudar com o seu inventário?",
+        "Nossa equipe cuida do seu caso com toda a atenção.",
+        "Vou te explicar como funciona o processo, tá?",
+        "Que tal agendarmos uma conversa por videochamada?",
+        "Entendi sua situação, vamos analisar os documentos.",
+        "",
+        None,
+    ):
+        assert not contem_promessa_resultado(t), t
 
 
 def test_b3_multa_por_revogar_mandato():

@@ -140,6 +140,45 @@ async def test_hash_changed_responder_sends_and_reschedules(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_responder_com_promessa_de_resultado_bloqueia_e_handoff(db_conn):
+    """E3 (auditoria 24/jun): se o texto do modelo prometer resultado (OAB Prov.
+    205/2021), o bot NÃO manda ao lead — envia msg neutra, passa pro humano
+    (AGUARDANDO_HUMANO) e alerta o Mario com o trecho barrado."""
+    transcript = "Lead: vou ganhar essa causa?\nAtendente: oi\nLead: vou?"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale-hash")
+
+    jurichat = _make_jurichat(transcript)
+    promessa = "Pode ficar tranquilo, garanto o êxito da sua ação!"
+    triagem_fn = await _triagem_returning(
+        Decisao(acao="responder", mensagem=promessa)
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    # Passou pro humano e marcou o erro.
+    assert lead["estado"] == Estado.AGUARDANDO_HUMANO
+    assert lead["erro_atual"] == "promessa_resultado_bloqueada"
+    # O texto com promessa NUNCA foi enviado a ninguém.
+    enviados = [c.args[1] for c in jurichat.send_message.call_args_list]
+    assert promessa not in enviados
+    # O lead recebeu uma msg neutra (sem promessa).
+    para_lead = [c.args[1] for c in jurichat.send_message.call_args_list if c.args[0] == "C-1"]
+    assert len(para_lead) == 1
+    assert "equipe" in para_lead[0].lower() or "retorno" in para_lead[0].lower()
+    # O Mario foi alertado com o trecho barrado.
+    para_mario = [c.args[1] for c in jurichat.send_message.call_args_list if c.args[0] == "mario-conv"]
+    assert len(para_mario) == 1
+    assert "promessa de resultado" in para_mario[0].lower()
+
+
+@pytest.mark.asyncio
 async def test_hash_changed_propor_transitions_and_notifies(db_conn):
     # NB: last line MUST be a Lead line, otherwise the "Mario assumed"
     # detector trips before we get to the Claude decision.

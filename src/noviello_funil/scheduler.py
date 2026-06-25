@@ -62,6 +62,7 @@ from noviello_funil.outbound import (
     split_conversation_ids,
 )
 from noviello_funil.person_index import resolver_telefone
+from noviello_funil.redacao import contem_promessa_resultado
 from noviello_funil.state import (
     CLEAR_PROXIMA_ACAO,
     Estado,
@@ -882,6 +883,71 @@ async def _handoff_sem_calendar(
         )
 
 
+async def _bloquear_promessa_resultado(
+    *,
+    conn: Any,
+    lead: dict[str, Any],
+    decisao: Decisao,
+    transcript: str,
+    new_hash: str,
+    jurichat: JurichatClient,
+    mario_conversation_id: str,
+) -> None:
+    """E3 (auditoria 24/jun): a resposta do modelo tropeçou no filtro de promessa
+    de resultado (OAB Prov. 205/2021). NÃO manda o texto do modelo ao lead —
+    envia uma mensagem neutra, passa pro humano (AGUARDANDO_HUMANO, reabrível) e
+    alerta o Mario com o trecho ofensivo pra ele assumir. Decisão do Mario
+    (24/jun): bloquear + msg neutra + handoff, em vez de só monitorar.
+    """
+    lead_id = lead["id"]
+    conv_id = lead["jurichat_conversation_id"]
+    register_error(conn, lead_id, "promessa_resultado_bloqueada")
+    logger.warning(
+        "E3: resposta do bot bloqueada (promessa de resultado) lead=%s: %r",
+        lead_id, decisao.mensagem[:120],
+    )
+    msg_lead = (
+        "Deixa eu confirmar esse ponto com a equipe e já te retorno, tá? 🙏"
+    )
+    try:
+        await jurichat.start_human_support(conv_id)
+        await jurichat.send_message(conv_id, msg_lead)
+    except Exception as exc:
+        logger.exception(
+            "send_message(promessa_bloqueada) failed for lead=%s: %s",
+            lead_id, exc,
+        )
+    transicao(
+        conn, lead_id, Estado.AGUARDANDO_HUMANO,
+        motivo="promessa_resultado_handoff",
+        proxima_acao_horas=CLEAR_PROXIMA_ACAO,
+    )
+    clear_horarios_oferecidos(conn, lead_id)
+    update_transcript_hash(conn, lead_id, new_hash)
+    try:
+        await notify_mario(
+            jurichat,
+            mario_conversation_id=mario_conversation_id,
+            mensagem=format_notification(
+                tipo="handoff",
+                nome=lead["contato_nome"],
+                telefone=lead["contato_telefone"],
+                ultima_msg=_last_lead_message(transcript),
+                motivo=(
+                    "BLOQUEIO OAB (promessa de resultado, Prov. 205/2021) — a "
+                    "resposta do bot foi SEGURADA, não foi ao lead. Assuma a "
+                    f'conversa. Trecho barrado: "{decisao.mensagem[:180]}"'
+                ),
+                conversation_id=conv_id,
+            ),
+        )
+    except Exception as exc:
+        logger.exception(
+            "notify_mario(promessa_bloqueada) failed for lead=%s: %s",
+            lead_id, exc,
+        )
+
+
 # Tags que indicam que a conversa NÃO deve ser atendida pelo bot
 # (cliente já existente, advogado já lidando, lead desqualificado, etc.).
 EXCLUDED_TAGS_FOR_BOT = frozenset({
@@ -1663,6 +1729,17 @@ async def run_poll_cycle(
 
         # Dispatch on Claude's decision.
         if decisao.acao == "responder":
+            # E3 (auditoria 24/jun): backstop OAB (Prov. 205/2021). Defesa em
+            # profundidade — a skill instrui a não prometer resultado, mas se o
+            # modelo deslizar, NÃO mandamos o texto ao lead: bloqueia, manda msg
+            # neutra, passa pro humano e alerta o Mario (decisão dele, 24/jun).
+            if contem_promessa_resultado(decisao.mensagem):
+                await _bloquear_promessa_resultado(
+                    conn=conn, lead=lead, decisao=decisao, transcript=transcript,
+                    new_hash=new_hash, jurichat=jurichat,
+                    mario_conversation_id=mario_conversation_id,
+                )
+                continue
             try:
                 # Pré-requisito: conversa em human-support mode.
                 # Idempotente — chamar repetidamente não tem efeito colateral.

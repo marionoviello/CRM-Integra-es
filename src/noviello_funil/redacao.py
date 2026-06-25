@@ -464,6 +464,22 @@ def _b1_dispara(texto: str) -> re.Match | None:
     return _RX_B1B.search(texto)
 
 
+def contem_promessa_resultado(texto: object) -> bool:
+    """E3 (auditoria 24/jun): ``True`` se o texto promete/garante resultado (B1)
+    ou traz slogan de êxito (B2A-D) — a parte OAB (Prov. 205/2021) das regras de
+    contrato, reaproveitada como backstop nas mensagens AO LEAD.
+
+    Reusa ``_b1_dispara`` (com as guardas de falso-positivo: sigilo, ganho
+    condicional, aprovação pelo cliente, garantia de qualidade) + B2A-D. As
+    regexes já cobrem com/sem acento, então não precisa normalizar antes.
+    """
+    if not texto or not isinstance(texto, str):
+        return False
+    if _b1_dispara(texto):
+        return True
+    return any(rx.search(texto) for rx in (_RX_B2A, _RX_B2B, _RX_B2C, _RX_B2D))
+
+
 def lint_contrato(
     texto: str,
     *,
