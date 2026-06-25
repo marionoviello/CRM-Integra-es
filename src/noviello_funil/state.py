@@ -337,11 +337,21 @@ def list_leads_presos(
 ) -> list[sqlite3.Row]:
     """F1 (auditoria 24/jun): leads com >= ``min_erros`` falhas CONSECUTIVAS que
     ainda NÃO foram alertados (erro_alertado_em IS NULL). Usado pelo poll cycle
-    pra avisar o Mario UMA vez sobre um lead preso em falha recorrente."""
+    pra avisar o Mario UMA vez sobre um lead preso em falha recorrente.
+
+    Restrito aos estados em que o bot ATIVAMENTE re-tenta (em_conversa via poll,
+    FU1/FU2 via follow-up). Exclui terminais (aguardando_humano/encerrado): lá o
+    bot NÃO está mais tentando, então o alerta "preso, segue tentando" seria
+    falso e contradiria o handoff que o Mario já recebeu — um lead pode chegar a
+    terminal carregando erro_consecutivo>=3 acumulado no follow-up cycle, que não
+    reseta o contador (revisão adversarial 24/jun)."""
     return conn.execute(
         "SELECT * FROM leads WHERE erro_consecutivo >= ? "
-        "AND erro_alertado_em IS NULL",
-        (min_erros,),
+        "AND erro_alertado_em IS NULL AND estado IN (?, ?, ?)",
+        (
+            min_erros, Estado.EM_CONVERSA,
+            Estado.FOLLOW_UP_1_ENVIADO, Estado.FOLLOW_UP_2_ENVIADO,
+        ),
     ).fetchall()
 
 

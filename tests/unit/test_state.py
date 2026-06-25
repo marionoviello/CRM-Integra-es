@@ -214,6 +214,23 @@ def test_list_leads_presos_respeita_limiar_e_alertado(db_conn):
     assert list_leads_presos(db_conn, 3) == []  # já alertado
 
 
+def test_list_leads_presos_ignora_estados_terminais(db_conn):
+    """F1 (revisão adversarial 24/jun): um lead que acumulou erros e foi pra
+    terminal (aguardando_humano/encerrado) NÃO é 'preso' — o bot não está mais
+    tentando. Alertar 'segue tentando' seria falso e contradiria o handoff."""
+    lead = create_lead_if_absent(db_conn, "L-1", "C-1", "5511...", "Maria")
+    for _ in range(3):
+        register_error(db_conn, lead["id"], "jurichat_get_tags_failed")
+    # Ativo (em_conversa) → aparece.
+    assert {p["id"] for p in list_leads_presos(db_conn, 3)} == {lead["id"]}
+    # Foi handoffado pro humano → some da lista de presos.
+    transicao(db_conn, lead["id"], Estado.AGUARDANDO_HUMANO, motivo="handoff")
+    assert list_leads_presos(db_conn, 3) == []
+    # Idem encerrado.
+    transicao(db_conn, lead["id"], Estado.ENCERRADO_SEM_RESPOSTA, motivo="x")
+    assert list_leads_presos(db_conn, 3) == []
+
+
 def test_set_reuniao_iso_invalido_levanta_e_nao_grava_fantasma(db_conn):
     """D5 (auditoria 24/jun): ISO inparseável não vira reunião fantasma —
     set_reuniao levanta ValueError em vez de gravar reuniao_em=now (que
