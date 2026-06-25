@@ -222,6 +222,110 @@ async def test_promessa_de_resultado_bloqueia_tambem_no_confirmar_horario(db_con
 
 
 @pytest.mark.asyncio
+async def test_poll_cycle_alerta_mario_sobre_lead_preso_uma_vez(db_conn):
+    """F1 (auditoria 24/jun): lead com >= 3 falhas consecutivas → o ciclo alerta
+    o Mario UMA vez ao fim do tick (antes erro_atual era write-only e o lead
+    ficava mudo/invisível). Não re-alerta no tick seguinte."""
+    from noviello_funil.state import create_lead_if_absent, register_error
+
+    # Lead NÃO due (proxima_acao_em NULL) com 3 erros consecutivos acumulados.
+    lead = create_lead_if_absent(db_conn, "L-preso", "C-preso", "5511...", "Preso")
+    for _ in range(3):
+        register_error(db_conn, lead["id"], "jurichat_send_failed")
+
+    triagem_fn = await _triagem_returning(Decisao(acao="responder", mensagem="x"))
+    jurichat = _make_jurichat("Lead: oi")
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+    para_mario = [
+        c for c in jurichat.send_message.call_args_list if c.args[0] == "mario-conv"
+    ]
+    assert len(para_mario) == 1
+    assert "preso" in para_mario[0].args[1].lower()
+    row = get_lead_by_conversation(db_conn, "C-preso")
+    assert row["erro_alertado_em"] is not None
+
+    # 2º tick: NÃO re-alerta (já carimbado).
+    jurichat2 = _make_jurichat("Lead: oi")
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat2, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+    para_mario2 = [
+        c for c in jurichat2.send_message.call_args_list if c.args[0] == "mario-conv"
+    ]
+    assert para_mario2 == []
+
+
+@pytest.mark.asyncio
+async def test_oferecer_horarios_erro_transitorio_calendar_re_tenta(db_conn):
+    """F2 (auditoria 24/jun): GoogleCalendarError (transitório: timeout/5xx) →
+    re-tenta no próximo tick, SEM handoff nem alerta imediato."""
+    from noviello_funil.calendar_client import GoogleCalendarError
+
+    transcript = "Atendente: Oi\nLead: Quero agendar"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar()
+    calendar_client.find_available_slots = AsyncMock(
+        side_effect=GoogleCalendarError("503 Service Unavailable")
+    )
+    triagem_fn = await _triagem_returning(
+        Decisao(acao="oferecer_horarios", mensagem="Horários: {{HORARIOS}}")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA  # segue, re-tenta
+    assert lead["erro_atual"] == "calendar_find_slots_failed"
+    assert lead["proxima_acao_em"] is not None
+    # Transitório: NÃO alerta o Mario (1 falha < limiar do sweep F1).
+    para_mario = [
+        c for c in jurichat.send_message.call_args_list if c.args[0] == "mario-conv"
+    ]
+    assert para_mario == []
+
+
+@pytest.mark.asyncio
+async def test_oferecer_horarios_erro_inesperado_handoff_e_alerta(db_conn):
+    """F2 (auditoria 24/jun): erro INESPERADO (bug determinístico, ex.: regressão
+    pós-deploy) NÃO fica em reschedule mudo infinito — degrada pra handoff +
+    alerta o Mario."""
+    transcript = "Atendente: Oi\nLead: Quero agendar"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar()
+    calendar_client.find_available_slots = AsyncMock(
+        side_effect=TypeError("regressão: payload mudou")
+    )
+    triagem_fn = await _triagem_returning(
+        Decisao(acao="oferecer_horarios", mensagem="Horários: {{HORARIOS}}")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.AGUARDANDO_HUMANO  # handoff, não loop mudo
+    assert lead["erro_atual"] == "calendar_find_slots_erro_inesperado"
+    # Mario foi alertado (via _handoff_sem_calendar).
+    para_mario = [
+        c for c in jurichat.send_message.call_args_list if c.args[0] == "mario-conv"
+    ]
+    assert len(para_mario) >= 1
+
+
+@pytest.mark.asyncio
 async def test_hash_changed_propor_transitions_and_notifies(db_conn):
     # NB: last line MUST be a Lead line, otherwise the "Mario assumed"
     # detector trips before we get to the Claude decision.

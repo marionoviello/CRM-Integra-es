@@ -77,7 +77,9 @@ from noviello_funil.state import (
     list_leads_com_reuniao_futura,
     list_leads_para_polling,
     list_leads_para_reativacao,
+    list_leads_presos,
     list_leads_vencidos,
+    marcar_erro_alertado,
     marcar_noshow_avisado,
     mark_cliente_checado,
     mark_lead_activity_now,
@@ -318,12 +320,30 @@ async def _handle_oferecer_horarios(
             morning_end=calendar.morning_end,
             exclude_isos=exclude_isos,
         )
-    except (GoogleCalendarError, Exception) as exc:
-        logger.exception(
-            "find_available_slots failed for lead=%s: %s", lead_id, exc,
+    except GoogleCalendarError as exc:
+        # Falha TRANSITÓRIA da API do Google (timeout/5xx/quota) — re-tenta no
+        # próximo tick. Se persistir, o sweep F1 alerta o Mario após N seguidas.
+        logger.warning(
+            "find_available_slots (calendar) falhou lead=%s: %s", lead_id, exc,
         )
         register_error(conn, lead_id, "calendar_find_slots_failed")
         schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
+        return
+    except Exception as exc:
+        # F2 (auditoria 24/jun): erro INESPERADO (não é GoogleCalendarError) =
+        # provável bug determinístico (ex.: regressão pós-deploy, payload mudou).
+        # Antes caía no mesmo reschedule mudo → loop infinito mascarando a
+        # regressão. Agora degrada pra handoff (que JÁ alerta o Mario via
+        # notify_mario) em vez de re-tentar pra sempre o mesmo bug.
+        logger.exception(
+            "find_available_slots erro INESPERADO lead=%s: %s", lead_id, exc,
+        )
+        register_error(conn, lead_id, "calendar_find_slots_erro_inesperado")
+        await _handoff_sem_calendar(
+            conn=conn, lead=lead, transcript=transcript, new_hash=new_hash,
+            jurichat=jurichat, mario_conversation_id=mario_conversation_id,
+            motivo="calendar_find_slots_erro_inesperado",
+        )
         return
 
     if not slots:
@@ -881,6 +901,41 @@ async def _handoff_sem_calendar(
             "notify_mario(handoff_calendar) failed for lead=%s: %s",
             lead_id, exc,
         )
+
+
+# F1 (auditoria 24/jun): falhas CONSECUTIVAS antes de o poll cycle alertar o
+# Mario sobre um lead preso em falha de API recorrente.
+_ALERTA_ERRO_CONSECUTIVO = 3
+
+
+async def _alertar_leads_presos(
+    conn: Any,
+    jurichat: JurichatClient,
+    mario_conversation_id: str,
+) -> None:
+    """F1 (auditoria 24/jun): avisa o Mario UMA vez sobre cada lead preso em
+    falha recorrente (erro_consecutivo >= limiar, ainda não alertado). Antes
+    erro_atual era write-only e um lead travado em erro de API ficava mudo dias
+    sem o Mario saber. O bot NÃO pausa o lead — segue tentando (a falha pode ser
+    transitória); só dá visibilidade. Espelha D3/D5: só carimba erro_alertado_em
+    se o aviso saiu (ou se não há Mario configurado) → falha re-tenta no ciclo
+    seguinte.
+    """
+    for lead in list_leads_presos(conn, _ALERTA_ERRO_CONSECUTIVO):
+        enviado = await notify_mario(
+            jurichat,
+            mario_conversation_id=mario_conversation_id,
+            mensagem=(
+                "⚠️ Lead possivelmente PRESO em falha recorrente "
+                f"({lead['erro_consecutivo']}x seguidas): "
+                f"{lead['contato_nome'] or '?'} "
+                f"({lead['contato_telefone'] or '?'}). "
+                f"Último erro: {lead['erro_atual'] or '?'}. "
+                "O bot segue tentando, mas dá uma olhada."
+            ),
+        )
+        if enviado or not mario_conversation_id:
+            marcar_erro_alertado(conn, lead["id"])
 
 
 async def _bloquear_promessa_resultado(
@@ -1960,6 +2015,11 @@ async def run_poll_cycle(
             )
             register_error(conn, lead_id, "unknown_acao")
             schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
+
+    # F1 (auditoria 24/jun): fechado o loop, varre os leads presos em falha
+    # recorrente e alerta o Mario UMA vez por lead (visibilidade — antes ficavam
+    # mudos e invisíveis). Fora do loop pra não duplicar alerta no mesmo tick.
+    await _alertar_leads_presos(conn, jurichat, mario_conversation_id)
 
 
 _RE_CANCELAMENTO = re.compile(r"\b(?:cancel|desmarc)\w*", re.IGNORECASE)

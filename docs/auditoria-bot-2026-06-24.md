@@ -52,8 +52,8 @@ Status: `[ ]` aberto · `[x]` corrigido + deployado.
 
 ## Frente F — Escalonamento de erros
 
-- [ ] **P1** `register_error` sobrescreve `erro_atual` sem contador nem alerta (coluna write-only morta) → lead preso em falha de API recorrente fica dias sem resposta e o Mario nunca sabe. `scheduler.py:1126-1135` (~13 call sites). **Fix:** contador `erro_consecutivo` (zera em sucesso) → ao cruzar N, `notify_mario` 1× + opcional transicionar AH.
-- [ ] **P2** `except (GoogleCalendarError, Exception)` trata bug determinístico = falha transitória → reschedule mudo infinito sem alerta, mascara regressão pós-deploy. `scheduler.py:318-324`. **Fix:** separar transitório (retry/handoff) de inesperado (logar bug + notify_mario + handoff).
+- [x] **P1** `register_error` sobrescreve `erro_atual` sem contador nem alerta (coluna write-only morta) → lead preso em falha de API recorrente fica dias sem resposta e o Mario nunca sabe. `scheduler.py:1126-1135` (~13 call sites). **Fix:** coluna `erro_consecutivo` (register_error incrementa; `update_transcript_hash` = progresso zera) + `erro_alertado_em`; sweep `_alertar_leads_presos` no fim do poll cycle avisa o Mario UMA vez ao cruzar 3 falhas (bot NÃO pausa o lead — só dá visibilidade; espelha D3/D5: só carimba se o aviso saiu).
+- [x] **P2** `except (GoogleCalendarError, Exception)` trata bug determinístico = falha transitória → reschedule mudo infinito sem alerta, mascara regressão pós-deploy. `scheduler.py:318-324`. **Fix:** `except GoogleCalendarError` (transitório → re-tenta; F1 alerta se persistir) separado de `except Exception` (inesperado → handoff via `_handoff_sem_calendar`, que já alerta o Mario, em vez de loop mudo).
 
 ## Frente G — Qualidade da triagem / prompt da Julia
 

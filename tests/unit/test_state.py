@@ -9,12 +9,15 @@ from noviello_funil.state import (
     get_lead_by_conversation,
     is_webhook_processed,
     lead_com_reuniao_no_horario,
+    list_leads_presos,
     list_leads_vencidos,
+    marcar_erro_alertado,
     mark_webhook_processed,
     record_lead_message_received,
     register_error,
     set_reuniao,
     transicao,
+    update_transcript_hash,
 )
 
 
@@ -181,6 +184,34 @@ def test_list_leads_vencidos_returns_only_due_and_active(db_conn):
     vencidos = list_leads_vencidos(conn, fu1_apos_horas=48)
     ids = {row["jurichat_lead_id"] for row in vencidos}
     assert ids == {"L-idle", "L-fu1"}
+
+
+def test_register_error_conta_consecutivos_e_hash_zera(db_conn):
+    """F1 (auditoria 24/jun): register_error conta falhas consecutivas;
+    update_transcript_hash (= progresso) zera o contador + o carimbo de alerta."""
+    lead = create_lead_if_absent(db_conn, "L-1", "C-1", "5511...", "Maria")
+    register_error(db_conn, lead["id"], "jurichat_send_failed")
+    register_error(db_conn, lead["id"], "jurichat_send_failed")
+    row = get_lead_by_conversation(db_conn, "C-1")
+    assert row["erro_consecutivo"] == 2
+    assert row["erro_atual"] == "jurichat_send_failed"
+    # Progresso zera o contador.
+    update_transcript_hash(db_conn, lead["id"], "novohash")
+    row = get_lead_by_conversation(db_conn, "C-1")
+    assert row["erro_consecutivo"] == 0
+    assert row["erro_alertado_em"] is None
+
+
+def test_list_leads_presos_respeita_limiar_e_alertado(db_conn):
+    """F1: lista leads com >= min_erros consecutivos e ainda não alertados;
+    marcar_erro_alertado tira da lista (alerta sai 1x)."""
+    lead = create_lead_if_absent(db_conn, "L-1", "C-1", "5511...", "Maria")
+    for _ in range(3):
+        register_error(db_conn, lead["id"], "x")
+    assert {p["id"] for p in list_leads_presos(db_conn, 3)} == {lead["id"]}
+    assert list_leads_presos(db_conn, 4) == []  # abaixo do limiar
+    marcar_erro_alertado(db_conn, lead["id"])
+    assert list_leads_presos(db_conn, 3) == []  # já alertado
 
 
 def test_set_reuniao_iso_invalido_levanta_e_nao_grava_fantasma(db_conn):

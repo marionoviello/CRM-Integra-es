@@ -320,9 +320,38 @@ def clear_next_action(conn: sqlite3.Connection, lead_id: int) -> None:
 def register_error(
     conn: sqlite3.Connection, lead_id: int, erro: str | None,
 ) -> None:
+    # F1 (auditoria 24/jun): além de gravar o último erro, incrementa o contador
+    # de falhas CONSECUTIVAS. O poll cycle alerta o Mario quando cruza o limiar
+    # (lead preso em falha de API recorrente não fica mais mudo/invisível). O
+    # contador zera em update_transcript_hash (= o lead progrediu).
     conn.execute(
-        "UPDATE leads SET erro_atual = ?, atualizado_em = datetime('now') WHERE id = ?",
+        "UPDATE leads SET erro_atual = ?, "
+        "erro_consecutivo = erro_consecutivo + 1, "
+        "atualizado_em = datetime('now') WHERE id = ?",
         (erro, lead_id),
+    )
+
+
+def list_leads_presos(
+    conn: sqlite3.Connection, min_erros: int,
+) -> list[sqlite3.Row]:
+    """F1 (auditoria 24/jun): leads com >= ``min_erros`` falhas CONSECUTIVAS que
+    ainda NÃO foram alertados (erro_alertado_em IS NULL). Usado pelo poll cycle
+    pra avisar o Mario UMA vez sobre um lead preso em falha recorrente."""
+    return conn.execute(
+        "SELECT * FROM leads WHERE erro_consecutivo >= ? "
+        "AND erro_alertado_em IS NULL",
+        (min_erros,),
+    ).fetchall()
+
+
+def marcar_erro_alertado(conn: sqlite3.Connection, lead_id: int) -> None:
+    """Carimba erro_alertado_em = now → o alerta de 'lead preso' sai UMA vez
+    (não a cada tick enquanto a falha durar). Zerado em update_transcript_hash."""
+    conn.execute(
+        "UPDATE leads SET erro_alertado_em = datetime('now'), "
+        "atualizado_em = datetime('now') WHERE id = ?",
+        (lead_id,),
     )
 
 
@@ -342,9 +371,14 @@ def update_transcript_hash(
 ) -> None:
     """Record the hash of the transcript we just processed. Used by the
     polling scheduler to detect new messages on the next tick."""
+    # F1 (auditoria 24/jun): atualizar o hash = o lead PROGREDIU (mensagem
+    # processada/enviada com sucesso) → zera o contador de falhas consecutivas
+    # e o carimbo de alerta, pra um lead que se recuperou poder voltar a alertar
+    # se travar de novo no futuro.
     conn.execute(
-        "UPDATE leads SET ultimo_transcript_hash = ?, atualizado_em = datetime('now') "
-        "WHERE id = ?",
+        "UPDATE leads SET ultimo_transcript_hash = ?, "
+        "erro_consecutivo = 0, erro_alertado_em = NULL, "
+        "atualizado_em = datetime('now') WHERE id = ?",
         (transcript_hash, lead_id),
     )
 
