@@ -52,6 +52,18 @@ def test_parse_decisao_handoff():
     assert d.motivo_handoff == "pediu humano"
 
 
+def test_parse_decisao_lead_recusou_videochamada():
+    """G1 (revisão adversarial 24/jun): o sinal de recusa de videochamada vem do
+    modelo (campo da Decisao), não de regex. Default False quando ausente."""
+    d = parse_decisao(
+        '{"acao": "propor", "mensagem": "x", "lead_recusou_videochamada": true}'
+    )
+    assert d.lead_recusou_videochamada is True
+    # Ausente → False (não força handoff por engano).
+    d2 = parse_decisao('{"acao": "responder", "mensagem": "oi"}')
+    assert d2.lead_recusou_videochamada is False
+
+
 def test_parse_decisao_unknown_acao_raises():
     raw = '{"acao": "explodir", "mensagem": "..."}'
     with pytest.raises(DecisaoInvalida):

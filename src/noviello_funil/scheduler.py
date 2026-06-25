@@ -205,40 +205,6 @@ def _last_lead_message(transcript: str) -> str:
     return ""
 
 
-# G1 (auditoria 24/jun): recusa EXPLÍCITA de videochamada (ou só aceita
-# presencial/por escrito). Char classes cobrem com/sem acento; IGNORECASE cobre
-# caixa. Falso-positivo aqui é SEGURO (lead disposto vira handoff = a equipe
-# cuida); o risco real é o falso-negativo (insistir Meet em quem recusou), então
-# o padrão é deliberadamente permissivo.
-_RE_RECUSA_VIDEOCHAMADA = re.compile(
-    r"\bn[ãa]o\s+(?:quero|posso|consigo|sei|tenho\s+como|vou|d[áa]\s+pra|rola|"
-    r"curto|gosto)[^.!?\n]{0,30}"
-    r"(?:videochamada|v[íi]deo\s?chamada|chamada\s+de\s+v[íi]deo|online|meet|"
-    r"\bv[íi]deo\b|remot)"
-    r"|\bprefiro\b[^.!?\n]{0,35}"
-    r"(?:presencial|pessoalmente|escrit[óo]rio|por\s+escrito)"
-    r"|\bs[óo]\s+(?:presencial|pessoalmente|por\s+escrito)"
-    r"|(?:videochamada|v[íi]deo\s?chamada|online|meet)[^.!?\n]{0,15}"
-    r"n[ãa]o\s+(?:d[áa]|rola|quero|posso|funciona|consigo)",
-    re.IGNORECASE,
-)
-
-
-def _lead_recusou_videochamada(transcript: str) -> bool:
-    """G1 (auditoria 24/jun): True se o lead recusou explicitamente videochamada
-    (ou só aceita presencial/por escrito). A skill manda usar `propor` JUSTO
-    nesse caso — então o bot deve fazer handoff pra equipe, NÃO forçar Meet.
-    Olha só as falas do lead (não as do atendente)."""
-    if not transcript:
-        return False
-    falas_lead = " ".join(
-        line.lstrip()[len("Lead:") :]
-        for line in transcript.splitlines()
-        if line.lstrip().startswith("Lead:")
-    )
-    return bool(_RE_RECUSA_VIDEOCHAMADA.search(falas_lead))
-
-
 def _extrair_email_do_lead(transcript: str) -> str:
     """Email da linha ``Lead:`` MAIS RECENTE que contenha ``@``, ou "".
 
@@ -1892,14 +1858,17 @@ async def run_poll_cycle(
             # Se temos calendar configurado, REDIRECIONAMOS pra fluxo
             # de agendamento: se já tem email na transcrição, oferece
             # horários direto; senão pede email primeiro.
-            # G1 (auditoria 24/jun): MAS se o lead RECUSOU videochamada (a skill
-            # manda usar propor justo nesse caso), NÃO redireciona pra Meet —
-            # seria insistir no que o lead negou. Recusa → cai no handoff abaixo.
-            recusou_videochamada = _lead_recusou_videochamada(transcript)
+            # G1 (auditoria 24/jun; revisão adversarial): se o lead RECUSOU
+            # videochamada, NÃO redireciona pra Meet — seria insistir no que ele
+            # negou; cai no handoff abaixo. O sinal vem do MODELO (campo da
+            # Decisao), não de regex: o modelo distingue "recusou vídeo" de "tem
+            # restrição de dia/horário" (o regex confundia os dois e mandava lead
+            # disposto pra handoff). False = força agendamento (pega misuse de
+            # propor pra lead pronto pra fechar).
             if (
                 calendar is not None
                 and calendar.client is not None
-                and not recusou_videochamada
+                and not decisao.lead_recusou_videochamada
             ):
                 email_na_transcricao = _extrair_email(transcript)
                 if email_na_transcricao:

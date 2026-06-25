@@ -401,13 +401,21 @@ markdown:
   "resumo_caso": "<presente em propor, confirmar_horario e handoff; 1-2 linhas>",
   "motivo_handoff": "<presente apenas se acao=handoff; 1 linha>",
   "horario_escolhido_iso": "<presente apenas em confirmar_horario; ISO 8601>",
-  "lead_email": "<presente apenas em confirmar_horario; email completo>"
+  "lead_email": "<presente apenas em confirmar_horario; email completo>",
+  "lead_recusou_videochamada": true | false
 }
 ```
 
 Regras:
 - `responder`: omita resumo_caso, motivo_handoff, horario_escolhido_iso, lead_email.
 - `propor`: inclua `resumo_caso`; omita os outros.
+- `lead_recusou_videochamada`: marque `true` SOMENTE quando o lead RECUSOU a
+  videochamada de fato — quer atendimento presencial, só aceita proposta por
+  escrito, ou disse claramente que não quer/não fará vídeo. **NÃO marque true**
+  por mera restrição de DIA/HORÁRIO ("não posso de manhã", "videochamada só à
+  tarde", "não nessa quarta") — isso é um lead DISPOSTO, use `oferecer_horarios`.
+  Na dúvida (o lead topa o vídeo, só tem preferência de horário) → `false`.
+  Default `false`. Praticamente só importa junto de `propor`.
 - `handoff`: inclua `motivo_handoff` E `resumo_caso` (pra equipe assumir
   sem reler a conversa: o que o lead quer, vertical, dados já coletados);
   omita os outros.

@@ -35,7 +35,7 @@ DECISAO_SCHEMA = {
     "additionalProperties": False,
     "required": [
         "acao", "mensagem", "resumo_caso", "motivo_handoff",
-        "horario_escolhido_iso", "lead_email",
+        "horario_escolhido_iso", "lead_email", "lead_recusou_videochamada",
     ],
     "properties": {
         "acao": {
@@ -50,6 +50,12 @@ DECISAO_SCHEMA = {
         "motivo_handoff": {"type": ["string", "null"]},
         "horario_escolhido_iso": {"type": ["string", "null"]},
         "lead_email": {"type": ["string", "null"]},
+        # G1 (auditoria 24/jun, revisão adversarial): o modelo sinaliza quando o
+        # lead RECUSOU videochamada (quer presencial / só por escrito / disse não
+        # ao vídeo) — NÃO marcar por mera restrição de dia/horário. O scheduler
+        # usa isso pra fazer handoff em vez de insistir no Meet. Regex não
+        # distinguia "recusa" de "restrição de horário"; o modelo distingue.
+        "lead_recusou_videochamada": {"type": "boolean"},
     },
 }
 
@@ -72,6 +78,11 @@ class Decisao:
     # extraiu da transcrição. Vai como attendee no evento — Google manda
     # convite ICS + Meet link automático.
     lead_email: str | None = None
+    # G1 (auditoria 24/jun): True quando o lead RECUSOU videochamada (quer
+    # presencial / só por escrito / disse não ao vídeo). NÃO é restrição de
+    # dia/horário. O scheduler usa no ramo ``propor`` pra fazer handoff em vez
+    # de insistir no Meet.
+    lead_recusou_videochamada: bool = False
 
 
 class DecisaoInvalida(Exception):
@@ -132,6 +143,9 @@ def parse_decisao(raw: str) -> Decisao:
         motivo_handoff=data.get("motivo_handoff"),
         horario_escolhido_iso=data.get("horario_escolhido_iso"),
         lead_email=data.get("lead_email"),
+        lead_recusou_videochamada=bool(
+            data.get("lead_recusou_videochamada", False)
+        ),
     )
 
 

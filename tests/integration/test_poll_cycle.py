@@ -1209,6 +1209,8 @@ async def test_propor_com_recusa_de_videochamada_faz_handoff(db_conn):
             acao="propor",
             mensagem="Entendi! Nossa equipe vai te passar a proposta por escrito.",
             resumo_caso="Inventário SP, lead prefere proposta escrita",
+            # O MODELO sinaliza a recusa (não mais um regex no transcript).
+            lead_recusou_videochamada=True,
         )
     )
 
@@ -1236,29 +1238,42 @@ async def test_propor_com_recusa_de_videochamada_faz_handoff(db_conn):
     assert len(para_mario) >= 1
 
 
-def test_lead_recusou_videochamada_detecta_e_nao_falso_positiva():
-    """G1 (auditoria 24/jun): detector de recusa — pega recusas explícitas do
-    LEAD, não dispara em lead disposto nem em fala do atendente."""
-    from noviello_funil.scheduler import _lead_recusou_videochamada
+@pytest.mark.asyncio
+async def test_propor_com_restricao_de_horario_ainda_agenda(db_conn):
+    """G1 (revisão adversarial 24/jun): lead DISPOSTO que só tem restrição de
+    dia/horário (modelo NÃO marca lead_recusou_videochamada) → o guardrail ainda
+    redireciona pra agendamento, não pra handoff. O regex antigo confundia isso
+    ('não posso de manhã, videochamada de tarde') e mandava pra handoff."""
+    transcript = (
+        "Atendente: Posso te atender por videochamada?\n"
+        "Lead: meu email é joao@exemplo.com, não posso de manhã, "
+        "videochamada de tarde pode"
+    )
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
 
-    for t in (
-        "Lead: não posso fazer videochamada",
-        "Lead: não consigo videochamada, prefiro presencial",
-        "Lead: prefiro só receber a proposta por escrito",
-        "Lead: só presencial pra mim",
-        "Lead: videochamada não rola pra mim",
-        "Atendente: videochamada?\nLead: não, prefiro pessoalmente",
-    ):
-        assert _lead_recusou_videochamada(t), t
+    tz = ZoneInfo("America/Sao_Paulo")
+    slots = [Slot(start=datetime.datetime(2027, 6, 9, 14, 0, tzinfo=tz), duration_min=30)]
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar(slots)
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="propor",
+            mensagem="Vou te passar pra equipe.",
+            resumo_caso="Inventário SP",
+            lead_recusou_videochamada=False,  # disposto, só restrição de horário
+        )
+    )
 
-    for t in (
-        "Lead: pode ser videochamada sim",
-        "Lead: quero agendar uma videochamada",
-        "Lead: quanto custa o inventário?",
-        "Atendente: prefiro presencial",   # fala do atendente NÃO conta
-        "",
-    ):
-        assert not _lead_recusou_videochamada(t), t
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )
+
+    # Redirecionado pra agendamento (ofereceu horários), NÃO handoff.
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA
+    calendar_client.find_available_slots.assert_awaited_once()
 
 
 @pytest.mark.asyncio
