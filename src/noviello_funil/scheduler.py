@@ -2418,7 +2418,11 @@ async def _escalar_pos_se_travado(
         return
     if not _pos_pendente(row):
         return  # resolveu tudo na última tentativa
-    marcar_pos_travado(conn, contrato_id)
+    if not marcar_pos_travado(conn, contrato_id):
+        # A marca não durou (lock persistente) → NÃO alerta agora; o contrato
+        # segue na fila e trava+alerta de verdade no próximo tick (evita
+        # re-alertar todo tick com pos_travado_em nunca gravado).
+        return
     if not mario_conversation_id:
         return
     faltam = []
@@ -2466,18 +2470,30 @@ async def sweep_pos_assinatura(
         cid = c["id"]
         try:
             registrar_tentativa_pos(conn, cid)
-            doc = await zapsign.get_doc(c["zapsign_doc_token"])
+            # Só re-busca o doc quando o ARQUIVO do PDF está pendente (único passo
+            # que usa a URL fresca); intake/tarefa não precisam → poupa chamada.
+            signed = None
+            if c["arquivo_pdf_em"] is None:
+                doc = await zapsign.get_doc(c["zapsign_doc_token"])
+                signed = doc.get("signed_file")
             await processar_pos_assinatura(
                 conn, juridiq=juridiq, zapsign=zapsign, jurichat=jurichat,
-                settings=settings, contrato_id=cid,
-                signed_file_url=doc.get("signed_file"),
-            )
-            await _escalar_pos_se_travado(
-                conn, cid, c["cliente_nome"], jurichat,
-                settings.mario_conversation_id,
+                settings=settings, contrato_id=cid, signed_file_url=signed,
+                notificar=False,  # sweep silencioso (a escalação cobre o travado)
             )
         except Exception:
             logger.exception("sweep_pos: contrato=%s", cid)
+        finally:
+            # A escalação roda SEMPRE (mesmo se get_doc/processar levantou) — senão
+            # um get_doc que falha a cada tick faria pos_tentativas subir sem nunca
+            # travar/alertar o Mario.
+            try:
+                await _escalar_pos_se_travado(
+                    conn, cid, c["cliente_nome"], jurichat,
+                    settings.mario_conversation_id,
+                )
+            except Exception:
+                logger.exception("sweep_pos escalar: contrato=%s", cid)
 
 
 async def run_reminder_cycle(

@@ -153,6 +153,7 @@ async def processar_pos_assinatura(
     settings: Any,
     contrato_id: int,
     signed_file_url: str | None,
+    notificar: bool = True,
 ) -> None:
     """Roda os 3 sub-passos (intake / arquivo / tarefa) best-effort e idempotentes
     por-passo, após o ASSINADO. Cada passo só roda se o seu timestamp está NULL;
@@ -230,9 +231,11 @@ async def processar_pos_assinatura(
                     ref_col="juridiq_task_id", ref_valor=task_id,
                 )
 
-        # Resumo pro Mario — só se algo foi tentado nesta reentrega (evita spam
-        # na reentrega já-tudo-feito do webhook).
-        if houve_acao and jurichat is not None and settings.mario_conversation_id:
+        # Resumo pro Mario — só no caminho do WEBHOOK (notificar=True) e se algo
+        # foi tentado. O SWEEP roda com notificar=False (silencioso): re-tentar a
+        # cada tick spammaria; o alerta de "TRAVADO" (escalação no scheduler)
+        # cobre o caso de passo preso.
+        if notificar and houve_acao and jurichat is not None and settings.mario_conversation_id:
             await notify_mario(
                 jurichat,
                 mario_conversation_id=settings.mario_conversation_id,

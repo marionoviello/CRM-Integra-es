@@ -612,10 +612,15 @@ def registrar_envio(
 def registrar_assinatura(
     conn: sqlite3.Connection, contrato_id: int, *, signed_file_url: str | None,
 ) -> None:
-    """Salva a URL do PDF assinado (webhook doc_signed)."""
+    """Salva a URL do PDF assinado (webhook doc_signed) e carimba pos_iniciado_em
+    (set-once) — feito AQUI, na transição ASSINADO, INDEPENDENTE da flag
+    pos_assinatura_ativo, pra que um contrato assinado com a flag OFF vire
+    elegível ao sweep quando a flag ligar (catch-up do rollout). pos_iniciado_em
+    distingue pós-DEPLOY (este código rodou) de pré-feature (NULL = não varre)."""
     conn.execute(
-        "UPDATE contrato SET signed_file_url = ?, atualizado_em = datetime('now') "
-        "WHERE id = ?",
+        "UPDATE contrato SET signed_file_url = ?, "
+        "pos_iniciado_em = COALESCE(pos_iniciado_em, datetime('now')), "
+        "atualizado_em = datetime('now') WHERE id = ?",
         (signed_file_url, contrato_id),
     )
 

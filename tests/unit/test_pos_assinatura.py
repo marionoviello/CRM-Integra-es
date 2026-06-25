@@ -247,8 +247,12 @@ def test_list_contratos_pos_pendentes_filtros():
         "UPDATE contrato SET intake_juridiq_em=datetime('now'), "
         "arquivo_pdf_em=datetime('now') WHERE id=?", (c5,),
     )
-    ids = {r["id"] for r in list_contratos_pos_pendentes(conn, limite=10)}
+    # grace_seconds=0 pra não filtrar os recém-iniciados (carência testada à parte)
+    ids = {r["id"] for r in list_contratos_pos_pendentes(conn, limite=10, grace_seconds=0)}
     assert ids == {c1}
+    # Carência: com grace padrão (120s), c1 (iniciado "agora") NÃO é pego ainda
+    # (dá tempo do webhook terminar antes do sweep) → anti-corrida web×sweep.
+    assert list_contratos_pos_pendentes(conn, limite=10) == []
 
 
 def test_marcadores_pos_sweep_set_once_e_incremento():
@@ -274,7 +278,11 @@ async def test_sweep_pos_retoma_passo_que_falhou(monkeypatch):
     conn = connect(":memory:")
     run_migrations(conn)
     cid = _contrato_assinado(conn, telefone="5511", person_id=None)
-    marcar_pos_iniciado(conn, cid)  # simula que o webhook iniciou o pós
+    # simula que o webhook iniciou o pós há mais que a carência (passa o grace)
+    conn.execute(
+        "UPDATE contrato SET pos_iniciado_em=datetime('now','-1 hour') WHERE id=?",
+        (cid,),
+    )
 
     juridiq = MagicMock()
     juridiq.search_person_by_phone = AsyncMock(return_value=None)
@@ -321,8 +329,10 @@ async def test_sweep_pos_escala_e_trava_apos_teto(monkeypatch):
     conn = connect(":memory:")
     run_migrations(conn)
     cid = _contrato_assinado(conn, telefone="5511", person_id=None)
-    marcar_pos_iniciado(conn, cid)
-    conn.execute("UPDATE contrato SET pos_tentativas=4 WHERE id=?", (cid,))  # 1 abaixo do teto
+    conn.execute(
+        "UPDATE contrato SET pos_iniciado_em=datetime('now','-1 hour'), "
+        "pos_tentativas=4 WHERE id=?", (cid,),  # iniciado passou a carência; 1 abaixo do teto
+    )
 
     juridiq = MagicMock()
     juridiq.search_person_by_phone = AsyncMock(return_value=None)
@@ -354,3 +364,63 @@ async def test_sweep_pos_escala_e_trava_apos_teto(monkeypatch):
         jurichat=MagicMock(), settings=_Settings(),
     )
     assert juridiq.create_person.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_sweep_pos_escala_mesmo_com_get_doc_falhando(monkeypatch):
+    """P1 (revisão 2): se get_doc levanta a cada tick (doc removido na ZapSign /
+    API fora), o teto AINDA trava+alerta (escalação no finally) — não varre pra
+    sempre sem nunca avisar."""
+    conn = connect(":memory:")
+    run_migrations(conn)
+    cid = _contrato_assinado(conn, telefone="5511", person_id=None)
+    conn.execute(
+        "UPDATE contrato SET pos_iniciado_em=datetime('now','-1 hour'), "
+        "pos_tentativas=4 WHERE id=?", (cid,),
+    )
+    juridiq = MagicMock()
+    zapsign = MagicMock()
+    zapsign.get_doc = AsyncMock(side_effect=RuntimeError("ZapSign 404 doc removido"))
+    notify_sched = AsyncMock()
+    monkeypatch.setattr("noviello_funil.scheduler.notify_mario", notify_sched)
+
+    await sweep_pos_assinatura(
+        get_db=lambda: conn, zapsign=zapsign, juridiq=juridiq,
+        jurichat=MagicMock(), settings=_Settings(),
+    )
+    row = conn.execute(
+        "SELECT pos_tentativas, pos_travado_em FROM contrato WHERE id=?", (cid,),
+    ).fetchone()
+    assert row["pos_tentativas"] == 5
+    assert row["pos_travado_em"] is not None  # travou apesar do get_doc falhar
+    notify_sched.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sweep_pos_nao_rebusca_doc_se_arquivo_feito(monkeypatch):
+    """Quando só falta intake/tarefa (PDF já arquivado), o sweep NÃO re-busca o
+    doc na ZapSign — poupa chamada (só o passo de arquivo usa a URL fresca)."""
+    conn = connect(":memory:")
+    run_migrations(conn)
+    cid = _contrato_assinado(conn, telefone="5511", person_id=None)
+    conn.execute(
+        "UPDATE contrato SET pos_iniciado_em=datetime('now','-1 hour'), "
+        "arquivo_pdf_em=datetime('now') WHERE id=?", (cid,),
+    )
+    juridiq = MagicMock()
+    juridiq.search_person_by_phone = AsyncMock(return_value=None)
+    juridiq.create_person = AsyncMock(return_value={"id": "p-1"})
+    juridiq.create_task = AsyncMock(return_value=("t-1", "ok"))
+    zapsign = MagicMock()
+    zapsign.get_doc = AsyncMock()
+    monkeypatch.setattr("noviello_funil.pos_assinatura.notify_mario", AsyncMock())
+
+    await sweep_pos_assinatura(
+        get_db=lambda: conn, zapsign=zapsign, juridiq=juridiq,
+        jurichat=MagicMock(), settings=_Settings(),
+    )
+    zapsign.get_doc.assert_not_awaited()  # PDF já feito → não re-busca
+    row = conn.execute(
+        "SELECT intake_juridiq_em, tarefa_abertura_em FROM contrato WHERE id=?", (cid,),
+    ).fetchone()
+    assert row["intake_juridiq_em"] and row["tarefa_abertura_em"]

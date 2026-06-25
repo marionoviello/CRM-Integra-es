@@ -583,47 +583,59 @@ def list_leads_aguardando_humano(
 
 # --- Sweeper do pós-assinatura (#36, 25/jun) ---------------------------------
 
+# Carência: o sweep só pega contratos cujo pós começou há mais de N segundos —
+# dá tempo do WEBHOOK terminar sua execução antes do sweep entrar, evitando a
+# corrida web×sweep (Pessoa/tarefa duplicada). O webhook leva segundos; 120s
+# folga. (Revisão adversarial 25/jun, P2 concorrência.)
+_POS_GRACE_SECONDS: Final = 120
+
+
 def list_contratos_pos_pendentes(
-    conn: sqlite3.Connection, *, limite: int,
+    conn: sqlite3.Connection, *, limite: int, grace_seconds: int = _POS_GRACE_SECONDS,
 ) -> list[sqlite3.Row]:
     """Contratos ASSINADOS com algum sub-passo do pós PENDENTE — candidatos ao
     sweep de retomada.
 
-    ``pos_iniciado_em IS NOT NULL`` exclui contratos PRÉ-FEATURE (assinados antes
-    do pós existir / com a flag off — têm tudo NULL e NÃO devem ser processados
-    retroativamente). ``pos_travado_em IS NULL`` exclui os que já estouraram o
-    teto de tentativas (Mario já alertado). Pendente = intake OU arquivo OU
-    (tarefa E já tem person_id). Round-robin: menos tentados primeiro."""
+    ``pos_iniciado_em IS NOT NULL`` exclui contratos PRÉ-DEPLOY (têm tudo NULL e
+    NÃO devem ser processados retroativamente); ``pos_iniciado_em <= now-grace``
+    dá ao webhook tempo de terminar antes do sweep entrar (anti-corrida).
+    ``pos_travado_em IS NULL`` exclui os que estouraram o teto (Mario já alertado).
+    Pendente = intake OU arquivo OU (tarefa E já tem person_id). Round-robin:
+    menos tentados primeiro. ``arquivo_pdf_em`` volta pro sweep decidir se precisa
+    re-buscar o doc (só o passo de arquivo usa a URL fresca)."""
     return conn.execute(
-        "SELECT id, zapsign_doc_token, cliente_nome, pos_tentativas "
+        "SELECT id, zapsign_doc_token, cliente_nome, pos_tentativas, arquivo_pdf_em "
         "FROM contrato "
         "WHERE estado = 'ASSINADO' "
         "  AND pos_iniciado_em IS NOT NULL "
+        "  AND pos_iniciado_em <= datetime('now', ?) "
         "  AND pos_travado_em IS NULL "
         "  AND (intake_juridiq_em IS NULL "
         "       OR arquivo_pdf_em IS NULL "
         "       OR (tarefa_abertura_em IS NULL AND person_id IS NOT NULL)) "
         "ORDER BY pos_tentativas ASC, id ASC "
         "LIMIT ?",
-        (limite,),
+        (f"-{grace_seconds} seconds", limite),
     ).fetchall()
 
 
 def _update_contrato_best_effort(
     conn: sqlite3.Connection, sql: str, params: tuple,
-) -> None:
+) -> bool:
     """UPDATE no contrato com retry curto sob 'database is locked' e, se
     persistir, ENGOLE (best-effort) — roda no scheduler; um lock AQUI não pode
-    abortar o tick (pulando lembretes/follow-up). Erro não-lock propaga."""
+    abortar o tick (pulando lembretes/follow-up). Erro não-lock propaga. Retorna
+    True se gravou, False se engoliu sob lock persistente."""
     for tentativa in range(_MAX_RETRY_LOCK):
         try:
             conn.execute(sql, params)
-            return
+            return True
         except sqlite3.OperationalError as exc:
             if "locked" not in str(exc).lower():
                 raise
             if tentativa < _MAX_RETRY_LOCK - 1:
                 time.sleep(_RETRY_LOCK_BASE * (2 ** tentativa))
+    return False
 
 
 def marcar_pos_iniciado(conn: sqlite3.Connection, contrato_id: int) -> None:
@@ -648,10 +660,12 @@ def registrar_tentativa_pos(conn: sqlite3.Connection, contrato_id: int) -> None:
     )
 
 
-def marcar_pos_travado(conn: sqlite3.Connection, contrato_id: int) -> None:
+def marcar_pos_travado(conn: sqlite3.Connection, contrato_id: int) -> bool:
     """Marca pos_travado_em = now → o contrato SAI da fila do sweep (passo preso
-    após o teto; o Mario foi alertado pra resolver à mão). BEST-EFFORT."""
-    _update_contrato_best_effort(
+    após o teto). BEST-EFFORT; retorna True se a marca DUROU (o caller só alerta
+    o Mario se True → evita re-alertar todo tick caso o UPDATE seja engolido sob
+    lock persistente)."""
+    return _update_contrato_best_effort(
         conn,
         "UPDATE contrato SET pos_travado_em = datetime('now') WHERE id = ?",
         (contrato_id,),
