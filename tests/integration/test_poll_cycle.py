@@ -765,6 +765,136 @@ async def test_confirmar_horario_cria_evento_com_email_e_meet(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_confirmar_horario_grava_reuniao_antes_de_enviar(db_conn, monkeypatch):
+    """D1 (auditoria 24/jun): set_reuniao roda ANTES do send_message.
+
+    Se o processo morrer entre o create_event e o envio da confirmação
+    (deploy/OOM/restart do scheduler), a reunião já está persistida → os
+    lembretes 24h/2h/30min saem e o evento não fica órfão no Google. Antes
+    o set_reuniao vinha DEPOIS do send, abrindo a janela do no-show silencioso.
+    """
+    transcript = (
+        "Lead: Quero agendar\n"
+        "Atendente: Qual seu email?\n"
+        "Lead: jose@exemplo.com\n"
+        "Atendente: Tenho ter 14h\n"
+        "Lead: A terça 14h tá bom"
+    )
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar()
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="confirmar_horario",
+            mensagem="Agendado pra {{HORARIO_CONFIRMADO}}.",
+            horario_escolhido_iso="2027-06-08T14:00:00-03:00",
+            lead_email="jose@exemplo.com",
+            resumo_caso="Inventário SP",
+        )
+    )
+
+    # Espiona a ORDEM relativa entre set_reuniao (persistência no DB) e o
+    # send_message (envio ao lead). O primeiro "send" do log é a confirmação;
+    # o notify_mario manda outro depois, mas só o índice do primeiro importa.
+    ordem: list[str] = []
+    import noviello_funil.scheduler as sch
+
+    real_set_reuniao = sch.set_reuniao
+
+    def _spy_set_reuniao(*args, **kwargs):
+        ordem.append("set_reuniao")
+        return real_set_reuniao(*args, **kwargs)
+
+    monkeypatch.setattr(sch, "set_reuniao", _spy_set_reuniao)
+
+    async def _spy_send(*args, **kwargs):
+        ordem.append("send")
+        return {"id": "msg-1"}
+
+    jurichat.send_message = AsyncMock(side_effect=_spy_send)
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )
+
+    assert "set_reuniao" in ordem, "set_reuniao deveria ter sido chamado"
+    assert "send" in ordem, "send_message deveria ter sido chamado"
+    assert ordem.index("set_reuniao") < ordem.index("send"), (
+        f"set_reuniao deve preceder o envio ao lead (ordem={ordem})"
+    )
+    # Regressão: a reunião ficou de fato persistida.
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["reuniao_em"] == "2027-06-08T14:00:00-03:00"
+    assert lead["reuniao_event_id"] == "evt-1"
+
+
+@pytest.mark.asyncio
+async def test_confirmar_horario_double_booking_reoferece(db_conn):
+    """D2 (auditoria 24/jun): OUTRO lead já tem reunião exatamente neste
+    horário → o bot NÃO cria evento duplicado; reoferece a agenda atualizada.
+
+    O find_available_slots só lê o freeBusy do Calendar (eventual-consistente),
+    então o DB é a fonte de verdade pra barrar double-booking no confirmar.
+    """
+    slot_iso = "2027-06-08T14:00:00-03:00"
+    # Lead A (outro, NÃO due → o poll não o processa) já marcou esse horário.
+    db_conn.execute(
+        """INSERT INTO leads
+           (jurichat_lead_id, jurichat_conversation_id, contato_telefone,
+            contato_nome, estado, reuniao_em, reuniao_event_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        ("L-A", "C-A", "5511000000000", "Outro Lead",
+         Estado.EM_CONVERSA, slot_iso, "evt-A"),
+    )
+    # Lead B (o due) tenta confirmar O MESMO horário.
+    transcript = (
+        "Lead: jose@exemplo.com\n"
+        "Atendente: Tenho ter 14h\n"
+        "Lead: A terça 14h"
+    )
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar()
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="confirmar_horario",
+            mensagem="Agendado pra {{HORARIO_CONFIRMADO}}.",
+            horario_escolhido_iso=slot_iso,
+            lead_email="jose@exemplo.com",
+            resumo_caso="Inventário SP",
+        )
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )
+
+    # NÃO criou evento (slot já ocupado por outro lead).
+    calendar_client.create_event.assert_not_awaited()
+    lead_b = get_lead_by_conversation(db_conn, "C-1")
+    assert lead_b["reuniao_em"] is None              # B não marcou
+    assert lead_b["estado"] == Estado.EM_CONVERSA    # segue na conversa
+    # Reofereceu (mensagem menciona horário/agenda) e limpou os slots vencidos.
+    sent_text = jurichat.send_message.call_args_list[0][0][1]
+    assert "horário" in sent_text.lower() or "agenda" in sent_text.lower()
+    # Lead A permanece intacto.
+    lead_a = get_lead_by_conversation(db_conn, "C-A")
+    assert lead_a["reuniao_em"] == slot_iso
+
+
+@pytest.mark.asyncio
 async def test_propor_com_calendar_e_email_redireciona_pra_oferecer_horarios(db_conn):
     """Bug em campo (2026-06-09): Claude usou 'propor' pra lead pronto
     pra fechar, virou 'vou encaminhar pro Dr. Mario'. Guardrail força

@@ -4,6 +4,7 @@ import datetime
 from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 
 from noviello_funil.scheduler import run_reminder_cycle
@@ -162,6 +163,77 @@ async def test_noshow_ping_dispara_5min_apos_inicio_uma_vez(db_conn):
         mario_conversation_id="MARIO-1", base_url="https://funil.example",
     )
     assert jurichat2.send_message.call_args_list == []
+
+
+@pytest.mark.asyncio
+async def test_noshow_ping_falha_no_envio_nao_marca_token_e_retenta(db_conn):
+    """D3 (auditoria 24/jun): se o envio ao Mario falhar, o token de no-show NÃO
+    é gravado → o próximo tick re-tenta o ping em vez de perder o alerta pra
+    sempre. Antes o token era marcado ANTES de enviar e a falha sumia com o
+    aviso (a condição de re-ping exige noshow_token IS NULL)."""
+    lead_id = _insert_lead(db_conn, nome="Pedro")
+    reuniao = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=6)
+    db_conn.execute(
+        "UPDATE leads SET reuniao_em=?, reuniao_event_id='evt-1' WHERE id=?",
+        (reuniao.isoformat(), lead_id),
+    )
+
+    # 1º tick: envio ao Mario FALHA (RequestError é engolido pelo notify_mario,
+    # que agora retorna False).
+    jurichat = _make_jurichat()
+    jurichat.send_message = AsyncMock(side_effect=httpx.RequestError("down"))
+    await run_reminder_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat,
+        mario_conversation_id="MARIO-1", base_url="https://funil.example",
+    )
+    lead = db_conn.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+    assert lead["noshow_token"] is None, "token não pode ser gravado se o envio falhou"
+
+    # 2º tick: envio OK → pinga e AGORA grava o token (alerta não se perdeu).
+    jurichat2 = _make_jurichat()
+    await run_reminder_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat2,
+        mario_conversation_id="MARIO-1", base_url="https://funil.example",
+    )
+    para_mario = [
+        c for c in jurichat2.send_message.call_args_list if c.args[0] == "MARIO-1"
+    ]
+    assert len(para_mario) == 1
+    lead = db_conn.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+    assert lead["noshow_token"] is not None
+
+
+@pytest.mark.asyncio
+async def test_reuniao_em_invalido_e_limpa_e_alerta_mario(db_conn):
+    """D5 (auditoria 24/jun): reunião com reuniao_em inparseável (fantasma) é
+    LIMPA + alerta o Mario, em vez de ficar presa pra sempre no ciclo (sem
+    lembrete, sem no-show, nunca removida)."""
+    lead_id = _insert_lead(db_conn, nome="Fantasma")
+    # reuniao_em lixo (não passa pelo set_reuniao, que agora rejeita) — simula
+    # dado legado ou import manual quebrado.
+    db_conn.execute(
+        "UPDATE leads SET reuniao_em='horario-quebrado', reuniao_event_id='evt-x' "
+        "WHERE id=?",
+        (lead_id,),
+    )
+    jurichat = _make_jurichat()
+    await run_reminder_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat,
+        mario_conversation_id="MARIO-1", base_url="https://funil.example",
+    )
+    # Reunião fantasma removida.
+    lead = db_conn.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+    assert lead["reuniao_em"] is None
+    # Mario foi alertado (nada ao lead).
+    para_mario = [
+        c for c in jurichat.send_message.call_args_list if c.args[0] == "MARIO-1"
+    ]
+    assert len(para_mario) == 1
+    assert "inválido" in para_mario[0].args[1].lower()
+    para_lead = [
+        c for c in jurichat.send_message.call_args_list if c.args[0] == "C-1"
+    ]
+    assert para_lead == []
 
 
 @pytest.mark.asyncio

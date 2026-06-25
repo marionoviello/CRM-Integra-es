@@ -67,6 +67,7 @@ from noviello_funil.state import (
     create_lead_if_absent,
     get_horarios_oferecidos,
     get_lead_by_conversation,
+    lead_com_reuniao_no_horario,
     list_leads_aguardando_humano,
     list_leads_com_reuniao_futura,
     list_leads_para_polling,
@@ -463,6 +464,37 @@ async def _handle_confirmar_horario(
         schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
         return
 
+    # ISO normalizado (aware, com offset) — fonte única pro check D2, pro
+    # set_reuniao (D1) e pro payload da transição. Nunca o cru do LLM.
+    iso_normalizado = start.isoformat()
+
+    # D2 (auditoria 24/jun): barra double-booking. O find_available_slots só lê
+    # o freeBusy do Calendar (eventual-consistente), nunca o DB — dois leads
+    # conseguiriam confirmar o MESMO slot. Checa o DB antes de criar o evento:
+    # se outro lead já tem reunião nesse horário, reoferece a agenda atualizada
+    # SEM tocar na reunião atual deste lead (remarcação não perde o slot velho).
+    if lead_com_reuniao_no_horario(conn, iso_normalizado, lead_id) is not None:
+        logger.warning(
+            "double-booking barrado: horario %s já ocupado por outro lead "
+            "(lead=%s) — reoferecendo", iso_normalizado, lead_id,
+        )
+        register_error(conn, lead_id, "double_booking_barrado")
+        clear_horarios_oferecidos(conn, lead_id)
+        msg = (
+            "Ihh, esse horário acabou de ser preenchido! Vou te mostrar a "
+            "agenda atualizada com os próximos horários disponíveis."
+        )
+        try:
+            await jurichat.start_human_support(conv_id)
+            await jurichat.send_message(conv_id, msg)
+        except Exception as exc:
+            logger.exception(
+                "send_message(double_booking) failed lead=%s: %s", lead_id, exc,
+            )
+        update_transcript_hash(conn, lead_id, new_hash)
+        schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
+        return
+
     # Lead JÁ TINHA reunião marcada e confirmou outra (remarcação que
     # o Claude rotulou de confirmar em vez de remarcar): cancela o
     # evento antigo antes de criar o novo — senão Mario fica com
@@ -528,6 +560,18 @@ async def _handle_confirmar_horario(
         )
         return
 
+    # D1 (auditoria 24/jun): grava a reunião no DB IMEDIATAMENTE após o
+    # create_event, ANTES dos passos fire-and-forget (mensagem/send/intake/
+    # notify). Se o processo morrer no meio (deploy/OOM/restart do scheduler),
+    # o evento já existe no Google E o reuniao_em já está persistido → os
+    # lembretes 24h/2h/30min saem. Antes o set_reuniao vinha DEPOIS do send,
+    # abrindo a janela do evento órfão sem lembrete (no-show silencioso).
+    # iso_normalizado já foi calculado acima (fonte única, usada no check D2).
+    set_reuniao(
+        conn, lead_id,
+        reuniao_em_iso=iso_normalizado, event_id=event_id, meet_link=meet_link,
+    )
+
     # Substitui placeholders no texto de confirmação. Converte pro tz
     # da agenda ANTES de formatar — o LLM pode mandar offset de outro
     # fuso e o lead leria a hora errada.
@@ -567,16 +611,8 @@ async def _handle_confirmar_horario(
             lead_id, exc,
         )
 
-    # Salva reunião no DB pro reminder_cycle (lembretes 24h/2h/30min).
-    # Lead PERMANECE em_conversa pra bot poder processar resposta do
-    # lead a um lembrete (ex: "preciso remarcar").
-    # Persiste o ISO NORMALIZADO (aware, com offset) — nunca o cru do
-    # LLM, que pode vir naive e quebrar o reminder_cycle 3h.
-    iso_normalizado = start.isoformat()
-    set_reuniao(
-        conn, lead_id,
-        reuniao_em_iso=iso_normalizado, event_id=event_id, meet_link=meet_link,
-    )
+    # set_reuniao já rodou logo após o create_event (D1) — o lead PERMANECE
+    # em_conversa pra processar resposta a um lembrete (ex: "preciso remarcar").
     # clear_horarios_oferecidos + update_transcript_hash já rodaram ANTES do
     # create_event (S4, idempotência). Aqui só reagenda o próximo poll.
     schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
@@ -1937,8 +1973,10 @@ async def _ping_noshow(
     pessoa apareceu). Semi-auto pedido por ele em 20/jun.
     """
     token = secrets.token_urlsafe(24)
-    marcar_noshow_avisado(conn, lead["id"], token)
     if not mario_conversation_id:
+        # Ninguém pra avisar — grava o token mesmo assim pra não re-entrar
+        # neste ramo todo tick (não há alerta a perder).
+        marcar_noshow_avisado(conn, lead["id"], token)
         return
     horario = ""
     if lead["reuniao_em"]:
@@ -1954,7 +1992,12 @@ async def _ping_noshow(
         f"{base_url.rstrip('/')}/reuniao/cancelar/{token}"
         if base_url else "(FUNIL_BASE_URL não configurada)"
     )
-    await notify_mario(
+    # D3 (auditoria 24/jun): só grava o token (= avisado) se o alerta de fato
+    # saiu. Antes marcava ANTES de enviar — uma falha no notify_mario (Jurichat
+    # fora) sumia com o aviso de no-show pra sempre (condição de re-ping exige
+    # noshow_token IS NULL). Agora espelha _enviar_lembrete: falha → re-tenta no
+    # próximo tick enquanto a janela de no-show durar.
+    enviado = await notify_mario(
         jurichat,
         mario_conversation_id=mario_conversation_id,
         mensagem=(
@@ -1968,6 +2011,8 @@ async def _ping_noshow(
             f"{link}"
         ),
     )
+    if enviado:
+        marcar_noshow_avisado(conn, lead["id"], token)
 
 
 async def run_reminder_cycle(
@@ -2002,9 +2047,24 @@ async def run_reminder_cycle(
                 lead["reuniao_em"]
             ).astimezone(datetime.UTC)
         except (ValueError, TypeError) as exc:
-            logger.warning(
-                "lead=%s reuniao_em inválido %r: %s",
+            # D5 (auditoria 24/jun): reuniao_em inparseável = reunião fantasma.
+            # Antes só logava + continue → ficava presa AQUI todo tick (nunca
+            # lembrava, nunca virava no-show, nunca era limpa). Agora limpa +
+            # alerta o Mario pra ele remarcar manual se era real.
+            logger.error(
+                "lead=%s reuniao_em inválido %r — limpando + alertando: %s",
                 lead["id"], lead["reuniao_em"], exc,
+            )
+            clear_reuniao(conn, lead["id"])
+            await notify_mario(
+                jurichat,
+                mario_conversation_id=mario_conversation_id,
+                mensagem=(
+                    "⚠️ Uma reunião com horário inválido no sistema foi "
+                    f"removida (lead: {lead['contato_nome']}, "
+                    f"tel: {lead['contato_telefone']}). "
+                    "Se era uma reunião real, remarque manualmente."
+                ),
             )
             continue
 

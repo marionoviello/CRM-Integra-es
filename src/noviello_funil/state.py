@@ -548,8 +548,16 @@ def set_reuniao(
             from zoneinfo import ZoneInfo
             reuniao_dt = reuniao_dt.replace(tzinfo=ZoneInfo("America/Sao_Paulo"))
         reuniao_dt = reuniao_dt.astimezone(UTC)
-    except ValueError:
-        reuniao_dt = now  # parse falhou — vamos depender do reminder_cycle pra logar
+    except ValueError as exc:
+        # D5 (auditoria 24/jun): ISO inparseável NÃO pode virar reunião
+        # fantasma. Antes caía em ``reuniao_dt = now`` → delta≈0 marcava TODOS
+        # os lembretes como já enviados (pré-supressão) E gravava o lixo em
+        # reuniao_em, que o reminder_cycle pulava pra sempre (nunca limpava).
+        # O caller já normaliza (start.isoformat()), então isso só dispara em
+        # bug real — falha alto pra não persistir reunião quebrada.
+        raise ValueError(
+            f"reuniao_em_iso inválido em set_reuniao: {reuniao_em_iso!r}"
+        ) from exc
     delta = reuniao_dt - now
 
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -579,6 +587,26 @@ def set_reuniao(
             lead_id,
         ),
     )
+
+
+def lead_com_reuniao_no_horario(
+    conn: sqlite3.Connection, reuniao_em_iso: str, exclude_lead_id: int,
+) -> int | None:
+    """D2 (auditoria 24/jun): retorna o id de OUTRO lead que já tem reunião
+    marcada exatamente neste horário (``reuniao_em`` igual), ou ``None``.
+
+    Usado pra barrar double-booking no confirmar — o ``find_available_slots``
+    só lê o freeBusy do Calendar (eventual-consistente), nunca o DB, então dois
+    leads conseguiriam confirmar o mesmo slot. ``reuniao_em`` só fica não-nulo
+    enquanto a reunião está ativa (``clear_reuniao`` zera no cancel/remarcação),
+    então a comparação de igualdade no ISO normalizado é confiável: todos os
+    slots saem do mesmo ``find_available_slots`` (tz São Paulo, offset -03:00).
+    """
+    row = conn.execute(
+        "SELECT id FROM leads WHERE reuniao_em = ? AND id != ? LIMIT 1",
+        (reuniao_em_iso, exclude_lead_id),
+    ).fetchone()
+    return row["id"] if row else None
 
 
 def clear_reuniao(conn: sqlite3.Connection, lead_id: int) -> None:

@@ -1,15 +1,19 @@
 """Tests for the state repository layer."""
 
+import pytest
+
 from noviello_funil.state import (
     Estado,
     bump_turnos,
     create_lead_if_absent,
     get_lead_by_conversation,
     is_webhook_processed,
+    lead_com_reuniao_no_horario,
     list_leads_vencidos,
     mark_webhook_processed,
     record_lead_message_received,
     register_error,
+    set_reuniao,
     transicao,
 )
 
@@ -177,3 +181,35 @@ def test_list_leads_vencidos_returns_only_due_and_active(db_conn):
     vencidos = list_leads_vencidos(conn, fu1_apos_horas=48)
     ids = {row["jurichat_lead_id"] for row in vencidos}
     assert ids == {"L-idle", "L-fu1"}
+
+
+def test_set_reuniao_iso_invalido_levanta_e_nao_grava_fantasma(db_conn):
+    """D5 (auditoria 24/jun): ISO inparseável não vira reunião fantasma —
+    set_reuniao levanta ValueError em vez de gravar reuniao_em=now (que
+    suprimiria todos os lembretes e ficaria presa no reminder_cycle)."""
+    lead = create_lead_if_absent(db_conn, "L-1", "C-1", "5511...", "Maria")
+    with pytest.raises(ValueError):
+        set_reuniao(
+            db_conn, lead["id"],
+            reuniao_em_iso="não-é-uma-data", event_id="evt", meet_link="",
+        )
+    atual = get_lead_by_conversation(db_conn, "C-1")
+    assert atual["reuniao_em"] is None  # nada de fantasma gravado
+
+
+def test_lead_com_reuniao_no_horario_detecta_outro_e_exclui_self(db_conn):
+    """D2 (auditoria 24/jun): acha OUTRO lead com reunião no mesmo horário;
+    nunca acusa o próprio lead (exclude_lead_id) nem horário livre."""
+    slot = "2027-06-08T14:00:00-03:00"
+    a = create_lead_if_absent(db_conn, "L-A", "C-A", "5511...", "A")
+    b = create_lead_if_absent(db_conn, "L-B", "C-B", "5511...", "B")
+    set_reuniao(db_conn, a["id"], reuniao_em_iso=slot, event_id="evt-a", meet_link="")
+    # B procurando o slot → acha A.
+    assert lead_com_reuniao_no_horario(db_conn, slot, b["id"]) == a["id"]
+    # A procurando o próprio slot → exclui self → None.
+    assert lead_com_reuniao_no_horario(db_conn, slot, a["id"]) is None
+    # Horário livre → None.
+    assert (
+        lead_com_reuniao_no_horario(db_conn, "2099-01-01T10:00:00-03:00", b["id"])
+        is None
+    )

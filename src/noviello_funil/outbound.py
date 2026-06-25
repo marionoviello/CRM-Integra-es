@@ -495,7 +495,7 @@ async def notify_mario(
     *,
     mario_conversation_id: str,
     mensagem: str,
-) -> None:
+) -> bool:
     """Send notification message to Mario via Jurichat.
 
     ``mario_conversation_id`` is one or more conversation ids (CSV) with
@@ -506,7 +506,13 @@ async def notify_mario(
     Catches the full HTTP error surface (``OutboundError`` for exhausted
     retries, ``HTTPStatusError`` for non-retryable 4xx like a wrong
     ``MARIO_CONVERSATION_ID``, ``RequestError`` for transport failures).
+
+    Retorna ``True`` se ao menos um destinatário recebeu a mensagem, ``False``
+    se todos falharam (ou não havia destinatário). Callers que ignoram o
+    retorno seguem fire-and-forget; o ping de no-show (D3) usa o bool pra só
+    gravar o token quando o alerta de fato saiu.
     """
+    algum_sucesso = False
     for conv_id in split_conversation_ids(mario_conversation_id):
         try:
             # Pré-requisito: a conversa do destinatário também precisa
@@ -518,5 +524,7 @@ async def notify_mario(
             await client.send_message(
                 conv_id, mensagem, brand_sanitize=False,
             )
+            algum_sucesso = True
         except (OutboundError, httpx.HTTPStatusError, httpx.RequestError) as exc:
             logger.error("notify_mario failed (%s): %s", conv_id, exc)
+    return algum_sucesso
