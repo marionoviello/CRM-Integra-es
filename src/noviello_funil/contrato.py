@@ -620,6 +620,44 @@ def registrar_assinatura(
     )
 
 
+# #36 (25/jun): marcação por-passo do pós-assinatura. Carimba o timestamp SÓ após
+# o passo dar certo (espelha tarefa_publicacao) → passo que falha/crasha fica NULL
+# e re-tenta. Whitelist (nomes vêm do código, não de input — defesa em profundidade).
+_POS_TIMESTAMP_COLS: Final = frozenset(
+    {"intake_juridiq_em", "arquivo_pdf_em", "tarefa_abertura_em"}
+)
+_POS_REF_COLS: Final = frozenset(
+    {"person_id", "signed_file_path", "juridiq_task_id"}
+)
+
+
+def marcar_passo_pos_assinatura(
+    conn: sqlite3.Connection,
+    contrato_id: int,
+    *,
+    passo_em: str,
+    ref_col: str | None = None,
+    ref_valor: str | None = None,
+) -> None:
+    """#36 (25/jun): carimba um sub-passo do pós-assinatura como FEITO (timestamp
+    now) + grava a ref (person_id/signed_file_path/juridiq_task_id), atômico. Só
+    chamar APÓS sucesso do passo."""
+    if passo_em not in _POS_TIMESTAMP_COLS:
+        raise ValueError(f"passo_em inválido: {passo_em!r}")
+    sets = [f"{passo_em} = datetime('now')"]
+    params: list[Any] = []
+    if ref_col is not None:
+        if ref_col not in _POS_REF_COLS:
+            raise ValueError(f"ref_col inválida: {ref_col!r}")
+        sets.append(f"{ref_col} = ?")
+        params.append(ref_valor)
+    sets.append("atualizado_em = datetime('now')")
+    conn.execute(
+        f"UPDATE contrato SET {', '.join(sets)} WHERE id = ?",
+        (*params, contrato_id),
+    )
+
+
 # --- O GATE: envio à assinatura (única porta pro create-doc) --------------
 
 async def enviar_para_assinatura(

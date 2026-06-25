@@ -20,6 +20,7 @@ from noviello_funil.contrato import (
     get_contrato,
     iniciar_contrato,
     link_aprovacao,
+    marcar_passo_pos_assinatura,
     montar_corpo_create_doc,
     montar_corpo_upload,
     montar_data_contrato,
@@ -170,6 +171,37 @@ def test_token_unico():
 
 
 # --- criar_contrato ----------------------------------------------------------
+
+def test_marcar_passo_pos_assinatura_carimba_grava_ref_e_valida():
+    """#36 (25/jun): carimba o timestamp do sub-passo + grava a ref, sem tocar
+    nos outros passos; rejeita passo/ref fora da whitelist (defesa anti-injeção)."""
+    conn = _db()
+    c = criar_contrato(
+        conn, cliente_nome="Fulano Teste", valor_honorarios="R$ 5.000",
+        template_id="T1",
+    )
+    cid = c["id"]
+    marcar_passo_pos_assinatura(
+        conn, cid, passo_em="intake_juridiq_em",
+        ref_col="person_id", ref_valor="p-123",
+    )
+    row = conn.execute(
+        "SELECT intake_juridiq_em, person_id, arquivo_pdf_em FROM contrato WHERE id=?",
+        (cid,),
+    ).fetchone()
+    assert row["intake_juridiq_em"] is not None
+    assert row["person_id"] == "p-123"
+    assert row["arquivo_pdf_em"] is None  # outros passos intocados
+    # passo fora da whitelist → ValueError
+    with pytest.raises(ValueError):
+        marcar_passo_pos_assinatura(conn, cid, passo_em="estado")
+    # ref fora da whitelist → ValueError
+    with pytest.raises(ValueError):
+        marcar_passo_pos_assinatura(
+            conn, cid, passo_em="arquivo_pdf_em", ref_col="cpf", ref_valor="x",
+        )
+    conn.close()
+
 
 def test_criar_contrato_pendente_com_trilha():
     conn = _db()

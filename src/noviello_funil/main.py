@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from noviello_funil.asaas import AsaasClient
 from noviello_funil.config import Settings
 from noviello_funil.db import connect, run_migrations
+from noviello_funil.juridiq_client import JuridiqClient
 from noviello_funil.outbound import JurichatClient
 from noviello_funil.rotas_contrato import register_contrato_routes
 from noviello_funil.webhooks import build_lead_message_processor, register_webhooks
@@ -53,8 +54,15 @@ def create_app() -> FastAPI:
             settings.asaas_api_key, settings.asaas_base_url,
             user_agent=settings.asaas_user_agent,
         )
+    # #36 (25/jun): pós-assinatura ZapSign — intake/tarefa no Juridiq. Só
+    # instancia com a flag ligada E a chave presente (default off, sandbox-first).
+    juridiq: JuridiqClient | None = None
+    if settings.pos_assinatura_ativo and settings.juridiq_api_key:
+        juridiq = JuridiqClient(
+            settings.juridiq_api_key, settings.juridiq_base_url,
+        )
     jurichat: JurichatClient | None = None
-    if zapsign is not None or asaas is not None:
+    if zapsign is not None or asaas is not None or juridiq is not None:
         jurichat = JurichatClient(
             settings.jurichat_api_key, settings.jurichat_base_url,
             bot_user_id=settings.jurichat_bot_user_id,
@@ -64,7 +72,7 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI):
         yield
         conn.close()
-        for cliente in (zapsign, asaas, jurichat):
+        for cliente in (zapsign, asaas, juridiq, jurichat):
             if cliente is not None:
                 await cliente.aclose()
 
@@ -88,6 +96,7 @@ def create_app() -> FastAPI:
         zapsign=zapsign,
         asaas=asaas,
         jurichat=jurichat,
+        juridiq=juridiq,
     )
 
     return app

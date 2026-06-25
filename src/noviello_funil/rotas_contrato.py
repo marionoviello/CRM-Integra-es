@@ -89,6 +89,7 @@ def register_contrato_routes(
     zapsign: Any,
     asaas: Any,
     jurichat: Any = None,
+    juridiq: Any = None,
 ) -> None:
     """Registra as rotas do pipeline de contrato em ``app``.
 
@@ -331,7 +332,8 @@ def register_contrato_routes(
         )
 
         background_tasks.add_task(
-            _processar_zapsign, get_db, zapsign, jurichat, settings, doc_token,
+            _processar_zapsign, get_db, zapsign, jurichat, juridiq,
+            settings, doc_token,
         )
         return Response(content=b'{"ok":true}', media_type="application/json")
 
@@ -392,6 +394,7 @@ async def _processar_zapsign(
     get_db: Callable[[], Any],
     zapsign: Any,
     jurichat: Any,
+    juridiq: Any,
     settings: Any,
     doc_token: str,
 ) -> None:

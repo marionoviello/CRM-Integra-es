@@ -121,6 +121,12 @@ class Settings(BaseSettings):
     juridiq_api_key: str = ""
     juridiq_base_url: str = "https://api.juridiq.com.br"
 
+    # #36 (25/jun): pós-assinatura ZapSign. Quando um contrato é assinado, roda
+    # 3 sub-passos best-effort: intake do cliente no Juridiq, arquivo do PDF
+    # assinado (disco local), tarefa de abertura no Juridiq. Default OFF — só
+    # liga após smoke em sandbox. Exige juridiq_api_key.
+    pos_assinatura_ativo: bool = False
+
     # DataJud (CNJ) — cruzamento da carteira pra pegar falhas SILENCIOSAS
     # do monitoramento do Juridiq (carteira_datajud). A chave abaixo é a
     # chave PÚBLICA oficial do CNJ (publicada em datajud-wiki.cnj.jus.br),
