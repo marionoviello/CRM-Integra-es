@@ -120,7 +120,8 @@ def _contrato_assinado(conn, *, telefone="5511999990000", person_id=None):
     )
     conn.execute(
         "UPDATE contrato SET estado='ASSINADO', cliente_telefone=?, "
-        "cliente_email='c@x.com', person_id=?, tipo_caso='inventario' WHERE id=?",
+        "cliente_email='c@x.com', person_id=?, tipo_caso='inventario', "
+        "zapsign_doc_token='ZS-TOKEN' WHERE id=?",
         (telefone, person_id, c["id"]),
     )
     return c["id"]
@@ -155,6 +156,11 @@ async def test_processar_pos_3_passos_e_idempotente(monkeypatch):
     assert row["arquivo_pdf_em"] and row["signed_file_path"].endswith("contrato-1.pdf")
     assert row["tarefa_abertura_em"] and row["juridiq_task_id"] == "t-1"
     assert notify.await_count == 1
+    # initialDate tem que ser DATE pura 'YYYY-MM-DD' (não datetime ISO com tz) —
+    # único formato aceito pelo POST /task/ do Juridiq.
+    corpo = juridiq.create_task.await_args.args[0]
+    assert "T" not in corpo["initialDate"]
+    assert len(corpo["initialDate"]) == 10 and corpo["initialDate"][4] == "-"
 
     # 2ª reentrega → tudo já feito, nenhum passo re-roda, sem novo notify.
     await processar_pos_assinatura(
@@ -198,3 +204,153 @@ async def test_processar_pos_sem_telefone_pula_intake_e_tarefa(monkeypatch):
     assert row["tarefa_abertura_em"] is None  # tarefa pulada (sem person_id)
     juridiq.create_task.assert_not_awaited()
     assert notify.await_count == 1  # resumo avisa "ficha pulada"
+
+
+# --- F6: sweeper (retomada) -------------------------------------------------
+
+from noviello_funil.scheduler import sweep_pos_assinatura  # noqa: E402
+from noviello_funil.state import (  # noqa: E402
+    list_contratos_pos_pendentes,
+    marcar_pos_iniciado,
+    marcar_pos_travado,
+    registrar_tentativa_pos,
+)
+
+
+def test_list_contratos_pos_pendentes_filtros():
+    """Sweep pega só ASSINADO + pos_iniciado + pendente + não-travado. Exclui
+    pré-feature (não iniciado), tudo-feito, travado e intake-sem-telefone-feito."""
+    conn = connect(":memory:")
+    run_migrations(conn)
+    # c1: iniciado + intake pendente → PEGA
+    c1 = _contrato_assinado(conn, telefone="5511", person_id=None)
+    marcar_pos_iniciado(conn, c1)
+    # c2: PRÉ-FEATURE (não iniciado), tudo pendente → IGNORA
+    _contrato_assinado(conn, telefone="5511", person_id=None)
+    # c3: iniciado + tudo feito → IGNORA
+    c3 = _contrato_assinado(conn, telefone="5511", person_id="p")
+    marcar_pos_iniciado(conn, c3)
+    conn.execute(
+        "UPDATE contrato SET intake_juridiq_em=datetime('now'), "
+        "arquivo_pdf_em=datetime('now'), tarefa_abertura_em=datetime('now') WHERE id=?",
+        (c3,),
+    )
+    # c4: iniciado + travado → IGNORA
+    c4 = _contrato_assinado(conn, telefone="5511", person_id=None)
+    marcar_pos_iniciado(conn, c4)
+    marcar_pos_travado(conn, c4)
+    # c5: intake-pulado-sem-telefone (intake_em set, person NULL) + arquivo feito
+    #     → NÃO pendente (tarefa exige person_id) → IGNORA (não loopa)
+    c5 = _contrato_assinado(conn, telefone="", person_id=None)
+    marcar_pos_iniciado(conn, c5)
+    conn.execute(
+        "UPDATE contrato SET intake_juridiq_em=datetime('now'), "
+        "arquivo_pdf_em=datetime('now') WHERE id=?", (c5,),
+    )
+    ids = {r["id"] for r in list_contratos_pos_pendentes(conn, limite=10)}
+    assert ids == {c1}
+
+
+def test_marcadores_pos_sweep_set_once_e_incremento():
+    conn = connect(":memory:")
+    run_migrations(conn)
+    c = _contrato_assinado(conn, telefone="5511", person_id=None)
+    marcar_pos_iniciado(conn, c)
+    t1 = conn.execute("SELECT pos_iniciado_em FROM contrato WHERE id=?", (c,)).fetchone()[0]
+    marcar_pos_iniciado(conn, c)  # set-once (COALESCE) — não sobrescreve
+    t2 = conn.execute("SELECT pos_iniciado_em FROM contrato WHERE id=?", (c,)).fetchone()[0]
+    assert t1 == t2 and t1 is not None
+    registrar_tentativa_pos(conn, c)
+    registrar_tentativa_pos(conn, c)
+    assert conn.execute("SELECT pos_tentativas FROM contrato WHERE id=?", (c,)).fetchone()[0] == 2
+    marcar_pos_travado(conn, c)
+    assert conn.execute("SELECT pos_travado_em FROM contrato WHERE id=?", (c,)).fetchone()[0] is not None
+
+
+@pytest.mark.asyncio
+async def test_sweep_pos_retoma_passo_que_falhou(monkeypatch):
+    """1º sweep: intake falha (Juridiq fora) mas arquivo OK; 2º sweep: intake
+    sucesso → tarefa criada. Prova a retomada que o webhook não dá."""
+    conn = connect(":memory:")
+    run_migrations(conn)
+    cid = _contrato_assinado(conn, telefone="5511", person_id=None)
+    marcar_pos_iniciado(conn, cid)  # simula que o webhook iniciou o pós
+
+    juridiq = MagicMock()
+    juridiq.search_person_by_phone = AsyncMock(return_value=None)
+    juridiq.create_person = AsyncMock(side_effect=[RuntimeError("juridiq down"), {"id": "p-2"}])
+    juridiq.create_task = AsyncMock(return_value=("t-1", "ok"))
+    zapsign = MagicMock()
+    zapsign.get_doc = AsyncMock(return_value={"signed_file": "https://z/fresh.pdf"})
+    monkeypatch.setattr(
+        "noviello_funil.pos_assinatura.arquivar_pdf_assinado",
+        AsyncMock(return_value="data/contratos_assinados/contrato-1.pdf"),
+    )
+    monkeypatch.setattr("noviello_funil.pos_assinatura.notify_mario", AsyncMock())
+
+    await sweep_pos_assinatura(
+        get_db=lambda: conn, zapsign=zapsign, juridiq=juridiq,
+        jurichat=MagicMock(), settings=_Settings(),
+    )
+    row = conn.execute(
+        "SELECT intake_juridiq_em, arquivo_pdf_em, tarefa_abertura_em, pos_tentativas "
+        "FROM contrato WHERE id=?", (cid,),
+    ).fetchone()
+    assert row["intake_juridiq_em"] is None  # intake falhou
+    assert row["arquivo_pdf_em"] is not None  # arquivo (independente) OK
+    assert row["tarefa_abertura_em"] is None  # sem person_id, tarefa pulada
+    assert row["pos_tentativas"] == 1
+    zapsign.get_doc.assert_awaited_with("ZS-TOKEN")  # re-buscou URL fresca
+
+    await sweep_pos_assinatura(
+        get_db=lambda: conn, zapsign=zapsign, juridiq=juridiq,
+        jurichat=MagicMock(), settings=_Settings(),
+    )
+    row = conn.execute(
+        "SELECT intake_juridiq_em, person_id, tarefa_abertura_em, pos_tentativas "
+        "FROM contrato WHERE id=?", (cid,),
+    ).fetchone()
+    assert row["intake_juridiq_em"] and row["person_id"] == "p-2"
+    assert row["tarefa_abertura_em"] and row["pos_tentativas"] == 2
+
+
+@pytest.mark.asyncio
+async def test_sweep_pos_escala_e_trava_apos_teto(monkeypatch):
+    """No teto de tentativas com passo ainda pendente: trava (sai da fila) +
+    alerta o Mario 1×."""
+    conn = connect(":memory:")
+    run_migrations(conn)
+    cid = _contrato_assinado(conn, telefone="5511", person_id=None)
+    marcar_pos_iniciado(conn, cid)
+    conn.execute("UPDATE contrato SET pos_tentativas=4 WHERE id=?", (cid,))  # 1 abaixo do teto
+
+    juridiq = MagicMock()
+    juridiq.search_person_by_phone = AsyncMock(return_value=None)
+    juridiq.create_person = AsyncMock(side_effect=RuntimeError("down"))  # intake sempre falha
+    juridiq.create_task = AsyncMock()
+    zapsign = MagicMock()
+    zapsign.get_doc = AsyncMock(return_value={"signed_file": "x"})
+    monkeypatch.setattr(
+        "noviello_funil.pos_assinatura.arquivar_pdf_assinado", AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr("noviello_funil.pos_assinatura.notify_mario", AsyncMock())
+    notify_sched = AsyncMock()
+    monkeypatch.setattr("noviello_funil.scheduler.notify_mario", notify_sched)
+
+    await sweep_pos_assinatura(
+        get_db=lambda: conn, zapsign=zapsign, juridiq=juridiq,
+        jurichat=MagicMock(), settings=_Settings(),
+    )
+    row = conn.execute(
+        "SELECT pos_tentativas, pos_travado_em FROM contrato WHERE id=?", (cid,),
+    ).fetchone()
+    assert row["pos_tentativas"] == 5  # 4+1 = teto
+    assert row["pos_travado_em"] is not None  # travado
+    notify_sched.assert_awaited_once()  # alertou o Mario
+
+    # 2º sweep: travado → não é mais pego (não tenta de novo).
+    await sweep_pos_assinatura(
+        get_db=lambda: conn, zapsign=zapsign, juridiq=juridiq,
+        jurichat=MagicMock(), settings=_Settings(),
+    )
+    assert juridiq.create_person.await_count == 1

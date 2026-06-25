@@ -581,6 +581,83 @@ def list_leads_aguardando_humano(
     return conn.execute(sql, params).fetchall()
 
 
+# --- Sweeper do pós-assinatura (#36, 25/jun) ---------------------------------
+
+def list_contratos_pos_pendentes(
+    conn: sqlite3.Connection, *, limite: int,
+) -> list[sqlite3.Row]:
+    """Contratos ASSINADOS com algum sub-passo do pós PENDENTE — candidatos ao
+    sweep de retomada.
+
+    ``pos_iniciado_em IS NOT NULL`` exclui contratos PRÉ-FEATURE (assinados antes
+    do pós existir / com a flag off — têm tudo NULL e NÃO devem ser processados
+    retroativamente). ``pos_travado_em IS NULL`` exclui os que já estouraram o
+    teto de tentativas (Mario já alertado). Pendente = intake OU arquivo OU
+    (tarefa E já tem person_id). Round-robin: menos tentados primeiro."""
+    return conn.execute(
+        "SELECT id, zapsign_doc_token, cliente_nome, pos_tentativas "
+        "FROM contrato "
+        "WHERE estado = 'ASSINADO' "
+        "  AND pos_iniciado_em IS NOT NULL "
+        "  AND pos_travado_em IS NULL "
+        "  AND (intake_juridiq_em IS NULL "
+        "       OR arquivo_pdf_em IS NULL "
+        "       OR (tarefa_abertura_em IS NULL AND person_id IS NOT NULL)) "
+        "ORDER BY pos_tentativas ASC, id ASC "
+        "LIMIT ?",
+        (limite,),
+    ).fetchall()
+
+
+def _update_contrato_best_effort(
+    conn: sqlite3.Connection, sql: str, params: tuple,
+) -> None:
+    """UPDATE no contrato com retry curto sob 'database is locked' e, se
+    persistir, ENGOLE (best-effort) — roda no scheduler; um lock AQUI não pode
+    abortar o tick (pulando lembretes/follow-up). Erro não-lock propaga."""
+    for tentativa in range(_MAX_RETRY_LOCK):
+        try:
+            conn.execute(sql, params)
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
+            if tentativa < _MAX_RETRY_LOCK - 1:
+                time.sleep(_RETRY_LOCK_BASE * (2 ** tentativa))
+
+
+def marcar_pos_iniciado(conn: sqlite3.Connection, contrato_id: int) -> None:
+    """Carimba pos_iniciado_em na PRIMEIRA execução do pós (COALESCE → set-once,
+    não sobrescreve). É o que torna o contrato elegível ao sweep — discrimina os
+    pós-feature dos pré-existentes (que têm tudo NULL). BEST-EFFORT."""
+    _update_contrato_best_effort(
+        conn,
+        "UPDATE contrato SET pos_iniciado_em = "
+        "COALESCE(pos_iniciado_em, datetime('now')) WHERE id = ?",
+        (contrato_id,),
+    )
+
+
+def registrar_tentativa_pos(conn: sqlite3.Connection, contrato_id: int) -> None:
+    """Incrementa pos_tentativas (1 por passada do sweep). BEST-EFFORT: falhar =
+    a tentativa não conta (re-tenta no próximo sweep, sem dano)."""
+    _update_contrato_best_effort(
+        conn,
+        "UPDATE contrato SET pos_tentativas = pos_tentativas + 1 WHERE id = ?",
+        (contrato_id,),
+    )
+
+
+def marcar_pos_travado(conn: sqlite3.Connection, contrato_id: int) -> None:
+    """Marca pos_travado_em = now → o contrato SAI da fila do sweep (passo preso
+    após o teto; o Mario foi alertado pra resolver à mão). BEST-EFFORT."""
+    _update_contrato_best_effort(
+        conn,
+        "UPDATE contrato SET pos_travado_em = datetime('now') WHERE id = ?",
+        (contrato_id,),
+    )
+
+
 def set_lead_email(conn: sqlite3.Connection, lead_id: int, email: str) -> None:
     """D4 (25/jun): persiste o email do lead (lowercase) pra casar reuniões
     marcadas FORA do bot com o lead certo. Idempotente — só grava se o valor

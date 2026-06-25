@@ -3,8 +3,10 @@
 Quando um contrato é assinado (estado ASSINADO), roda 3 sub-passos best-effort e
 independentes — intake do cliente no Juridiq, arquivo do PDF assinado, tarefa de
 abertura — cada um com marcação durável por-passo (carimba só após sucesso →
-passo que falha/crasha fica NULL e re-tenta). NUNCA levanta (o ASSINADO é fato
-consumado; o webhook já respondeu 200).
+passo que falha/crasha fica NULL e re-tenta no SWEEP do scheduler). NUNCA levanta
+(o ASSINADO é fato consumado; o webhook já respondeu 200). O webhook signed NÃO
+reentrega após o 200 (e o gate de idempotência descartaria) → a retomada é
+responsabilidade do sweep periódico, não do webhook.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from zoneinfo import ZoneInfo
 from .contrato import marcar_passo_pos_assinatura
 from .juridiq_client import intake_cliente_assinado
 from .outbound import notify_mario
+from .state import marcar_pos_iniciado
 
 logger = logging.getLogger(__name__)
 
@@ -153,14 +156,20 @@ async def processar_pos_assinatura(
 ) -> None:
     """Roda os 3 sub-passos (intake / arquivo / tarefa) best-effort e idempotentes
     por-passo, após o ASSINADO. Cada passo só roda se o seu timestamp está NULL;
-    carimba só após sucesso (passo que falha fica NULL e re-tenta na próxima
-    reentrega do webhook signed). NUNCA levanta."""
+    carimba só após sucesso (passo que falha fica NULL e re-tenta no próximo SWEEP
+    do scheduler — o webhook signed NÃO reentrega após o 200). NUNCA levanta.
+
+    Chamado pelo webhook (1ª vez) E pelo sweep (retomada). ``signed_file_url`` deve
+    ser FRESCO (o sweep re-busca via get_doc; a URL salva expira em ~60min)."""
     try:
         contrato = conn.execute(
             "SELECT * FROM contrato WHERE id = ?", (contrato_id,),
         ).fetchone()
         if contrato is None:
             return
+        # Marca o contrato como elegível ao sweep (set-once) — discrimina os
+        # pós-feature dos pré-existentes. Carimbado na 1ª execução (webhook).
+        marcar_pos_iniciado(conn, contrato_id)
         houve_acao = False
         person_id = contrato["person_id"]
 
@@ -210,7 +219,10 @@ async def processar_pos_assinatura(
                 juridiq, person_id=person_id, cliente_nome=contrato["cliente_nome"],
                 tipo_caso=contrato["tipo_caso"], column_id=settings.task_column_id,
                 priority=settings.task_priority,
-                initial_date=datetime.datetime.now(_TZ_BR).isoformat(),
+                # DATE pura 'YYYY-MM-DD' — único formato comprovadamente aceito
+                # pelo POST /task/ (descoberto no teste de campo 15/jun; espelha
+                # montar_corpo_tarefa). isoformat() completo (com tz) é rejeitado.
+                initial_date=datetime.datetime.now(_TZ_BR).date().isoformat(),
             )
             if task_id:
                 marcar_passo_pos_assinatura(

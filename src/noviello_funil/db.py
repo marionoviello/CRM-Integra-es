@@ -323,7 +323,7 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "contrato", "reprovacao_token", "TEXT")
     # #36 (25/jun): pós-assinatura — marcação POR-PASSO (timestamp NULL=pendente,
     # carimbado SÓ após sucesso, espelha tarefa_publicacao/lembrete_*_em → passo
-    # que falha/crasha fica NULL e re-tenta no próximo webhook/sweeper). person_id
+    # que falha/crasha fica NULL e re-tenta no SWEEP do scheduler). person_id
     # (já existe) guarda a ficha Juridiq do intake; signed_file_path = caminho
     # local do PDF arquivado; juridiq_task_id = id da tarefa de abertura.
     _ensure_column(conn, "contrato", "intake_juridiq_em", "TEXT")
@@ -331,6 +331,13 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "contrato", "signed_file_path", "TEXT")
     _ensure_column(conn, "contrato", "tarefa_abertura_em", "TEXT")
     _ensure_column(conn, "contrato", "juridiq_task_id", "TEXT")
+    # Sweeper do pós: pos_iniciado_em é carimbado quando o WEBHOOK inicia o pós
+    # (discrimina contratos pós-feature — pré-existentes têm NULL e NÃO são
+    # varridos). pos_tentativas/pos_travado_em = teto de re-tentativas do sweep
+    # com escalação pro Mario (bounda duplicata/spam de passo preso).
+    _ensure_column(conn, "contrato", "pos_iniciado_em", "TEXT")
+    _ensure_column(conn, "contrato", "pos_tentativas", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "contrato", "pos_travado_em", "TEXT")
     # Idempotência por chave de negócio (cpf só-dígitos + tipo_caso) enquanto
     # o contrato está ABERTO (montagem/criando_doc/pendente_revisao): impede
     # que um duplo-comando "gerar contrato" crie 2 contratos/2 cobranças pro

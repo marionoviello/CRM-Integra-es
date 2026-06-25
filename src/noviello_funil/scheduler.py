@@ -62,6 +62,7 @@ from noviello_funil.outbound import (
     split_conversation_ids,
 )
 from noviello_funil.person_index import resolver_telefone
+from noviello_funil.pos_assinatura import processar_pos_assinatura
 from noviello_funil.redacao import contem_promessa_resultado
 from noviello_funil.state import (
     CLEAR_PROXIMA_ACAO,
@@ -76,6 +77,7 @@ from noviello_funil.state import (
     get_lead_by_conversation,
     lead_com_reuniao_no_horario,
     lead_por_email,
+    list_contratos_pos_pendentes,
     list_leads_aguardando_humano,
     list_leads_com_reuniao_futura,
     list_leads_para_polling,
@@ -86,11 +88,13 @@ from noviello_funil.state import (
     marcar_erro_alertado,
     marcar_evento_manual_alertado,
     marcar_noshow_avisado,
+    marcar_pos_travado,
     mark_cliente_checado,
     mark_lead_activity_now,
     mark_lembrete_enviado,
     mark_urgencia_alertada,
     register_error,
+    registrar_tentativa_pos,
     reset_turnos,
     schedule_next_action_seconds,
     set_horarios_oferecidos,
@@ -101,6 +105,7 @@ from noviello_funil.state import (
     update_transcript_hash,
 )
 from noviello_funil.urgencia import detectar_urgencia
+from noviello_funil.zapsign_client import ZapSignClient
 
 logger = logging.getLogger(__name__)
 
@@ -2379,6 +2384,102 @@ async def sync_reunioes_manuais(
             )
 
 
+# Sweeper do pós-assinatura (#36, 25/jun) — retoma sub-passos que falharam (o
+# webhook signed não reentrega após o 200). Trabalho LIMITADO por tick.
+_POS_SWEEP_LIMIT = 10
+_POS_MAX_TENTATIVAS = 5
+
+
+def _pos_pendente(row: Any) -> bool:
+    """True se algum sub-passo ainda falta (mesma regra da query do sweep)."""
+    return (
+        row["intake_juridiq_em"] is None
+        or row["arquivo_pdf_em"] is None
+        or (row["tarefa_abertura_em"] is None and row["person_id"] is not None)
+    )
+
+
+async def _escalar_pos_se_travado(
+    conn: Any,
+    contrato_id: int,
+    cliente_nome: str,
+    jurichat: JurichatClient,
+    mario_conversation_id: str,
+) -> None:
+    """Após o teto de tentativas, se ainda há passo pendente: TRAVA o contrato
+    (sai da fila do sweep) e alerta o Mario 1× pra resolver à mão. Re-lê o estado
+    do banco (não confia em contador otimista)."""
+    row = conn.execute(
+        "SELECT pos_tentativas, intake_juridiq_em, arquivo_pdf_em, "
+        "tarefa_abertura_em, person_id FROM contrato WHERE id = ?",
+        (contrato_id,),
+    ).fetchone()
+    if row is None or row["pos_tentativas"] < _POS_MAX_TENTATIVAS:
+        return
+    if not _pos_pendente(row):
+        return  # resolveu tudo na última tentativa
+    marcar_pos_travado(conn, contrato_id)
+    if not mario_conversation_id:
+        return
+    faltam = []
+    if row["intake_juridiq_em"] is None:
+        faltam.append("ficha")
+    if row["arquivo_pdf_em"] is None:
+        faltam.append("PDF")
+    if row["tarefa_abertura_em"] is None and row["person_id"] is not None:
+        faltam.append("tarefa")
+    try:
+        await notify_mario(
+            jurichat,
+            mario_conversation_id=mario_conversation_id,
+            mensagem=(
+                f"⚠️ Pós-assinatura TRAVADO — {cliente_nome} (contrato "
+                f"#{contrato_id}) após {_POS_MAX_TENTATIVAS} tentativas. "
+                f"Falta: {', '.join(faltam)}. Resolver à mão no Juridiq."
+            ),
+        )
+    except Exception as exc:
+        logger.warning("notify_mario(pos_travado) falhou: %s", exc)
+
+
+async def sweep_pos_assinatura(
+    *,
+    get_db: Callable[[], Any],
+    zapsign: ZapSignClient | None,
+    juridiq: JuridiqClient | None,
+    jurichat: JurichatClient,
+    settings: Any,
+) -> None:
+    """Retoma contratos ASSINADOS com sub-passo do pós PENDENTE (intake/arquivo/
+    tarefa). Re-busca o doc na ZapSign (URL signed_file FRESCA — a salva expira em
+    ~60min) e re-roda processar_pos_assinatura (idempotente por-passo). Teto de
+    tentativas por contrato → trava + alerta. Best-effort: NUNCA derruba o ciclo."""
+    if zapsign is None or juridiq is None:
+        return
+    conn = get_db()
+    try:
+        pendentes = list_contratos_pos_pendentes(conn, limite=_POS_SWEEP_LIMIT)
+    except Exception as exc:
+        logger.warning("sweep_pos: list falhou: %s", exc)
+        return
+    for c in pendentes:
+        cid = c["id"]
+        try:
+            registrar_tentativa_pos(conn, cid)
+            doc = await zapsign.get_doc(c["zapsign_doc_token"])
+            await processar_pos_assinatura(
+                conn, juridiq=juridiq, zapsign=zapsign, jurichat=jurichat,
+                settings=settings, contrato_id=cid,
+                signed_file_url=doc.get("signed_file"),
+            )
+            await _escalar_pos_se_travado(
+                conn, cid, c["cliente_nome"], jurichat,
+                settings.mario_conversation_id,
+            )
+        except Exception:
+            logger.exception("sweep_pos: contrato=%s", cid)
+
+
 async def run_reminder_cycle(
     *,
     get_db: Callable[[], Any],
@@ -2851,6 +2952,13 @@ def main() -> int:
             api_key=settings.juridiq_api_key,
             base_url=settings.juridiq_base_url,
         )
+    # ZapSign no scheduler: SÓ pro sweep do pós-assinatura (#36). Sem a flag ou o
+    # token, fica None e o sweep é no-op.
+    zapsign_pos: ZapSignClient | None = None
+    if settings.pos_assinatura_ativo and settings.zapsign_api_token:
+        zapsign_pos = ZapSignClient(
+            settings.zapsign_api_token, settings.zapsign_base_url,
+        )
     # Multi-vertical prompt (imobiliário + sucessório + saúde). Substitui
     # o saude_suplementar.md anterior — vê src/noviello_funil/skills/.
     skill = load_skill("atendente_geral")
@@ -2901,6 +3009,17 @@ def main() -> int:
                 jurichat=jurichat,
                 mario_conversation_id=settings.mario_conversation_id,
             )
+        # 2.6 (#36, 25/jun): sweep do pós-assinatura — retoma intake/PDF/tarefa
+        #    de contratos ASSINADOS cujo passo falhou (o webhook signed não
+        #    reentrega). Só com a flag ligada E ZapSign+Juridiq instanciados.
+        if settings.pos_assinatura_ativo:
+            await sweep_pos_assinatura(
+                get_db=lambda: conn,
+                zapsign=zapsign_pos,
+                juridiq=juridiq_client,
+                jurichat=jurichat,
+                settings=settings,
+            )
         # 3. Reminder cycle envia lembretes 24h/2h/30min antes de
         #    cada reunião agendada.
         await run_reminder_cycle(
@@ -2945,6 +3064,8 @@ def main() -> int:
                 await calendar_client.aclose()
             if juridiq_client is not None:
                 await juridiq_client.aclose()
+            if zapsign_pos is not None:
+                await zapsign_pos.aclose()
 
     try:
         return asyncio.run(_full_cycle_with_cleanup())
