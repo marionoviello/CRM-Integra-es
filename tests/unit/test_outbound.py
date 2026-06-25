@@ -77,6 +77,35 @@ def test_sanitize_nao_quebra_palavras_parecidas():
     assert _sanitize_for_whatsapp(src) == src
 
 
+def test_sanitize_e4_doutor_extenso_e_noviello_com_titulo():
+    """E4 (auditoria 24/jun): cobre 'doutor(a)' por extenso e 'Dr./doutor
+    Noviello' SEM 'Mario' — sem tocar no nome da banca 'Noviello Advocacia'."""
+    cases = [
+        ("Vou falar com o doutor Mario amanhã.",
+         "Vou falar com nossa equipe amanhã."),
+        ("A doutora Noviello te atende.",
+         "nossa equipe te atende."),
+        ("O Dr. Noviello vai analisar.",
+         "nossa equipe vai analisar."),
+        ("Falo com o doutor Noviello hoje.",
+         "Falo com nossa equipe hoje."),
+    ]
+    for entrada, esperado in cases:
+        assert _sanitize_for_whatsapp(entrada) == esperado, \
+            f"falhou pra: {entrada!r}"
+
+
+def test_sanitize_e4_preserva_nome_da_banca():
+    """E4: 'Noviello' sozinho ou 'Noviello Advocacia' (a BANCA) NÃO vira
+    'nossa equipe' — só a referência individual (com título) é trocada."""
+    for src in (
+        "A Noviello Advocacia cuida do seu caso.",
+        "Bem-vindo à Noviello Advocacia!",
+        "Escritório Noviello, especialista em saúde.",
+    ):
+        assert _sanitize_for_whatsapp(src) == src, f"alterou indevidamente: {src!r}"
+
+
 @pytest.mark.asyncio
 async def test_with_retry_succeeds_first_attempt():
     calls = {"n": 0}

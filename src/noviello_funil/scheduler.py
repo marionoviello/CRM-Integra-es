@@ -2261,7 +2261,7 @@ def _format_reuniao_human(dt: datetime.datetime) -> str:
 def _msg_lembrete_24h(nome: str, horario: str, meet_link: str) -> str:
     base = (
         f"Oi {nome}! Lembrete: amanhã ({horario}) temos a videochamada "
-        f"com o Mario."
+        f"com nossa equipe."
     )
     if meet_link:
         base += f"\n\nLink Meet: {meet_link}"
@@ -2283,7 +2283,7 @@ def _msg_lembrete_2h(nome: str, horario: str, meet_link: str) -> str:
 def _msg_lembrete_30min(nome: str, horario: str, meet_link: str) -> str:
     base = (
         f"{nome}, lembrete rápido: em 30 minutos começa a videochamada "
-        f"com o Mario."
+        f"com nossa equipe."
     )
     if meet_link:
         base += f"\n\nLink Meet: {meet_link}"
@@ -2292,7 +2292,7 @@ def _msg_lembrete_30min(nome: str, horario: str, meet_link: str) -> str:
 
 def _msg_lembrete_5min(nome: str, horario: str, meet_link: str) -> str:
     base = (
-        f"{nome}, sua videochamada com o Mario começa em 5 minutos! 🎥"
+        f"{nome}, sua videochamada com nossa equipe começa em 5 minutos! 🎥"
     )
     if meet_link:
         base += f"\n\nLink Meet: {meet_link}"

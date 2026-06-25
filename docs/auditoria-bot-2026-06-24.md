@@ -41,12 +41,12 @@ Status: `[ ]` aberto · `[x]` corrigido + deployado.
 
 ## Frente E — Compliance OAB / LGPD
 
-- [ ] **P1** Ciclo de follow-up NÃO consulta `esta_suprimido` (opt-out) antes de enviar — viola a garantia LGPD do próprio módulo, no sender de maior volume. `scheduler.py:2094-2171`. **Fix:** `esta_suprimido` no início do loop → pular + transicionar `motivo=opt_out`.
-- [ ] **P1** Detector de opt-out (regex-only) perde frases PT-BR comuns ("para", "me deixa em paz", "não envie mais", "chega de"). `opt_out.py:25-55`. **Fix:** ampliar `_PADROES` + sinal de opt-out no brain como rede OR + fixtures.
-- [ ] **P1** Mensagens ao lead NÃO passam por filtro de promessa de resultado (OAB Prov. 205/2021). Só a marca tem backstop; o êxito não. O linter `lint_contrato` (B1/B2) existe mas só roda no fluxo de contrato. `outbound.py:54-81`. **Fix:** aplicar os padrões B1/B2 num verificador leve em `_sanitize_for_whatsapp` (ou degradar p/ handoff + alerta).
-- [ ] **P2** Sanitizer de marca cobre `Dr./Dra.` mas não "doutor(a)" por extenso nem "Dr. Noviello" sem "Mario". `outbound.py:48-51`. **Fix:** estender o regex + testes.
-- [ ] **P3** Templates de lembrete trazem "com o Mario" hardcoded (dependem 100% do sanitizer). `scheduler.py:2028,2050,2059`. **Fix:** trocar p/ "com nossa equipe" na origem.
-- [ ] **P3** Lead chamado "Mário" tem o próprio nome trocado por "nossa equipe" pelo sanitizer. `outbound.py:78-79`. **Fix:** desligar a substituição quando o nome do lead normalizado é "mario".
+- [x] **P1** Ciclo de follow-up NÃO consulta `esta_suprimido` (opt-out) antes de enviar — viola a garantia LGPD do próprio módulo, no sender de maior volume. `scheduler.py:2094-2171`. **Fix:** `esta_suprimido` no topo do loop (antes de qualquer chamada Jurichat) → pula + transiciona `AGUARDANDO_HUMANO motivo=opt_out`.
+- [x] **P1** Detector de opt-out (regex-only) perde frases PT-BR comuns ("me deixa em paz", "não envie mais", "chega de"). `opt_out.py:25-55`. **Fix:** `_PADROES` ampliado com guardas de falso-positivo ("chega de novidade boa"/"manda mais detalhes" não disparam); guard da preposição "para" (bug 15/jun) preservado. (Sinal de opt-out no brain como rede OR adicional fica como enhancement.)
+- [x] **P1** Mensagens ao lead NÃO passam por filtro de promessa de resultado (OAB Prov. 205/2021). Só a marca tinha backstop; o êxito não. `outbound.py:54-81`. **Fix:** `contem_promessa_resultado()` (reusa B1+B2A-D do `lint_contrato` com as guardas) no ramo `responder`; tropeçou → NÃO manda ao lead, envia msg neutra, handoff `AGUARDANDO_HUMANO` + alerta o Mario com o trecho. **Decisão do Mario (24/jun): bloquear, não só monitorar.**
+- [x] **P2** Sanitizer de marca cobre `Dr./Dra.` mas não "doutor(a)" por extenso nem "Dr. Noviello" sem "Mario". `outbound.py:48-51`. **Fix:** regex estendido (`_TITULO_INDIVIDUAL` + branch título+Noviello que NÃO toca a banca "Noviello Advocacia") + testes.
+- [x] **P3** Templates de lembrete trazem "com o Mario" hardcoded (dependem 100% do sanitizer). `scheduler.py:2028,2050,2059`. **Fix:** trocado p/ "com nossa equipe" na origem (24h/30min/5min; o 2h já era neutro).
+- [ ] **P3 (diferido c/ rationale)** Lead chamado "Mário" tem o próprio nome trocado por "nossa equipe" pelo sanitizer. `outbound.py:78-79`. **Fix:** desligar a substituição quando o nome do lead é "mario" — exige passar o nome do lead até o `send_message`→sanitizer (invasivo) pra um caso raro e de baixo dano (saudação torta, sem violação de marca/OAB). Diferido pra um pass que faça essa fiação com cuidado.
 
 ## Frente F — Escalonamento de erros
 

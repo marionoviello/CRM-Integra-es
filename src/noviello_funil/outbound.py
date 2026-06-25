@@ -44,9 +44,16 @@ _MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
 # sanitizamos antes de mandar pro lead como defesa em profundidade.
 # Cobre: "Dr. Mario Noviello", "Mario Noviello", "Dr. Mario",
 # "(o|O) Mario", "Mario" standalone — COM ou SEM acento ("Mário",
-# auditoria 2026-06-11). Word boundary protege "Marina", "Mariolândia".
+# auditoria 2026-06-11). E4 (auditoria 24/jun): "doutor(a)" por extenso
+# como título + "Dr./doutor Noviello" SEM "Mario". Word boundary protege
+# "Marina"/"Mariolândia"; o branch com Noviello EXIGE título, pra NÃO
+# tocar o nome da BANCA ("Noviello Advocacia").
+_TITULO_INDIVIDUAL = r"(?:Dr\.?\s+|Dra\.?\s+|doutor(?:a)?\s+)"
 _NOME_INDIVIDUAL_RE = re.compile(
-    r"\b(?:[oa]\s+)?(?:Dr\.?\s+|Dra\.?\s+)?M[aá]rio(?:\s+Noviello)?\b",
+    r"\b(?:[oa]\s+)?(?:"
+    rf"{_TITULO_INDIVIDUAL}?M[aá]rio(?:\s+Noviello)?"
+    rf"|{_TITULO_INDIVIDUAL}Noviello"
+    r")\b",
     re.IGNORECASE,
 )
 
