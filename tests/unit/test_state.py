@@ -213,3 +213,31 @@ def test_lead_com_reuniao_no_horario_detecta_outro_e_exclui_self(db_conn):
         lead_com_reuniao_no_horario(db_conn, "2099-01-01T10:00:00-03:00", b["id"])
         is None
     )
+
+
+def test_lead_com_reuniao_no_horario_casa_mesmo_instante_offset_diferente(db_conn):
+    """D2 (revisão adversarial 24/jun): o caminho LLM pode gravar o mesmo
+    instante com offset diferente (Julia ecoa +00:00 em vez de -03:00). A
+    comparação tem que ser por INSTANTE, não por string crua — senão o
+    double-booking passa (fail-open)."""
+    a = create_lead_if_absent(db_conn, "L-A", "C-A", "5511...", "A")
+    b = create_lead_if_absent(db_conn, "L-B", "C-B", "5511...", "B")
+    # A gravou o slot das 14h-03:00 como 17h+00:00 (mesmo instante).
+    set_reuniao(
+        db_conn, a["id"],
+        reuniao_em_iso="2027-06-08T17:00:00+00:00", event_id="evt-a", meet_link="",
+    )
+    # B confirma o MESMO instante na forma -03:00 → tem que achar A.
+    assert (
+        lead_com_reuniao_no_horario(db_conn, "2027-06-08T14:00:00-03:00", b["id"])
+        == a["id"]
+    )
+    # Fantasma inparseável de outro lead não quebra a varredura.
+    c = create_lead_if_absent(db_conn, "L-C", "C-C", "5511...", "C")
+    db_conn.execute(
+        "UPDATE leads SET reuniao_em='lixo' WHERE id=?", (c["id"],)
+    )
+    assert (
+        lead_com_reuniao_no_horario(db_conn, "2027-06-08T14:00:00-03:00", b["id"])
+        == a["id"]
+    )

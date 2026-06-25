@@ -2052,20 +2052,28 @@ async def run_reminder_cycle(
             # lembrava, nunca virava no-show, nunca era limpa). Agora limpa +
             # alerta o Mario pra ele remarcar manual se era real.
             logger.error(
-                "lead=%s reuniao_em inválido %r — limpando + alertando: %s",
+                "lead=%s reuniao_em inválido %r — alertando + limpando: %s",
                 lead["id"], lead["reuniao_em"], exc,
             )
-            clear_reuniao(conn, lead["id"])
-            await notify_mario(
+            # Revisão adversarial 24/jun: alerta ANTES de limpar e só limpa se o
+            # aviso saiu (mesmo padrão do D3). A conexão é autocommit, então um
+            # clear_reuniao antes do notify, com o Jurichat fora, zerava o
+            # reuniao_em na hora → o lead sumia de list_leads_com_reuniao_futura
+            # e o alerta de uma reunião REAL (fantasma legado) se perdia pra
+            # sempre. Falha de envio agora re-tenta no próximo tick. Sem Mario
+            # configurado não há o que avisar → limpa pra não travar o loop.
+            enviado = await notify_mario(
                 jurichat,
                 mario_conversation_id=mario_conversation_id,
                 mensagem=(
                     "⚠️ Uma reunião com horário inválido no sistema foi "
-                    f"removida (lead: {lead['contato_nome']}, "
+                    f"detectada (lead: {lead['contato_nome']}, "
                     f"tel: {lead['contato_telefone']}). "
-                    "Se era uma reunião real, remarque manualmente."
+                    "Vou removê-la dos lembretes; se era real, remarque manual."
                 ),
             )
+            if enviado or not mario_conversation_id:
+                clear_reuniao(conn, lead["id"])
             continue
 
         delta = reuniao_dt - now

@@ -592,21 +592,38 @@ def set_reuniao(
 def lead_com_reuniao_no_horario(
     conn: sqlite3.Connection, reuniao_em_iso: str, exclude_lead_id: int,
 ) -> int | None:
-    """D2 (auditoria 24/jun): retorna o id de OUTRO lead que já tem reunião
-    marcada exatamente neste horário (``reuniao_em`` igual), ou ``None``.
+    """D2 (auditoria 24/jun): retorna o id de OUTRO lead que já tem reunião no
+    MESMO instante, ou ``None``.
 
     Usado pra barrar double-booking no confirmar — o ``find_available_slots``
     só lê o freeBusy do Calendar (eventual-consistente), nunca o DB, então dois
     leads conseguiriam confirmar o mesmo slot. ``reuniao_em`` só fica não-nulo
-    enquanto a reunião está ativa (``clear_reuniao`` zera no cancel/remarcação),
-    então a comparação de igualdade no ISO normalizado é confiável: todos os
-    slots saem do mesmo ``find_available_slots`` (tz São Paulo, offset -03:00).
+    enquanto a reunião está ativa (``clear_reuniao`` zera no cancel/remarcação)
+    e só reuniões futuras importam, então a varredura é de poucas linhas.
+
+    Compara por INSTANTE (parse pra UTC), não por string crua: o caminho LLM do
+    confirmar pode gravar o mesmo momento com offset diferente (ex.: a Julia
+    ecoa ``+00:00`` em vez de ``-03:00``), e a igualdade textual deixaria o
+    double-booking passar (fail-open). Fantasmas com ISO inparseável são
+    ignorados aqui — o reminder_cycle (D5) os limpa.
     """
-    row = conn.execute(
-        "SELECT id FROM leads WHERE reuniao_em = ? AND id != ? LIMIT 1",
-        (reuniao_em_iso, exclude_lead_id),
-    ).fetchone()
-    return row["id"] if row else None
+    try:
+        alvo = datetime.fromisoformat(reuniao_em_iso).astimezone(UTC)
+    except (ValueError, TypeError):
+        return None  # alvo inparseável — o caller já normaliza; nada a casar
+    rows = conn.execute(
+        "SELECT id, reuniao_em FROM leads "
+        "WHERE reuniao_em IS NOT NULL AND id != ?",
+        (exclude_lead_id,),
+    ).fetchall()
+    for row in rows:
+        try:
+            outro = datetime.fromisoformat(row["reuniao_em"]).astimezone(UTC)
+        except (ValueError, TypeError):
+            continue
+        if outro == alvo:
+            return row["id"]
+    return None
 
 
 def clear_reuniao(conn: sqlite3.Connection, lead_id: int) -> None:

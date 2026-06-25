@@ -237,6 +237,39 @@ async def test_reuniao_em_invalido_e_limpa_e_alerta_mario(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_reuniao_em_invalido_nao_limpa_se_alerta_falha(db_conn):
+    """D5 (revisão adversarial 24/jun): se o alerta ao Mario falhar, o fantasma
+    NÃO é limpo — senão (autocommit + Jurichat fora) o lead sumiria do ciclo e
+    o aviso de uma reunião real se perderia pra sempre. Espelha o D3."""
+    lead_id = _insert_lead(db_conn, nome="Fantasma")
+    db_conn.execute(
+        "UPDATE leads SET reuniao_em='horario-quebrado' WHERE id=?", (lead_id,),
+    )
+    # 1º tick: alerta FALHA (RequestError engolido por notify_mario → False).
+    jurichat = _make_jurichat()
+    jurichat.send_message = AsyncMock(side_effect=httpx.RequestError("down"))
+    await run_reminder_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat,
+        mario_conversation_id="MARIO-1", base_url="https://funil.example",
+    )
+    lead = db_conn.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+    assert lead["reuniao_em"] == "horario-quebrado", "não pode limpar sem avisar"
+
+    # 2º tick: alerta OK → agora alerta e limpa.
+    jurichat2 = _make_jurichat()
+    await run_reminder_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat2,
+        mario_conversation_id="MARIO-1", base_url="https://funil.example",
+    )
+    para_mario = [
+        c for c in jurichat2.send_message.call_args_list if c.args[0] == "MARIO-1"
+    ]
+    assert len(para_mario) == 1
+    lead = db_conn.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+    assert lead["reuniao_em"] is None
+
+
+@pytest.mark.asyncio
 async def test_reminder_30min_dispara_quando_falta_menos_de_30min(db_conn):
     """Cenário: reunião marcada com antecedência (24h+), tempo passou,
     agora faltam 20 min. Cycle deve disparar 30min."""
