@@ -37,6 +37,15 @@ _PADROES = (
     r"\bunsubscribe\b",
     r"^\s*stop\s*$",
     r"^\s*sair\s*$",
+    # E2 (auditoria 24/jun): frases coloquiais PT-BR que o regex perdia.
+    # "me deixa/deixe em paz".
+    r"me deix(a|e)\b.{0,12}em paz",
+    # "nao (me) envie/mande/manda mais (nada)" — sem "me" o pattern acima não
+    # pegava; o "mais" depois do verbo de parar é sinal forte de opt-out.
+    r"nao (me )?(envie|mande|manda|encha)\b.{0,8}\bmais\b",
+    # "chega de ..." — exige objeto de comunicação, pra não casar "chega de
+    # novidade boa".
+    r"chega de (mensage|me mand|me envi|mandar|enviar|receber|isso|disso|email|e-mail|whats|contato)",
 )
 
 

@@ -242,6 +242,45 @@ async def test_cycle_flags_lead_when_dispatch_step_fails(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_cycle_pula_lead_suprimido_opt_out(db_conn):
+    """E1 (auditoria 24/jun): o ciclo de follow-up (sender de maior volume) NÃO
+    pode mandar mensagem pra quem está na lista de supressão (opt-out LGPD).
+    Pula ANTES de qualquer chamada ao Jurichat e encerra em AGUARDANDO_HUMANO."""
+    from noviello_funil.opt_out import registrar_opt_out
+    from noviello_funil.state import ultimo_motivo_transicao
+
+    _make_due_lead(db_conn, "L-1", "C-1", Estado.EM_CONVERSA)
+    db_conn.execute(
+        "UPDATE leads SET contato_telefone=? WHERE jurichat_conversation_id='C-1'",
+        ("5511988887777",),
+    )
+    # O lead já pediu opt-out antes (telefone na supressão).
+    registrar_opt_out(db_conn, telefone="5511988887777", motivo="teste")
+
+    fake_jurichat = MagicMock()
+    fake_jurichat.get_lead_tags = AsyncMock(return_value=[])
+    fake_jurichat.send_message = AsyncMock()
+
+    async def fake_followup_gen(**kwargs):
+        raise AssertionError("não pode gerar follow-up pra lead suprimido")
+
+    await run_followup_cycle(
+        get_db=lambda: db_conn,
+        jurichat=fake_jurichat,
+        gerar_followup_msg=fake_followup_gen,
+        followup_2_apos_horas=72,
+        encerramento_apos_horas=24,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.AGUARDANDO_HUMANO
+    assert ultimo_motivo_transicao(db_conn, lead["id"]) == "opt_out"
+    # Não enviou nada e nem consultou o Jurichat (pulou cedo).
+    fake_jurichat.send_message.assert_not_awaited()
+    fake_jurichat.get_lead_tags.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_cycle_nao_manda_followup_pra_lead_com_reuniao(db_conn):
     """HIGH da auditoria: lead com reunião marcada recebia FU1 ('percebi
     que talvez não seja o momento') junto com lembretes da reunião."""

@@ -35,6 +35,31 @@ def test_conversa_normal_nao_dispara():
         assert not detectar_opt_out(t), t
 
 
+def test_frases_pt_br_comuns_de_descadastro_disparam():
+    """E2 (auditoria 24/jun): frases coloquiais que o regex perdia."""
+    for t in (
+        "me deixa em paz",
+        "me deixe em paz por favor",
+        "não envie mais mensagens",
+        "não me envie mais nada",
+        "não manda mais",
+        "chega de mensagem",
+        "chega de me mandar isso",
+    ):
+        assert detectar_opt_out(t), t
+
+
+def test_e2_novas_frases_nao_geram_falso_positivo():
+    """E2: as novas frases não podem disparar em pedidos legítimos."""
+    for t in (
+        "chega de novidade boa, adorei!",   # "chega de" sem objeto de comunicação
+        "que paz esse atendimento",          # "paz" sem "me deixa em paz"
+        "pode me enviar mais informações",   # PEDE mais — oposto de opt-out
+        "manda mais detalhes por favor",
+    ):
+        assert not detectar_opt_out(t), t
+
+
 def test_nao_confunde_pedido_de_envio_com_opt_out():
     # "me manda" é pedido, não opt-out
     assert not detectar_opt_out("me manda o contrato por favor")

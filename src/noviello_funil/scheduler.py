@@ -50,7 +50,11 @@ from noviello_funil.calendar_client import (
 )
 from noviello_funil.conflito import checar_conflito
 from noviello_funil.juridiq_client import JuridiqClient, intake_lead_agendado
-from noviello_funil.opt_out import detectar_opt_out, registrar_opt_out
+from noviello_funil.opt_out import (
+    detectar_opt_out,
+    esta_suprimido,
+    registrar_opt_out,
+)
 from noviello_funil.outbound import (
     JurichatClient,
     format_notification,
@@ -2273,6 +2277,23 @@ async def run_followup_cycle(
     logger.info("scheduler tick: %d leads vencidos", len(vencidos))
 
     for lead in vencidos:
+        # E1 (auditoria 24/jun): NÃO manda follow-up pra quem está na lista de
+        # supressão (opt-out LGPD). O poll cycle registra o opt-out, mas este
+        # ciclo — o sender de MAIOR volume — nunca consultava esta_suprimido,
+        # furando a própria garantia LGPD do módulo. Pula ANTES de qualquer
+        # chamada ao Jurichat e encerra em AGUARDANDO_HUMANO (motivo opt_out,
+        # terminal pra reativação — não volta a contatar sozinho).
+        if esta_suprimido(conn, telefone=lead["contato_telefone"] or ""):
+            logger.info(
+                "followup: lead=%s na supressão (opt-out) — pula sem enviar",
+                lead["id"],
+            )
+            transicao(
+                conn, lead["id"], Estado.AGUARDANDO_HUMANO, motivo="opt_out",
+                proxima_acao_horas=CLEAR_PROXIMA_ACAO,
+            )
+            continue
+
         try:
             tags = await jurichat.get_lead_tags(lead["jurichat_lead_id"])
         except Exception as exc:
