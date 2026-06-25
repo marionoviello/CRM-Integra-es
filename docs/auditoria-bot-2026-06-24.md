@@ -69,8 +69,8 @@ Status: `[ ]` aberto · `[x]` corrigido + deployado.
 
 ## Frente H — Robustez de infra
 
-- [ ] **P2** Web + scheduler escrevem no mesmo SQLite sem invariante de writer único → possível `database is locked` sob colisão. `db.py:238-247`. **Fix:** `PRAGMA busy_timeout` explícito + retry no `OperationalError('locked')` dentro de `transicao`.
-- [ ] **P3** `get_conversation` serial sem teto na reativação+polling → Jurichat lento estoura a janela de 30s e atrasa os lembretes (5min/30min rodam no mesmo ciclo). `scheduler.py:1070-1135`. **Fix:** paralelizar com `asyncio.gather`+semáforo (como já no DataJud).
+- [x] **P2** Web + scheduler escrevem no mesmo SQLite sem invariante de writer único → possível `database is locked` sob colisão. `db.py:238-247`. **Fix:** o `busy_timeout` (30s) já vinha do `timeout=30` da conexão; o que faltava era o **retry** — `transicao` (caminho de escrita crítico) re-tenta a transação inteira (até 4×, backoff 50/100/200ms) em `OperationalError('locked')`, pra o caso de `SQLITE_BUSY` imediato (potencial deadlock que o busy handler não espera). Atômica (BEGIN IMMEDIATE…COMMIT) → re-rodar é seguro; esgotou → propaga pro register_error/alerta.
+- [ ] **P3 (diferido c/ rationale)** `get_conversation` serial sem teto na reativação+polling → Jurichat lento estoura a janela de 30s e atrasa os lembretes. `scheduler.py:1070-1135`. **Fix proposto:** paralelizar com `asyncio.gather`+semáforo. **Diferido:** no volume atual (consultório solo, poucos leads due/AH por tick) a busca serial fecha bem dentro dos 30s; paralelizar exige reestruturar o loop de poll crítico (recém-revisado) → risco > ganho. **Gargalo real latente:** a sweep de AH (FASE 0.5, Frente A) busca a conversa de TODO lead `aguardando_humano` a cada tick — `O(AH)` chamadas. Se os AH acumularem às centenas, o fix certo é **limitar** a sweep (recência/paginação), não só paralelizar. Revisitar quando o volume crescer.
 
 ---
 

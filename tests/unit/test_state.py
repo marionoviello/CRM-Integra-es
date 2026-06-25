@@ -1,5 +1,8 @@
 """Tests for the state repository layer."""
 
+import sqlite3
+import time
+
 import pytest
 
 from noviello_funil.state import (
@@ -184,6 +187,47 @@ def test_list_leads_vencidos_returns_only_due_and_active(db_conn):
     vencidos = list_leads_vencidos(conn, fu1_apos_horas=48)
     ids = {row["jurichat_lead_id"] for row in vencidos}
     assert ids == {"L-idle", "L-fu1"}
+
+
+class _LockNasPrimeiras:
+    """Proxy de conexão que levanta 'database is locked' nas primeiras N vezes
+    que veem ``BEGIN IMMEDIATE``; depois delega tudo pra conexão real."""
+
+    def __init__(self, real, falhas):
+        self._real = real
+        self._falhas = falhas
+
+    def execute(self, sql, *args, **kwargs):
+        if sql == "BEGIN IMMEDIATE" and self._falhas > 0:
+            self._falhas -= 1
+            raise sqlite3.OperationalError("database is locked")
+        return self._real.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_transicao_retry_em_database_locked(db_conn, monkeypatch):
+    """H1 (auditoria 24/jun): transicao re-tenta em 'database is locked' e
+    eventualmente persiste (colisão web×scheduler)."""
+    monkeypatch.setattr(time, "sleep", lambda *_: None)  # não dormir no teste
+    lead = create_lead_if_absent(db_conn, "L-1", "C-1", "5511...", "Maria")
+    proxy = _LockNasPrimeiras(db_conn, falhas=2)  # falha 2x, 3ª tentativa OK
+    transicao(proxy, lead["id"], Estado.AGUARDANDO_HUMANO, motivo="x")
+    atual = get_lead_by_conversation(db_conn, "C-1")
+    assert atual["estado"] == Estado.AGUARDANDO_HUMANO
+
+
+def test_transicao_propaga_locked_apos_esgotar_tentativas(db_conn, monkeypatch):
+    """H1: se o lock persistir além das tentativas, propaga (não engole) — vai
+    pro register_error/alerta do caller."""
+    monkeypatch.setattr(time, "sleep", lambda *_: None)
+    lead = create_lead_if_absent(db_conn, "L-2", "C-2", "5511...", "Maria")
+    proxy = _LockNasPrimeiras(db_conn, falhas=99)  # sempre falha
+    with pytest.raises(sqlite3.OperationalError):
+        transicao(proxy, lead["id"], Estado.AGUARDANDO_HUMANO, motivo="x")
+    # Estado intocado (nada persistiu).
+    assert get_lead_by_conversation(db_conn, "C-2")["estado"] == Estado.EM_CONVERSA
 
 
 def test_register_error_conta_consecutivos_e_hash_zera(db_conn):

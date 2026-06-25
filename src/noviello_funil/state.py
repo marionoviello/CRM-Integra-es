@@ -8,9 +8,18 @@ functions defined here — never UPDATE estado from outside this module.
 import contextlib
 import json
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
+
+# H1 (auditoria 24/jun): retry de "database is locked" no caminho de escrita
+# crítico (transicao). Web e scheduler são processos SEPARADOS → conexões
+# distintas; sob colisão o BEGIN IMMEDIATE pode receber SQLITE_BUSY mesmo com o
+# busy_timeout de 30s (caso de potencial deadlock, em que o busy handler não
+# espera). Backoff curto: 50ms, 100ms, 200ms.
+_MAX_RETRY_LOCK: Final = 4
+_RETRY_LOCK_BASE: Final = 0.05
 
 
 class Estado:
@@ -177,36 +186,50 @@ def transicao(
         schedule_clause = ", proxima_acao_em = ?"
         schedule_params = (proxima,)
 
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        current = conn.execute(
-            "SELECT estado FROM leads WHERE id = ?", (lead_id,)
-        ).fetchone()
-        if current is None:
-            conn.execute("ROLLBACK")
-            raise ValueError(f"Lead {lead_id} not found")
-        estado_anterior = current["estado"]
+    # H1 (auditoria 24/jun): re-tenta a transação inteira em "database is locked"
+    # (colisão web×scheduler). BEGIN IMMEDIATE está DENTRO do try pra um lock no
+    # próprio BEGIN ser capturado. A transação é atômica (BEGIN…COMMIT, ROLLBACK
+    # no erro), então re-rodar é seguro. Esgotou as tentativas → propaga (vai pro
+    # register_error/alerta do caller).
+    for _tentativa in range(_MAX_RETRY_LOCK):
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT estado FROM leads WHERE id = ?", (lead_id,)
+            ).fetchone()
+            if current is None:
+                conn.execute("ROLLBACK")
+                raise ValueError(f"Lead {lead_id} not found")
+            estado_anterior = current["estado"]
 
-        conn.execute(
-            "UPDATE leads SET estado = ?, atualizado_em = datetime('now')"
-            + schedule_clause
-            + " WHERE id = ?",
-            (estado_novo, *schedule_params, lead_id),
-        )
-        conn.execute(
-            """
-            INSERT INTO transicoes (lead_id, estado_anterior, estado_novo, motivo, payload_json)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (lead_id, estado_anterior, estado_novo, motivo, payload_json),
-        )
-        conn.execute("COMMIT")
-    except Exception:
-        # ROLLBACK may itself fail if already rolled back via the ValueError
-        # path above — suppress that specific error and re-raise the original.
-        with contextlib.suppress(sqlite3.OperationalError):
-            conn.execute("ROLLBACK")
-        raise
+            conn.execute(
+                "UPDATE leads SET estado = ?, atualizado_em = datetime('now')"
+                + schedule_clause
+                + " WHERE id = ?",
+                (estado_novo, *schedule_params, lead_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO transicoes (lead_id, estado_anterior, estado_novo, motivo, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (lead_id, estado_anterior, estado_novo, motivo, payload_json),
+            )
+            conn.execute("COMMIT")
+            return
+        except sqlite3.OperationalError as exc:
+            with contextlib.suppress(sqlite3.OperationalError):
+                conn.execute("ROLLBACK")
+            esgotou = _tentativa == _MAX_RETRY_LOCK - 1
+            if "locked" not in str(exc).lower() or esgotou:
+                raise
+            time.sleep(_RETRY_LOCK_BASE * (2 ** _tentativa))
+        except Exception:
+            # ROLLBACK may itself fail if already rolled back via the ValueError
+            # path above — suppress that specific error and re-raise the original.
+            with contextlib.suppress(sqlite3.OperationalError):
+                conn.execute("ROLLBACK")
+            raise
 
 
 def bump_turnos(conn: sqlite3.Connection, lead_id: int) -> None:
