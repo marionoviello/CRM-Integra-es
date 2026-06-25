@@ -585,7 +585,13 @@ def set_lead_email(conn: sqlite3.Connection, lead_id: int, email: str) -> None:
     """D4 (25/jun): persiste o email do lead (lowercase) pra casar reuniões
     marcadas FORA do bot com o lead certo. Idempotente — só grava se o valor
     mudou (o poll cycle chama isto sempre que vê um email no transcript, então
-    evitar write à toa importa). Email vazio = no-op (não apaga)."""
+    evitar write à toa importa). Email vazio = no-op (não apaga).
+
+    BEST-EFFORT no UPDATE (revisão adversarial 25/jun): roda no caminho QUENTE do
+    poll (por-lead, por-tick); um 'database is locked' aqui NÃO pode abortar o
+    ciclo (pularia lembretes/follow-up). Retry curto e, se persistir, engole — o
+    email é re-gravado no próximo tick em que o lead mandar. Espelha o
+    marcar_ah_checado (H2). O SELECT é seguro em WAL (readers não bloqueiam)."""
     norm = (email or "").strip().lower()
     if not norm:
         return
@@ -594,11 +600,20 @@ def set_lead_email(conn: sqlite3.Connection, lead_id: int, email: str) -> None:
     ).fetchone()
     if row is not None and (row["contato_email"] or "") == norm:
         return
-    conn.execute(
-        "UPDATE leads SET contato_email = ?, atualizado_em = datetime('now') "
-        "WHERE id = ?",
-        (norm, lead_id),
-    )
+    for tentativa in range(_MAX_RETRY_LOCK):
+        try:
+            conn.execute(
+                "UPDATE leads SET contato_email = ?, atualizado_em = datetime('now') "
+                "WHERE id = ?",
+                (norm, lead_id),
+            )
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
+            if tentativa < _MAX_RETRY_LOCK - 1:
+                time.sleep(_RETRY_LOCK_BASE * (2 ** tentativa))
+    # Esgotou sob lock persistente — best-effort, não aborta o tick.
 
 
 def lead_por_email(

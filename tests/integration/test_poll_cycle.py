@@ -140,6 +140,30 @@ async def test_hash_changed_responder_sends_and_reschedules(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_poll_persiste_email_do_lead_nao_do_atendente(db_conn):
+    """D4 (revisão adversarial 25/jun): o poll persiste o email do LEAD (via
+    _extrair_email_do_lead — fala mais recente do lead), NÃO o do atendente/
+    assinatura nem de outro cliente citado. Senão a reunião manual auto-
+    vincularia ao lead ERRADO (Yara levaria os lembretes do Carlos)."""
+    transcript = (
+        "Atendente: Qualquer dúvida, contato@noviello.adv.br\n"
+        "Lead: vi um email de carlos@cliente.com no site\n"
+        "Lead: meu email é joao@cliente.com"
+    )
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = await _triagem_returning(Decisao(acao="responder", mensagem="ok"))
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    # Gravou o email da fala MAIS RECENTE do lead, não o do atendente/terceiro.
+    assert get_lead_by_conversation(db_conn, "C-1")["contato_email"] == "joao@cliente.com"
+
+
+@pytest.mark.asyncio
 async def test_responder_com_promessa_de_resultado_bloqueia_e_handoff(db_conn):
     """E3 (auditoria 24/jun): se o texto do modelo prometer resultado (OAB Prov.
     205/2021), o bot NÃO manda ao lead — envia msg neutra, passa pro humano

@@ -1429,9 +1429,13 @@ async def run_poll_cycle(
         new_hash = _compute_hash(transcript)
         old_hash = lead["ultimo_transcript_hash"]
 
-        # D4 (25/jun): se o lead mencionou um email, persiste (idempotente) pra
+        # D4 (25/jun): se o LEAD mencionou um email, persiste (idempotente) pra
         # casar reuniões marcadas FORA do bot pelo email do convidado do evento.
-        set_lead_email(conn, lead_id, _extrair_email(transcript))
+        # _extrair_email_do_lead (não _extrair_email): só as falas do lead, de
+        # baixo pra cima — senão gravaria o email do atendente/assinatura ou de
+        # outro cliente citado, e a reunião manual auto-vincularia ao lead ERRADO
+        # (revisão adversarial 25/jun).
+        set_lead_email(conn, lead_id, _extrair_email_do_lead(transcript))
 
         # Signal 0 (2026-06-10): atendente HUMANO assumiu a conversa.
         # O campo ``user`` da conversa identifica o responsável atual.

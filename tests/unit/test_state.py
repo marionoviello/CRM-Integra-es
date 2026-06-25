@@ -249,6 +249,32 @@ def test_set_lead_email_persiste_normaliza_e_idempotente(db_conn):
     assert lead_por_email(db_conn, "ninguem@x.com") == []
 
 
+def test_set_lead_email_best_effort_engole_lock(db_conn, monkeypatch):
+    """D4 (revisão adversarial 25/jun): set_lead_email roda no caminho quente do
+    poll — um 'database is locked' no UPDATE NÃO pode abortar o ciclo. Best-effort
+    (igual marcar_ah_checado): engole o lock, não levanta."""
+    monkeypatch.setattr(time, "sleep", lambda *_: None)
+    lead = create_lead_if_absent(db_conn, "L-1", "C-1", "5511...", "Maria")
+
+    class _LockNoUpdateEmail:
+        """Delega tudo ao conn real, mas levanta lock no UPDATE de contato_email."""
+
+        def __init__(self, real):
+            self._real = real
+
+        def execute(self, sql, *args, **kwargs):
+            if "UPDATE leads SET contato_email" in sql:
+                raise sqlite3.OperationalError("database is locked")
+            return self._real.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    # UPDATE sempre locked → best-effort, NÃO levanta (e não grava).
+    set_lead_email(_LockNoUpdateEmail(db_conn), lead["id"], "maria@x.com")
+    assert get_lead_by_conversation(db_conn, "C-1")["contato_email"] is None
+
+
 def test_ah_sweep_limite_e_rotacao_round_robin(db_conn):
     """H2 (auditoria 24/jun): a sweep de AH pega só ``limite`` por vez (NULLs
     primeiro); marcar_ah_checado rotaciona pro fim → round-robin cobre todos sem
