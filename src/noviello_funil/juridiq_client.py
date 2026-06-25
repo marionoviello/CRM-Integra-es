@@ -101,6 +101,26 @@ class JuridiqClient:
 
         return await with_retry(op, attempts=3, base_delay=base_delay)
 
+    async def create_task(
+        self, corpo: dict[str, Any],
+    ) -> tuple[str | None, str]:
+        """POST /task/ → (task_id | None, detalhe). NÃO levanta — devolve o
+        motivo (ex.: ``http_400`` com o corpo) pro caller logar/validar. Sem
+        retry (um 400 não melhora repetindo; transitório o webhook reentrega)."""
+        try:
+            resp = await self._client.post(f"{self._base_url}/task/", json=corpo)
+        except httpx.HTTPError as exc:
+            return None, f"erro_{type(exc).__name__}"
+        if resp.status_code >= 400:
+            return None, f"http_{resp.status_code}: {resp.text[:400]}"
+        try:
+            data = resp.json()
+        except ValueError:
+            return None, "resposta_nao_json"
+        obj = data.get("data") if isinstance(data, dict) and "data" in data else data
+        tid = obj.get("id") if isinstance(obj, dict) else None
+        return (str(tid) if tid else None), "ok"
+
 
 async def intake_lead_agendado(
     juridiq: "JuridiqClient",
@@ -151,4 +171,48 @@ async def intake_lead_agendado(
         return person.get("id")
     except (OutboundError, httpx.HTTPError, Exception) as exc:
         logger.exception("intake juridiq falhou pra %r: %s", nome, exc)
+        return None
+
+
+async def intake_cliente_assinado(
+    juridiq: "JuridiqClient",
+    *,
+    person_id: str | None,
+    nome: str,
+    telefone: str,
+    email: str | None,
+    tipo_caso: str | None,
+) -> str | None:
+    """#36 (25/jun): garante a Pessoa do cliente que ASSINOU o contrato.
+
+    Reusa ``person_id`` se o contrato já tem (lead virou Pessoa no agendamento);
+    senão dedupe por telefone; senão cria. Fire-and-forget: NUNCA levanta (o
+    ASSINADO é fato consumado). Retorna o person_id ou None em falha. O caller
+    (orquestrador) garante que não chama sem telefone E sem person_id.
+    """
+    try:
+        if person_id:
+            return person_id  # contrato já tem a ficha do cliente
+        if telefone:
+            existing = await juridiq.search_person_by_phone(telefone)
+            if existing and existing.get("id"):
+                logger.info(
+                    "intake-assinado: pessoa já existe (id=%s) — reusa",
+                    existing["id"],
+                )
+                return existing["id"]
+        annotation = (
+            "Cliente ASSINOU contrato de honorários (fechamento via bot).\n"
+            f"Tipo de caso: {tipo_caso or '(não informado)'}."
+        )
+        person = await juridiq.create_person(
+            name=nome, phone=telefone, email=email, annotation=annotation,
+        )
+        logger.info(
+            "intake-assinado: pessoa criada id=%s nome=%r",
+            person.get("id"), nome,
+        )
+        return person.get("id")
+    except (OutboundError, httpx.HTTPError, Exception) as exc:
+        logger.exception("intake_cliente_assinado falhou pra %r: %s", nome, exc)
         return None

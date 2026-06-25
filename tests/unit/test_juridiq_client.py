@@ -196,3 +196,53 @@ def test_norm_doc_12_digitos_nao_cpf_vira_cnpj():
     from importar_clientes_juridiq import _norm_doc
     # 000000000000 não é CPF válido → zfill 14
     assert _norm_doc("123456789012") == "00123456789012"
+
+
+@pytest.mark.asyncio
+async def test_intake_cliente_assinado_reusa_dedup_cria_e_best_effort():
+    """#36 (25/jun): reusa person_id do contrato; senão dedupe por telefone;
+    senão cria; falha vira None (fire-and-forget — ASSINADO é fato consumado)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from noviello_funil.juridiq_client import intake_cliente_assinado
+
+    # 1. person_id já no contrato → reusa, sem tocar a API.
+    j = MagicMock()
+    j.search_person_by_phone = AsyncMock()
+    j.create_person = AsyncMock()
+    pid = await intake_cliente_assinado(
+        j, person_id="p-existe", nome="X", telefone="5511", email=None,
+        tipo_caso="inventario",
+    )
+    assert pid == "p-existe"
+    j.search_person_by_phone.assert_not_awaited()
+    j.create_person.assert_not_awaited()
+
+    # 2. sem person_id, telefone casa → reusa o encontrado.
+    j2 = MagicMock()
+    j2.search_person_by_phone = AsyncMock(return_value={"id": "p-found"})
+    j2.create_person = AsyncMock()
+    pid = await intake_cliente_assinado(
+        j2, person_id=None, nome="X", telefone="5511", email=None, tipo_caso=None,
+    )
+    assert pid == "p-found"
+    j2.create_person.assert_not_awaited()
+
+    # 3. sem person_id, telefone NÃO casa → cria.
+    j3 = MagicMock()
+    j3.search_person_by_phone = AsyncMock(return_value=None)
+    j3.create_person = AsyncMock(return_value={"id": "p-new"})
+    pid = await intake_cliente_assinado(
+        j3, person_id=None, nome="X", telefone="5511", email="x@x.com",
+        tipo_caso="usucapiao",
+    )
+    assert pid == "p-new"
+    j3.create_person.assert_awaited_once()
+
+    # 4. API levanta → fire-and-forget, retorna None.
+    j4 = MagicMock()
+    j4.search_person_by_phone = AsyncMock(side_effect=RuntimeError("boom"))
+    pid = await intake_cliente_assinado(
+        j4, person_id=None, nome="X", telefone="5511", email=None, tipo_caso=None,
+    )
+    assert pid is None

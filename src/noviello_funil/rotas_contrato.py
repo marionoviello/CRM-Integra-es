@@ -37,6 +37,7 @@ from .contrato import (
 )
 from .orquestrador_contrato import aprovar_e_liberar, reprovar_contrato
 from .outbound import notify_mario
+from .pos_assinatura import processar_pos_assinatura
 from .state import (
     clear_reuniao,
     get_lead_by_noshow_token,
@@ -420,25 +421,33 @@ async def _processar_zapsign(
                 "webhook zapsign: doc %s sem contrato correspondente", doc_token,
             )
             return
-        if contrato["estado"] == EstadoContrato.ASSINADO:
-            return  # idempotente
-
         contrato_id = contrato["id"]
-        registrar_assinatura(
-            conn, contrato_id, signed_file_url=doc.get("signed_file"),
-        )
-        transicao_contrato(
-            conn, contrato_id, EstadoContrato.ASSINADO,
-            motivo="assinatura confirmada (webhook zapsign)", ator="webhook",
-        )
-        if jurichat is not None and settings.mario_conversation_id:
-            await notify_mario(
-                jurichat,
-                mario_conversation_id=settings.mario_conversation_id,
-                mensagem=(
-                    f"✅ Contrato ASSINADO — {contrato['cliente_nome']} "
-                    f"(contrato #{contrato_id})."
-                ),
+        if contrato["estado"] != EstadoContrato.ASSINADO:
+            registrar_assinatura(
+                conn, contrato_id, signed_file_url=doc.get("signed_file"),
+            )
+            transicao_contrato(
+                conn, contrato_id, EstadoContrato.ASSINADO,
+                motivo="assinatura confirmada (webhook zapsign)", ator="webhook",
+            )
+            if jurichat is not None and settings.mario_conversation_id:
+                await notify_mario(
+                    jurichat,
+                    mario_conversation_id=settings.mario_conversation_id,
+                    mensagem=(
+                        f"✅ Contrato ASSINADO — {contrato['cliente_nome']} "
+                        f"(contrato #{contrato_id})."
+                    ),
+                )
+
+        # #36 (25/jun): pós-assinatura — best-effort, idempotente POR-PASSO. Roda
+        # em TODA reentrega do webhook signed (não só na 1ª transição), pra retomar
+        # passo que ficou pendente. Só com a flag ligada E juridiq instanciado.
+        if settings.pos_assinatura_ativo and juridiq is not None:
+            await processar_pos_assinatura(
+                conn, juridiq=juridiq, zapsign=zapsign, jurichat=jurichat,
+                settings=settings, contrato_id=contrato_id,
+                signed_file_url=doc.get("signed_file"),
             )
     except Exception:  # noqa: BLE001 — nada vaza pro webhook
         logger.exception("erro processando webhook zapsign (doc=%s)", doc_token)
