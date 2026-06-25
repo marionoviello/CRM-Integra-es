@@ -12,6 +12,7 @@ from noviello_funil.state import (
     get_lead_by_conversation,
     is_webhook_processed,
     lead_com_reuniao_no_horario,
+    lead_por_email,
     list_leads_aguardando_humano,
     list_leads_presos,
     list_leads_vencidos,
@@ -20,6 +21,7 @@ from noviello_funil.state import (
     mark_webhook_processed,
     record_lead_message_received,
     register_error,
+    set_lead_email,
     set_reuniao,
     transicao,
     update_transcript_hash,
@@ -230,6 +232,21 @@ def test_transicao_propaga_locked_apos_esgotar_tentativas(db_conn, monkeypatch):
         transicao(proxy, lead["id"], Estado.AGUARDANDO_HUMANO, motivo="x")
     # Estado intocado (nada persistiu).
     assert get_lead_by_conversation(db_conn, "C-2")["estado"] == Estado.EM_CONVERSA
+
+
+def test_set_lead_email_persiste_normaliza_e_idempotente(db_conn):
+    """D4 (25/jun): grava o email do lead em lowercase; vazio não apaga;
+    lead_por_email casa pelo valor normalizado."""
+    lead = create_lead_if_absent(db_conn, "L-1", "C-1", "5511...", "Maria")
+    set_lead_email(db_conn, lead["id"], "  Maria@Exemplo.COM ")
+    assert get_lead_by_conversation(db_conn, "C-1")["contato_email"] == "maria@exemplo.com"
+    # vazio = no-op (não apaga).
+    set_lead_email(db_conn, lead["id"], "")
+    assert get_lead_by_conversation(db_conn, "C-1")["contato_email"] == "maria@exemplo.com"
+    # casamento por email (case-insensitive).
+    casados = lead_por_email(db_conn, "MARIA@exemplo.com")
+    assert {row["id"] for row in casados} == {lead["id"]}
+    assert lead_por_email(db_conn, "ninguem@x.com") == []
 
 
 def test_ah_sweep_limite_e_rotacao_round_robin(db_conn):

@@ -111,6 +111,14 @@ CREATE TABLE IF NOT EXISTS opt_out (
     criado_em  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- D4 (25/jun): eventos do Calendar marcados FORA do bot sobre os quais já
+-- alertamos o Mario (não-rastreado ou conflito). Garante que o aviso sai 1×
+-- por evento, não a cada tick (~30s) da sync.
+CREATE TABLE IF NOT EXISTS eventos_manuais_alertados (
+    event_id    TEXT PRIMARY KEY,
+    alertado_em TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Partes CONTRÁRIAS dos processos (conflito de interesse, roadmap 1.7).
 -- Repovoada de madrugada do GET /lawSuit/ (persons com personOrigin !=
 -- Cliente). Quando um lead novo bate com um nome aqui, o bot LEVANTA
@@ -288,6 +296,10 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     # round-robin com trabalho LIMITADO por tick, em vez de O(AH) chamadas
     # get_conversation a cada 30s.
     _ensure_column(conn, "leads", "ah_checado_em", "TEXT")
+    # D4 (25/jun): email do lead (lowercase), persistido quando o bot o vê no
+    # transcript. Usado pra casar reuniões marcadas FORA do bot (Google Calendar)
+    # com o lead certo, pelo email do convidado do evento.
+    _ensure_column(conn, "leads", "contato_email", "TEXT")
     # Reconhecer cliente existente (roadmap 1.6). Timestamp do check
     # contra o person_index — NULL = ainda não checado. Roda 1x por lead.
     _ensure_column(conn, "leads", "cliente_checado_em", "TEXT")

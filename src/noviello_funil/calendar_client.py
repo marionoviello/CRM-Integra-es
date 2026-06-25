@@ -424,6 +424,59 @@ class GoogleCalendarClient:
             resp.raise_for_status()
         return resp.json()
 
+    async def list_events(
+        self,
+        *,
+        time_min: datetime.datetime,
+        time_max: datetime.datetime,
+    ) -> list[dict[str, Any]]:
+        """D4 (25/jun): eventos do calendário na janela [time_min, time_max].
+
+        Usado pra detectar reuniões marcadas FORA do bot. Por evento retorna::
+
+            {"id", "summary", "start_iso" (None se all-day), "meet_link",
+             "attendees": [{"email" (lowercase), "self", "organizer"}]}
+
+        ``singleEvents=true`` expande recorrências; ``orderBy=startTime`` ordena.
+        """
+        resp = await self._authed_request(
+            "GET",
+            f"{_CAL_BASE}/calendars/{self._calendar_id}/events",
+            params={
+                "timeMin": time_min.astimezone(datetime.UTC)
+                .isoformat().replace("+00:00", "Z"),
+                "timeMax": time_max.astimezone(datetime.UTC)
+                .isoformat().replace("+00:00", "Z"),
+                "singleEvents": "true",
+                "orderBy": "startTime",
+                "maxResults": "250",
+            },
+        )
+        if resp.status_code >= 400:
+            logger.error(
+                "list_events failed: %d %r", resp.status_code, resp.text[:300],
+            )
+            resp.raise_for_status()
+
+        eventos: list[dict[str, Any]] = []
+        for item in resp.json().get("items", []):
+            start = item.get("start") or {}
+            attendees = [
+                {
+                    "email": (a.get("email") or "").strip().lower(),
+                    "self": bool(a.get("self")),
+                    "organizer": bool(a.get("organizer")),
+                }
+                for a in (item.get("attendees") or [])
+            ]
+            eventos.append({
+                "id": item.get("id", "") or "",
+                "summary": item.get("summary", "") or "",
+                "start_iso": start.get("dateTime"),  # None em all-day (só "date")
+                "attendees": attendees,
+                "meet_link": item.get("hangoutLink", "") or "",
+            })
+        return eventos
 
     async def cancel_event(self, event_id: str) -> None:
         """DELETE /calendars/{calId}/events/{eventId}?sendUpdates=all.

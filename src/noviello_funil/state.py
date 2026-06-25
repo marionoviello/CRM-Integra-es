@@ -581,6 +581,76 @@ def list_leads_aguardando_humano(
     return conn.execute(sql, params).fetchall()
 
 
+def set_lead_email(conn: sqlite3.Connection, lead_id: int, email: str) -> None:
+    """D4 (25/jun): persiste o email do lead (lowercase) pra casar reuniões
+    marcadas FORA do bot com o lead certo. Idempotente — só grava se o valor
+    mudou (o poll cycle chama isto sempre que vê um email no transcript, então
+    evitar write à toa importa). Email vazio = no-op (não apaga)."""
+    norm = (email or "").strip().lower()
+    if not norm:
+        return
+    row = conn.execute(
+        "SELECT contato_email FROM leads WHERE id = ?", (lead_id,)
+    ).fetchone()
+    if row is not None and (row["contato_email"] or "") == norm:
+        return
+    conn.execute(
+        "UPDATE leads SET contato_email = ?, atualizado_em = datetime('now') "
+        "WHERE id = ?",
+        (norm, lead_id),
+    )
+
+
+def lead_por_email(
+    conn: sqlite3.Connection, email: str,
+) -> list[sqlite3.Row]:
+    """D4 (25/jun): leads cujo contato_email casa (lowercase). Lista porque, em
+    tese, 2 leads podem ter o mesmo email — o caller trata ambiguidade."""
+    norm = (email or "").strip().lower()
+    if not norm:
+        return []
+    return conn.execute(
+        "SELECT * FROM leads WHERE contato_email = ?", (norm,)
+    ).fetchall()
+
+
+def event_ids_de_reunioes(conn: sqlite3.Connection) -> set[str]:
+    """D4 (25/jun): todos os ``reuniao_event_id`` não-nulos — eventos do Calendar
+    JÁ rastreados pelo bot. A sync de reunião manual pula esses (auto-dedup: após
+    auto-vincular, o event_id entra aqui e não reprocessa)."""
+    rows = conn.execute(
+        "SELECT reuniao_event_id FROM leads "
+        "WHERE reuniao_event_id IS NOT NULL AND reuniao_event_id != ''"
+    ).fetchall()
+    return {r["reuniao_event_id"] for r in rows}
+
+
+def evento_manual_ja_alertado(
+    conn: sqlite3.Connection, event_id: str,
+) -> bool:
+    """D4 (25/jun): True se já avisamos o Mario sobre este evento do Calendar
+    (não-rastreado/conflito) — pra o aviso sair 1× por evento, não a cada tick."""
+    if not event_id:
+        return True  # sem id não dá pra deduplicar → não alerta (evita spam)
+    row = conn.execute(
+        "SELECT 1 FROM eventos_manuais_alertados WHERE event_id = ?",
+        (event_id,),
+    ).fetchone()
+    return row is not None
+
+
+def marcar_evento_manual_alertado(
+    conn: sqlite3.Connection, event_id: str,
+) -> None:
+    """D4 (25/jun): registra que o Mario já foi avisado deste evento. Idempotente."""
+    if not event_id:
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO eventos_manuais_alertados (event_id) VALUES (?)",
+        (event_id,),
+    )
+
+
 def marcar_ah_checado(conn: sqlite3.Connection, lead_id: int) -> None:
     """H2 (auditoria 24/jun): carimba ah_checado_em = now → rotaciona o lead pro
     fim da fila da sweep de re-engaje. NÃO toca atualizado_em (que é 'última

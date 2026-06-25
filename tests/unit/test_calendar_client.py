@@ -481,3 +481,47 @@ async def test_find_slots_exclui_horarios_ja_oferecidos(respx_mock):
     isos = {s.start.isoformat() for s in slots}
     assert "2026-06-09T14:00:00-03:00" not in isos   # excluído não volta
     assert slots[0].start == _dt(2026, 6, 9, 14, 30)  # próximo livre do dia
+
+
+@pytest.mark.asyncio
+async def test_list_events_parseia_eventos(respx_mock):
+    """D4 (25/jun): list_events extrai id/summary/start/attendees/meet; all-day
+    (sem dateTime) vira start_iso None; email normalizado; flags self/organizer."""
+    respx_mock.post("https://oauth2.googleapis.com/token").mock(
+        return_value=httpx.Response(
+            200, json={"access_token": "t", "expires_in": 3600},
+        ),
+    )
+    respx_mock.get(
+        "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+    ).mock(return_value=httpx.Response(200, json={"items": [
+        {
+            "id": "evt-1",
+            "summary": "Reunião João",
+            "start": {"dateTime": "2026-06-26T10:00:00-03:00"},
+            "attendees": [
+                {"email": "Joao@Exemplo.com", "responseStatus": "accepted"},
+                {"email": "mario@noviello.adv.br", "self": True, "organizer": True},
+            ],
+            "hangoutLink": "https://meet.google.com/abc",
+        },
+        {"id": "evt-allday", "summary": "Audiência", "start": {"date": "2026-06-26"}},
+    ]}))
+
+    client = GoogleCalendarClient(client_id="c", client_secret="s", refresh_token="r")
+    try:
+        eventos = await client.list_events(
+            time_min=datetime.datetime(2026, 6, 25, tzinfo=ZoneInfo("America/Sao_Paulo")),
+            time_max=datetime.datetime(2026, 6, 27, tzinfo=ZoneInfo("America/Sao_Paulo")),
+        )
+    finally:
+        await client.aclose()
+
+    assert len(eventos) == 2
+    e1 = eventos[0]
+    assert e1["id"] == "evt-1"
+    assert e1["start_iso"] == "2026-06-26T10:00:00-03:00"
+    assert e1["meet_link"] == "https://meet.google.com/abc"
+    externos = [a for a in e1["attendees"] if not a["self"] and not a["organizer"]]
+    assert externos == [{"email": "joao@exemplo.com", "self": False, "organizer": False}]
+    assert eventos[1]["start_iso"] is None  # all-day

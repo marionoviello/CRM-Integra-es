@@ -87,6 +87,12 @@ class Settings(BaseSettings):
     calendar_morning_start: int = Field(default=0, ge=0, le=23)
     calendar_morning_end: int = Field(default=0, ge=0, le=23)  # le=23: time(24,0) é ValueError
 
+    # D4 (25/jun): sync de reuniões marcadas FORA do bot. A cada ciclo, lê os
+    # eventos do Calendar (janela 48h) e auto-vincula ao lead pelo email do
+    # convidado (manda lembretes); eventos com convidado externo que não casam
+    # viram alerta 1× ao Mario. Desligar se virar barulho.
+    calendar_sync_manual: bool = True
+
     # SMTP (Google Workspace) — disparo de email de aniversário aos
     # clientes. smtp_password é uma SENHA DE APP do Google (não a senha
     # da conta; gerar em myaccount.google.com/apppasswords, exige 2FA).

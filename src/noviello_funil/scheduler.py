@@ -70,9 +70,12 @@ from noviello_funil.state import (
     clear_horarios_oferecidos,
     clear_reuniao,
     create_lead_if_absent,
+    event_ids_de_reunioes,
+    evento_manual_ja_alertado,
     get_horarios_oferecidos,
     get_lead_by_conversation,
     lead_com_reuniao_no_horario,
+    lead_por_email,
     list_leads_aguardando_humano,
     list_leads_com_reuniao_futura,
     list_leads_para_polling,
@@ -81,6 +84,7 @@ from noviello_funil.state import (
     list_leads_vencidos,
     marcar_ah_checado,
     marcar_erro_alertado,
+    marcar_evento_manual_alertado,
     marcar_noshow_avisado,
     mark_cliente_checado,
     mark_lead_activity_now,
@@ -90,6 +94,7 @@ from noviello_funil.state import (
     reset_turnos,
     schedule_next_action_seconds,
     set_horarios_oferecidos,
+    set_lead_email,
     set_reuniao,
     transicao,
     ultimo_motivo_transicao,
@@ -1424,6 +1429,10 @@ async def run_poll_cycle(
         new_hash = _compute_hash(transcript)
         old_hash = lead["ultimo_transcript_hash"]
 
+        # D4 (25/jun): se o lead mencionou um email, persiste (idempotente) pra
+        # casar reuniões marcadas FORA do bot pelo email do convidado do evento.
+        set_lead_email(conn, lead_id, _extrair_email(transcript))
+
         # Signal 0 (2026-06-10): atendente HUMANO assumiu a conversa.
         # O campo ``user`` da conversa identifica o responsável atual.
         # Quando o bot tem identidade própria (bot_user_id setado via
@@ -2217,6 +2226,155 @@ async def _ping_noshow(
         marcar_noshow_avisado(conn, lead["id"], token)
 
 
+def _convidados_externos(ev: dict[str, Any]) -> list[str]:
+    """D4 (25/jun): emails dos attendees que NÃO são o dono/organizador do
+    calendário (flags self/organizer do Google) — i.e., o cliente convidado."""
+    return [
+        a["email"]
+        for a in ev.get("attendees", [])
+        if a.get("email") and not a.get("self") and not a.get("organizer")
+    ]
+
+
+async def _alertar_evento_manual(
+    conn: Any,
+    jurichat: JurichatClient,
+    mario_conversation_id: str,
+    ev: dict[str, Any],
+    *,
+    motivo: str,
+) -> None:
+    """D4 (25/jun): alerta o Mario UMA vez sobre um evento manual não-rastreado/
+    conflito, com o comando preenchido pra registrar (--conversa em branco, ele
+    completa). Dedup via eventos_manuais_alertados."""
+    event_id = ev["id"]
+    if evento_manual_ja_alertado(conn, event_id):
+        return
+    convidados = ", ".join(_convidados_externos(ev)) or "?"
+    cmd = (
+        ".venv/bin/python scripts/registrar_reuniao_manual.py "
+        f"--conversa <ID_DA_CONVERSA> --quando {ev['start_iso']} "
+        f"--meet {ev['meet_link'] or '-'} --event-id {event_id}"
+    )
+    enviado = await notify_mario(
+        jurichat,
+        mario_conversation_id=mario_conversation_id,
+        mensagem=(
+            "📅 Reunião no Calendar NÃO está nos lembretes automáticos:\n\n"
+            f"{ev['summary'] or '(sem título)'}\n"
+            f"Quando: {ev['start_iso']}\n"
+            f"Convidado(s): {convidados}\n"
+            f"Motivo: {motivo}\n\n"
+            "Se é cliente e quer os lembretes, registre (preencha a conversa):\n"
+            f"{cmd}"
+        ),
+    )
+    if enviado or not mario_conversation_id:
+        marcar_evento_manual_alertado(conn, event_id)
+
+
+async def sync_reunioes_manuais(
+    *,
+    get_db: Callable[[], Any],
+    calendar: "CalendarConfig | None",
+    jurichat: JurichatClient,
+    mario_conversation_id: str = "",
+    janela_horas: int = 48,
+) -> None:
+    """D4 (25/jun): detecta reuniões marcadas FORA do bot no Google Calendar:
+    - auto-vincula ao lead pelo email do convidado → lembretes 24h/2h/30min saem;
+    - alerta o Mario 1× sobre eventos com convidado externo que não casam (ou
+      conflitam com outra reunião do lead).
+    Ignora eventos já rastreados (event_id num lead), all-day e sem convidado
+    externo (audiência/pessoal). Best-effort: nunca derruba o ciclo."""
+    if calendar is None or calendar.client is None:
+        return
+    conn = get_db()
+    now = datetime.datetime.now(datetime.UTC)
+    try:
+        eventos = await calendar.client.list_events(
+            time_min=now,
+            time_max=now + datetime.timedelta(hours=janela_horas),
+        )
+    except Exception as exc:
+        logger.warning("sync_reunioes_manuais: list_events falhou: %s", exc)
+        return
+
+    tracked = event_ids_de_reunioes(conn)
+    for ev in eventos:
+        event_id = ev["id"]
+        if not event_id or event_id in tracked:
+            continue  # já rastreado pelo bot (ou sem id)
+        if not ev["start_iso"]:
+            continue  # all-day (audiência sem horário) → ignora
+        externos = _convidados_externos(ev)
+        if not externos:
+            continue  # sem convidado externo → audiência/pessoal, ignora
+
+        casados = {
+            row["id"]: row
+            for email in externos
+            for row in lead_por_email(conn, email)
+        }
+
+        if len(casados) != 1:
+            # 0 = não rastreado; >1 = ambíguo. Alerta pro Mario decidir.
+            motivo = (
+                "não casei com nenhum lead pelo email"
+                if not casados
+                else f"AMBÍGUO — {len(casados)} leads com esse email"
+            )
+            await _alertar_evento_manual(
+                conn, jurichat, mario_conversation_id, ev, motivo=motivo,
+            )
+            continue
+
+        lead = next(iter(casados.values()))
+        # Lead já tem OUTRA reunião marcada? NÃO sobrescreve (1 reunião/lead).
+        if lead["reuniao_em"] and (lead["reuniao_event_id"] or "") != event_id:
+            await _alertar_evento_manual(
+                conn, jurichat, mario_conversation_id, ev,
+                motivo=(
+                    f"CONFLITO — {lead['contato_nome']} já tem reunião em "
+                    f"{lead['reuniao_em']}; este evento manual é outro"
+                ),
+            )
+            continue
+
+        # Auto-vincula → o reminder_cycle cuida dos lembretes.
+        try:
+            set_reuniao(
+                conn, lead["id"],
+                reuniao_em_iso=ev["start_iso"], event_id=event_id,
+                meet_link=ev["meet_link"],
+            )
+        except ValueError as exc:
+            logger.warning(
+                "sync manual: set_reuniao ISO inválido %r: %s",
+                ev["start_iso"], exc,
+            )
+            continue
+        logger.info(
+            "D4: reunião manual %s vinculada ao lead=%s", event_id, lead["id"],
+        )
+        try:
+            await notify_mario(
+                jurichat,
+                mario_conversation_id=mario_conversation_id,
+                mensagem=(
+                    "✅ Vinculei uma reunião marcada por fora aos lembretes:\n\n"
+                    f"Lead: {lead['contato_nome']}\n"
+                    f"Quando: {ev['start_iso']}\n"
+                    f"({ev['summary'] or 'sem título'})\n\n"
+                    "Os lembretes 24h/2h/30min saem automaticamente."
+                ),
+            )
+        except Exception as exc:
+            logger.exception(
+                "notify_mario(reuniao_manual_vinculada) falhou: %s", exc,
+            )
+
+
 async def run_reminder_cycle(
     *,
     get_db: Callable[[], Any],
@@ -2729,6 +2887,16 @@ def main() -> int:
             juridiq=juridiq_client,
             datajud_api_key=settings.datajud_api_key,
         )
+        # 2.5 (D4, 25/jun): detecta reuniões marcadas FORA do bot e vincula ao
+        #    lead (pelo email do convidado) ANTES do reminder_cycle, pra elas já
+        #    entrarem nos lembretes neste mesmo ciclo.
+        if settings.calendar_sync_manual:
+            await sync_reunioes_manuais(
+                get_db=lambda: conn,
+                calendar=calendar_config,
+                jurichat=jurichat,
+                mario_conversation_id=settings.mario_conversation_id,
+            )
         # 3. Reminder cycle envia lembretes 24h/2h/30min antes de
         #    cada reunião agendada.
         await run_reminder_cycle(
