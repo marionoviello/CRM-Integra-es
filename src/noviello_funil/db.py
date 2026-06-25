@@ -282,6 +282,12 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     # falha de API ficava mudo dias e o Mario nunca sabia).
     _ensure_column(conn, "leads", "erro_consecutivo", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "leads", "erro_alertado_em", "TEXT")
+    # H2 (auditoria 24/jun): timestamp da última vez que a sweep de re-engaje de
+    # AGUARDANDO_HUMANO checou este lead. A sweep varre só os N há mais tempo sem
+    # checar (ORDER BY ah_checado_em, NULLs primeiro) e marca os checados →
+    # round-robin com trabalho LIMITADO por tick, em vez de O(AH) chamadas
+    # get_conversation a cada 30s.
+    _ensure_column(conn, "leads", "ah_checado_em", "TEXT")
     # Reconhecer cliente existente (roadmap 1.6). Timestamp do check
     # contra o person_index — NULL = ainda não checado. Roda 1x por lead.
     _ensure_column(conn, "leads", "cliente_checado_em", "TEXT")

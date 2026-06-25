@@ -12,8 +12,10 @@ from noviello_funil.state import (
     get_lead_by_conversation,
     is_webhook_processed,
     lead_com_reuniao_no_horario,
+    list_leads_aguardando_humano,
     list_leads_presos,
     list_leads_vencidos,
+    marcar_ah_checado,
     marcar_erro_alertado,
     mark_webhook_processed,
     record_lead_message_received,
@@ -228,6 +230,31 @@ def test_transicao_propaga_locked_apos_esgotar_tentativas(db_conn, monkeypatch):
         transicao(proxy, lead["id"], Estado.AGUARDANDO_HUMANO, motivo="x")
     # Estado intocado (nada persistiu).
     assert get_lead_by_conversation(db_conn, "C-2")["estado"] == Estado.EM_CONVERSA
+
+
+def test_ah_sweep_limite_e_rotacao_round_robin(db_conn):
+    """H2 (auditoria 24/jun): a sweep de AH pega só ``limite`` por vez (NULLs
+    primeiro); marcar_ah_checado rotaciona pro fim → round-robin cobre todos sem
+    deixar ninguém de fora."""
+    ids = []
+    for nome in ("A", "B", "C"):
+        lead = create_lead_if_absent(db_conn, f"L-{nome}", f"C-{nome}", "5511...", nome)
+        transicao(db_conn, lead["id"], Estado.AGUARDANDO_HUMANO, motivo="x")
+        ids.append(lead["id"])
+
+    # Tick 1: limite 2 → 2 dos 3 (todos ah_checado_em NULL).
+    tick1 = list_leads_aguardando_humano(db_conn, limite=2)
+    assert len(tick1) == 2
+    for lead in tick1:
+        marcar_ah_checado(db_conn, lead["id"])
+
+    # O que ficou de fora (ainda NULL) aparece no tick 2 — ninguém é esquecido.
+    fora = set(ids) - {lead["id"] for lead in tick1}
+    tick2_ids = {lead["id"] for lead in list_leads_aguardando_humano(db_conn, limite=2)}
+    assert fora <= tick2_ids
+
+    # limite=None → todos (compat com callers antigos).
+    assert len(list_leads_aguardando_humano(db_conn)) == 3
 
 
 def test_register_error_conta_consecutivos_e_hash_zera(db_conn):

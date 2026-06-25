@@ -556,21 +556,39 @@ def list_leads_para_reativacao(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def list_leads_aguardando_humano(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+def list_leads_aguardando_humano(
+    conn: sqlite3.Connection, limite: int | None = None,
+) -> list[sqlite3.Row]:
     """Leads em AGUARDANDO_HUMANO — candidatos a RE-ENGAJE (P1 auditoria 24/jun).
 
     Antes AGUARDANDO_HUMANO era um buraco negro: o bot (único atendimento) nunca
     mais tocava o lead. Agora a FASE 0 do poll varre esses leads; se o lead manda
     mensagem nova, o bot reabre — exceto motivos terminais (opt-out, humano
-    assumiu, etc.), checados via ``ultimo_motivo_transicao``."""
-    return conn.execute(
-        """
-        SELECT * FROM leads
-        WHERE estado = ?
-        ORDER BY atualizado_em ASC
-        """,
-        (Estado.AGUARDANDO_HUMANO,),
-    ).fetchall()
+    assumiu, etc.), checados via ``ultimo_motivo_transicao``.
+
+    H2 (auditoria 24/jun): ``limite`` faz a sweep pegar só os N há mais tempo sem
+    checar (``ah_checado_em`` ASC, NULLs primeiro), e o caller carimba cada um com
+    ``marcar_ah_checado`` → round-robin com trabalho LIMITADO por tick, sem O(AH)
+    chamadas get_conversation. ``None`` = sem limite (compat)."""
+    sql = (
+        "SELECT * FROM leads WHERE estado = ? "
+        "ORDER BY ah_checado_em ASC"  # SQLite: NULL vem primeiro no ASC
+    )
+    params: tuple = (Estado.AGUARDANDO_HUMANO,)
+    if limite is not None:
+        sql += " LIMIT ?"
+        params = (*params, limite)
+    return conn.execute(sql, params).fetchall()
+
+
+def marcar_ah_checado(conn: sqlite3.Connection, lead_id: int) -> None:
+    """H2 (auditoria 24/jun): carimba ah_checado_em = now → rotaciona o lead pro
+    fim da fila da sweep de re-engaje. NÃO toca atualizado_em (que é 'última
+    modificação de negócio')."""
+    conn.execute(
+        "UPDATE leads SET ah_checado_em = datetime('now') WHERE id = ?",
+        (lead_id,),
+    )
 
 
 def ultimo_motivo_transicao(

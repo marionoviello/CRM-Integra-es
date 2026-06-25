@@ -79,6 +79,7 @@ from noviello_funil.state import (
     list_leads_para_reativacao,
     list_leads_presos,
     list_leads_vencidos,
+    marcar_ah_checado,
     marcar_erro_alertado,
     marcar_noshow_avisado,
     mark_cliente_checado,
@@ -1061,6 +1062,12 @@ _MOTIVOS_AH_TERMINAIS = frozenset({
     "excluido_followup_etiqueta",
 })
 
+# H2 (auditoria 24/jun): máx. de leads AGUARDANDO_HUMANO checados por tick na
+# sweep de re-engaje. Round-robin via ah_checado_em → trabalho LIMITADO por tick
+# (em vez de O(AH) chamadas get_conversation), todo AH coberto em ~ceil(AH/N)
+# ticks. Re-engaje de um lead que voltou a falar atrasa no máximo esses ticks.
+_AH_SWEEP_LIMIT = 25
+
 
 async def sync_jurichat_conversations(
     *,
@@ -1317,7 +1324,13 @@ async def run_poll_cycle(
     # era um buraco negro (bot é o ÚNICO atendimento → "handoff" virava "vácuo").
     # Se o lead em espera manda mensagem NOVA, reabre pro bot retomar + re-alerta
     # o Mario — EXCETO motivos terminais (opt-out, humano assumiu, não-lead).
-    for lead in list_leads_aguardando_humano(conn):
+    # H2 (auditoria 24/jun): só os N há mais tempo sem checar (round-robin via
+    # ah_checado_em) → trabalho limitado por tick em vez de O(AH) get_conversation.
+    for lead in list_leads_aguardando_humano(conn, limite=_AH_SWEEP_LIMIT):
+        # Carimba JÁ (antes de qualquer continue) pra rotacionar pro fim da fila
+        # — assim os outros AH entram nos próximos ticks. Re-engajado sai de AH,
+        # então o carimbo é inócuo nesse caso.
+        marcar_ah_checado(conn, lead["id"])
         conv_id_ah = lead["jurichat_conversation_id"]
         if conv_id_ah in canais_alertas:
             continue

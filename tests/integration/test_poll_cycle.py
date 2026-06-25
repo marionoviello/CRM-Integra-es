@@ -222,6 +222,39 @@ async def test_promessa_de_resultado_bloqueia_tambem_no_confirmar_horario(db_con
 
 
 @pytest.mark.asyncio
+async def test_ah_sweep_respeita_limite_por_tick(db_conn, monkeypatch):
+    """H2 (auditoria 24/jun): a sweep de re-engaje de AGUARDANDO_HUMANO checa no
+    máximo N leads por tick (round-robin via ah_checado_em), em vez de O(AH)
+    chamadas get_conversation a cada 30s."""
+    import noviello_funil.scheduler as sch
+    from noviello_funil.state import create_lead_if_absent, transicao
+
+    monkeypatch.setattr(sch, "_AH_SWEEP_LIMIT", 2)
+    for i in (1, 2, 3):
+        lead = create_lead_if_absent(
+            db_conn, f"L-{i}", f"C-{i}", f"551100000000{i}", f"Lead{i}"
+        )
+        transicao(db_conn, lead["id"], Estado.AGUARDANDO_HUMANO, motivo="claude_handoff")
+
+    # Última linha = Atendente → a sweep busca a conversa mas NÃO reabre
+    # (registra o hash e segue); assim os leads ficam em AH e não caem no loop
+    # principal no mesmo tick, isolando a contagem da sweep.
+    jurichat = _make_jurichat("Lead: oi\nAtendente: já te respondo")
+    triagem_fn = await _triagem_returning(Decisao(acao="responder", mensagem="x"))
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    # Só 2 conversas de AH buscadas neste tick (o limite), não as 3.
+    assert jurichat.get_conversation.await_count == 2
+    # Os 3 seguem em AH (nenhum reabriu — última linha era do atendente).
+    for i in (1, 2, 3):
+        assert get_lead_by_conversation(db_conn, f"C-{i}")["estado"] == Estado.AGUARDANDO_HUMANO
+
+
+@pytest.mark.asyncio
 async def test_poll_cycle_alerta_mario_sobre_lead_preso_uma_vez(db_conn):
     """F1 (auditoria 24/jun): lead com >= 3 falhas consecutivas → o ciclo alerta
     o Mario UMA vez ao fim do tick (antes erro_atual era write-only e o lead
