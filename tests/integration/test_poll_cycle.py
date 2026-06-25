@@ -265,7 +265,7 @@ async def test_oferecer_horarios_erro_transitorio_calendar_re_tenta(db_conn):
     re-tenta no próximo tick, SEM handoff nem alerta imediato."""
     from noviello_funil.calendar_client import GoogleCalendarError
 
-    transcript = "Atendente: Oi\nLead: Quero agendar"
+    transcript = "Atendente: Oi\nLead: Quero agendar, meu email é joao@exemplo.com"
     _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
     jurichat = _make_jurichat(transcript)
     calendar_client = _make_calendar()
@@ -300,7 +300,7 @@ async def test_oferecer_horarios_erro_httpx_e_transitorio_re_tenta(db_conn):
     TRANSITÓRIO — re-tenta, NÃO faz handoff (senão um 503 viraria handoff)."""
     import httpx
 
-    transcript = "Atendente: Oi\nLead: Quero agendar"
+    transcript = "Atendente: Oi\nLead: Quero agendar, meu email é joao@exemplo.com"
     _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
     jurichat = _make_jurichat(transcript)
     calendar_client = _make_calendar()
@@ -327,7 +327,7 @@ async def test_oferecer_horarios_erro_inesperado_handoff_e_alerta(db_conn):
     """F2 (auditoria 24/jun): erro INESPERADO (bug determinístico, ex.: regressão
     pós-deploy) NÃO fica em reschedule mudo infinito — degrada pra handoff +
     alerta o Mario."""
-    transcript = "Atendente: Oi\nLead: Quero agendar"
+    transcript = "Atendente: Oi\nLead: Quero agendar, meu email é joao@exemplo.com"
     _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
     jurichat = _make_jurichat(transcript)
     calendar_client = _make_calendar()
@@ -806,7 +806,10 @@ def _calendar_config(client=None):
 @pytest.mark.asyncio
 async def test_oferecer_horarios_substitui_placeholder_e_envia(db_conn):
     """Claude pediu agendamento → bot busca slots reais e substitui placeholder."""
-    transcript = "Atendente: Oi\nLead: Quero agendar uma conversa"
+    transcript = (
+        "Atendente: Oi\nLead: Quero agendar uma conversa, "
+        "meu email é joao@exemplo.com"
+    )
     _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
 
     tz = ZoneInfo("America/Sao_Paulo")
@@ -843,13 +846,42 @@ async def test_oferecer_horarios_substitui_placeholder_e_envia(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_oferecer_horarios_sem_email_pede_email(db_conn):
+    """G2 (auditoria 24/jun): Claude pulou pra oferecer_horarios SEM email na
+    transcrição → o bot pede o email primeiro, NÃO mostra slots (o Meet precisa
+    do email pro convite)."""
+    transcript = "Atendente: Oi\nLead: Quero agendar uma conversa"  # sem email
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+    calendar_client = _make_calendar()
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = await _triagem_returning(
+        Decisao(acao="oferecer_horarios", mensagem="Tenho: {{HORARIOS}}")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )
+
+    # NÃO buscou slots; pediu email.
+    calendar_client.find_available_slots.assert_not_awaited()
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA
+    sent = jurichat.send_message.call_args[0][1]
+    assert "email" in sent.lower()
+    assert "{{HORARIOS}}" not in sent
+
+
+@pytest.mark.asyncio
 async def test_reoferta_exclui_ja_oferecidos_e_acumula(db_conn):
     """G1 (2026-06-16): ao re-oferecer, o bot exclui os horários já
     oferecidos (passa exclude_isos) e ACUMULA no horarios_oferecidos —
     o lead vê horários NOVOS e o Signal 1.8 ainda casa qualquer ofertado.
     Datas FUTURAS pra o filtro S5 (expirados) não limpar a oferta anterior."""
     transcript = (
-        "Atendente: Tenho esses horários\nLead: não estou disponível nesses"
+        "Atendente: Tenho esses horários\nLead: não estou disponível nesses, "
+        "meu email é joao@exemplo.com"
     )
     _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
     lead_id = get_lead_by_conversation(db_conn, "C-1")["id"]
@@ -894,7 +926,7 @@ async def test_reoferta_exclui_ja_oferecidos_e_acumula(db_conn):
 @pytest.mark.asyncio
 async def test_oferecer_horarios_sem_calendar_vira_handoff(db_conn):
     """Sem Google configurado → degradar pra handoff cortês."""
-    transcript = "Atendente: Oi\nLead: Quero agendar"
+    transcript = "Atendente: Oi\nLead: Quero agendar, meu email é joao@exemplo.com"
     _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
 
     jurichat = _make_jurichat(transcript)
@@ -1155,6 +1187,78 @@ async def test_propor_com_calendar_e_email_redireciona_pra_oferecer_horarios(db_
     assert "Mario Noviello" not in sent_text
     assert "ter (09/jun) às 14h" in sent_text
     assert "nossa equipe" in sent_text.lower() or "videochamada" in sent_text.lower()
+
+
+@pytest.mark.asyncio
+async def test_propor_com_recusa_de_videochamada_faz_handoff(db_conn):
+    """G1 (auditoria 24/jun): lead RECUSOU videochamada + Claude devolve propor
+    (como a skill manda) → o bot NÃO força agendamento Meet; faz handoff pra
+    equipe + alerta o Mario. Antes o guardrail insistia em Meet com quem disse
+    não."""
+    transcript = (
+        "Atendente: Posso te atender por videochamada?\n"
+        "Lead: meu email é joao@exemplo.com, mas não posso fazer videochamada, "
+        "prefiro só receber a proposta por escrito"
+    )
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar()
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="propor",
+            mensagem="Entendi! Nossa equipe vai te passar a proposta por escrito.",
+            resumo_caso="Inventário SP, lead prefere proposta escrita",
+        )
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    # Handoff pro humano, NÃO força agendamento.
+    assert lead["estado"] == Estado.AGUARDANDO_HUMANO
+    calendar_client.find_available_slots.assert_not_awaited()
+    calendar_client.create_event.assert_not_awaited()
+    # Lead recebeu a mensagem do Claude (proposta por escrito), sem horários.
+    para_lead = [
+        c.args[1] for c in jurichat.send_message.call_args_list if c.args[0] == "C-1"
+    ]
+    assert len(para_lead) == 1
+    assert "proposta" in para_lead[0].lower()
+    # Mario foi alertado.
+    para_mario = [
+        c for c in jurichat.send_message.call_args_list if c.args[0] == "mario-conv"
+    ]
+    assert len(para_mario) >= 1
+
+
+def test_lead_recusou_videochamada_detecta_e_nao_falso_positiva():
+    """G1 (auditoria 24/jun): detector de recusa — pega recusas explícitas do
+    LEAD, não dispara em lead disposto nem em fala do atendente."""
+    from noviello_funil.scheduler import _lead_recusou_videochamada
+
+    for t in (
+        "Lead: não posso fazer videochamada",
+        "Lead: não consigo videochamada, prefiro presencial",
+        "Lead: prefiro só receber a proposta por escrito",
+        "Lead: só presencial pra mim",
+        "Lead: videochamada não rola pra mim",
+        "Atendente: videochamada?\nLead: não, prefiro pessoalmente",
+    ):
+        assert _lead_recusou_videochamada(t), t
+
+    for t in (
+        "Lead: pode ser videochamada sim",
+        "Lead: quero agendar uma videochamada",
+        "Lead: quanto custa o inventário?",
+        "Atendente: prefiro presencial",   # fala do atendente NÃO conta
+        "",
+    ):
+        assert not _lead_recusou_videochamada(t), t
 
 
 @pytest.mark.asyncio

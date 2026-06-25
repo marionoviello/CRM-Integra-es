@@ -205,6 +205,40 @@ def _last_lead_message(transcript: str) -> str:
     return ""
 
 
+# G1 (auditoria 24/jun): recusa EXPLÍCITA de videochamada (ou só aceita
+# presencial/por escrito). Char classes cobrem com/sem acento; IGNORECASE cobre
+# caixa. Falso-positivo aqui é SEGURO (lead disposto vira handoff = a equipe
+# cuida); o risco real é o falso-negativo (insistir Meet em quem recusou), então
+# o padrão é deliberadamente permissivo.
+_RE_RECUSA_VIDEOCHAMADA = re.compile(
+    r"\bn[ãa]o\s+(?:quero|posso|consigo|sei|tenho\s+como|vou|d[áa]\s+pra|rola|"
+    r"curto|gosto)[^.!?\n]{0,30}"
+    r"(?:videochamada|v[íi]deo\s?chamada|chamada\s+de\s+v[íi]deo|online|meet|"
+    r"\bv[íi]deo\b|remot)"
+    r"|\bprefiro\b[^.!?\n]{0,35}"
+    r"(?:presencial|pessoalmente|escrit[óo]rio|por\s+escrito)"
+    r"|\bs[óo]\s+(?:presencial|pessoalmente|por\s+escrito)"
+    r"|(?:videochamada|v[íi]deo\s?chamada|online|meet)[^.!?\n]{0,15}"
+    r"n[ãa]o\s+(?:d[áa]|rola|quero|posso|funciona|consigo)",
+    re.IGNORECASE,
+)
+
+
+def _lead_recusou_videochamada(transcript: str) -> bool:
+    """G1 (auditoria 24/jun): True se o lead recusou explicitamente videochamada
+    (ou só aceita presencial/por escrito). A skill manda usar `propor` JUSTO
+    nesse caso — então o bot deve fazer handoff pra equipe, NÃO forçar Meet.
+    Olha só as falas do lead (não as do atendente)."""
+    if not transcript:
+        return False
+    falas_lead = " ".join(
+        line.lstrip()[len("Lead:") :]
+        for line in transcript.splitlines()
+        if line.lstrip().startswith("Lead:")
+    )
+    return bool(_RE_RECUSA_VIDEOCHAMADA.search(falas_lead))
+
+
 def _extrair_email_do_lead(transcript: str) -> str:
     """Email da linha ``Lead:`` MAIS RECENTE que contenha ``@``, ou "".
 
@@ -288,8 +322,13 @@ async def _handle_oferecer_horarios(
     calendar: CalendarConfig,
     mario_conversation_id: str,
     poll_interval_seconds: int,
+    exigir_email: bool = True,
 ) -> None:
-    """Busca slots reais, substitui ``{{HORARIOS}}``, envia."""
+    """Busca slots reais, substitui ``{{HORARIOS}}``, envia.
+
+    ``exigir_email=False`` pula o email-gate (G2) — usado na remarcação, onde o
+    lead JÁ tem uma reunião (logo já deu o email), então re-pedir seria bobo.
+    """
     lead_id = lead["id"]
     conv_id = lead["jurichat_conversation_id"]
 
@@ -300,6 +339,29 @@ async def _handle_oferecer_horarios(
             jurichat=jurichat, mario_conversation_id=mario_conversation_id,
             motivo="calendar_nao_configurado",
         )
+        return
+
+    # G2 (auditoria 24/jun): email-gate. O Meet precisa do email do lead pro
+    # convite, e o fluxo da skill é "pede email → oferece horários". Se o modelo
+    # pulou pra oferecer_horarios SEM email na transcrição, pede o email primeiro
+    # em vez de mostrar 4 slots e só descobrir no confirmar que falta email.
+    # Espelha o guardrail do _handle_confirmar_horario (o gate existia só no
+    # prompt; agora é revalidado no handler). Remarcação pula (exigir_email=False).
+    if exigir_email and _extrair_email(transcript) is None:
+        msg_email = (
+            "Pra eu te enviar o convite com o link da videochamada (Google "
+            "Meet), qual seu melhor email?"
+        )
+        try:
+            await jurichat.start_human_support(conv_id)
+            await jurichat.send_message(conv_id, msg_email)
+        except Exception as exc:
+            logger.exception(
+                "send_message(oferecer_pede_email) lead=%s: %s", lead_id, exc,
+            )
+            register_error(conn, lead_id, "jurichat_send_failed")
+        update_transcript_hash(conn, lead_id, new_hash)
+        schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
         return
 
     # G1 (2026-06-16): re-oferta NÃO repete horário já oferecido (e recusado).
@@ -753,13 +815,15 @@ async def _handle_remarcar_reuniao(
         )
 
     # Reusa exatamente o handler de oferecer_horarios pra mandar slots
-    # novos (substitui {{HORARIOS}} na mensagem do Claude).
+    # novos (substitui {{HORARIOS}} na mensagem do Claude). exigir_email=False
+    # (G2): quem remarca já tem reunião → já deu o email; não re-pede.
     await _handle_oferecer_horarios(
         conn=conn, lead=lead, decisao=decisao,
         transcript=transcript, new_hash=new_hash,
         jurichat=jurichat, calendar=calendar,
         mario_conversation_id=mario_conversation_id,
         poll_interval_seconds=poll_interval_seconds,
+        exigir_email=False,
     )
 
 
@@ -1828,7 +1892,15 @@ async def run_poll_cycle(
             # Se temos calendar configurado, REDIRECIONAMOS pra fluxo
             # de agendamento: se já tem email na transcrição, oferece
             # horários direto; senão pede email primeiro.
-            if calendar is not None and calendar.client is not None:
+            # G1 (auditoria 24/jun): MAS se o lead RECUSOU videochamada (a skill
+            # manda usar propor justo nesse caso), NÃO redireciona pra Meet —
+            # seria insistir no que o lead negou. Recusa → cai no handoff abaixo.
+            recusou_videochamada = _lead_recusou_videochamada(transcript)
+            if (
+                calendar is not None
+                and calendar.client is not None
+                and not recusou_videochamada
+            ):
                 email_na_transcricao = _extrair_email(transcript)
                 if email_na_transcricao:
                     # Reusa handler de oferecer_horarios — substitui a
@@ -2263,22 +2335,27 @@ async def run_reminder_cycle(
             tag = "2h" if lead["lembrete_2h_enviado_em"] is None else None
         elif delta <= datetime.timedelta(hours=24):
             tag = "24h" if lead["lembrete_24h_enviado_em"] is None else None
-        if tag is None:
-            continue
+        # Rede de segurança pro lead que o brain NÃO reprocessa (modo-humano /
+        # agendado manual) — origem do bug Daniel (19/jun): o lembrete saía
+        # depois do "cancela". Se pediu, cancela a reunião + avisa o Mario.
+        # (Lead em em_conversa: o brain já limpou reuniao_em antes → nem entra
+        # na lista deste ciclo.)
+        # G4 (auditoria 24/jun): roda ANTES do `if tag is None`, dentro da janela
+        # de lembretes (<=24h). Antes vinha DEPOIS do tag-gate, então um "cancela"
+        # após o 5min (todos os lembretes enviados → tag None) era IGNORADO: o
+        # no-show ping disparava e o Mario esperava na chamada. Escopado a <=24h
+        # pra não consultar a conversa de reuniões distantes a cada tick.
+        if delta <= datetime.timedelta(hours=24):
+            ultima = await _lead_pediu_cancelamento(jurichat, conv_id)
+            if ultima is not None:
+                await _cancelar_reuniao_auto(
+                    conn=conn, lead=lead, jurichat=jurichat, calendar=calendar,
+                    mario_conversation_id=mario_conversation_id,
+                    horario_human=horario_human, ultima_msg=ultima,
+                )
+                continue
 
-        # ANTES de mandar QUALQUER lembrete: o lead pediu cancelamento? Rede de
-        # segurança pro lead que o brain NÃO reprocessa (modo-humano / agendado
-        # manual) — origem do bug Daniel (19/jun): o lembrete saía depois do
-        # "cancela". Se pediu, cancela a reunião + avisa o Mario e NÃO manda o
-        # lembrete. (Lead em em_conversa: o brain já limpou reuniao_em antes →
-        # nem entra na lista deste ciclo.)
-        ultima = await _lead_pediu_cancelamento(jurichat, conv_id)
-        if ultima is not None:
-            await _cancelar_reuniao_auto(
-                conn=conn, lead=lead, jurichat=jurichat, calendar=calendar,
-                mario_conversation_id=mario_conversation_id,
-                horario_human=horario_human, ultima_msg=ultima,
-            )
+        if tag is None:
             continue
 
         msg = {
@@ -2363,10 +2440,13 @@ def _msg_lembrete_5min(nome: str, horario: str, meet_link: str) -> str:
     )
     if meet_link:
         base += f"\n\nLink Meet: {meet_link}"
+    # G3 (auditoria 24/jun): NÃO promete "cancelamento automático" — o código
+    # nunca cancela sozinho (no-show é semi-auto, o Mario decide). Texto antigo
+    # fazia o lead atrasado confiar que tinha sido cancelado e não entrar,
+    # deixando o Mario esperando na chamada. Alinhado ao comportamento real.
     base += (
-        "\n\n⚠️ Importante: se você não conseguir entrar em até 5 minutos após "
-        "o horário, a reunião será cancelada automaticamente — mas é só falar "
-        "com a gente pra remarcar. Te esperamos!"
+        "\n\nSe atrasar, sem problema — é só me avisar por aqui que a gente "
+        "remarca pra outro horário. Te esperamos!"
     )
     return base
 

@@ -59,11 +59,11 @@ Status: `[ ]` aberto · `[x]` corrigido + deployado.
 
 ## Frente G — Qualidade da triagem / prompt da Julia
 
-- [ ] **P1** Guardrail de `propor` força agendamento mesmo quando o lead RECUSOU videochamada → bot insiste em Meet com 50+ que disse não. Contradiz a própria skill. `scheduler.py:1565-1606`. **Fix:** preservar `propor → handoff` quando há recusa/fora-de-escopo (sinal no transcript ou campo na Decisao).
-- [ ] **P2** Email-gate antes de oferecer horários só existe no prompt; `_handle_oferecer_horarios` não revalida → pode mandar 4 slots sem ter pedido email. `scheduler.py:275-370`. **Fix:** espelhar o guardrail do confirmar (checar `_extrair_email` no início do handler).
-- [ ] **P2** Lembrete de 5min PROMETE "cancelamento automático" que o código nunca executa → lead atrasado confia, não entra, Mario espera na chamada. `scheduler.py:2063-2067`. **Fix:** alinhar texto a "se atrasar, me avise que remarcamos" (design é semi-auto).
-- [ ] **P2** Rede de cancelamento (bug Daniel) só atua com lembrete pendente → "cancela" após o 5min é ignorado. `scheduler.py:1954-1979`. **Fix:** rodar `_lead_pediu_cancelamento` antes do `if tag is None: continue` na janela final.
-- [ ] **P3** `saude_suplementar.md` é skill morta (mono-skill atual cobre os 3 verticais). `scheduler.py:2260`. **Fix:** excluir o arquivo órfão (limpeza); roteamento por vertical é enhancement separado.
+- [x] **P1** Guardrail de `propor` força agendamento mesmo quando o lead RECUSOU videochamada → bot insiste em Meet com 50+ que disse não. Contradiz a própria skill. `scheduler.py:1565-1606`. **Fix:** `_lead_recusou_videochamada(transcript)` (regex sobre as falas do lead; falso-positivo é seguro = handoff) — recusa explícita pula o force-schedule e cai no handoff (notifica o Mario com a proposta); sem recusa, o guardrail segue protegendo contra misuse de propor.
+- [x] **P2** Email-gate antes de oferecer horários só existe no prompt; `_handle_oferecer_horarios` não revalida → pode mandar 4 slots sem ter pedido email. `scheduler.py:275-370`. **Fix:** gate `_extrair_email` no início do handler (pede email se faltar); `exigir_email=False` na remarcação (lead já tem reunião → já deu email).
+- [x] **P2** Lembrete de 5min PROMETE "cancelamento automático" que o código nunca executa → lead atrasado confia, não entra, Mario espera na chamada. `scheduler.py:2063-2067`. **Fix:** texto trocado pra "se atrasar, me avise por aqui que a gente remarca" (alinhado ao semi-auto real).
+- [x] **P2** Rede de cancelamento (bug Daniel) só atua com lembrete pendente → "cancela" após o 5min é ignorado. `scheduler.py:1954-1979`. **Fix:** `_lead_pediu_cancelamento` movido pra ANTES do `if tag is None: continue` (escopado à janela <=24h) → "cancela" depois do 5min é capturado.
+- [x] **P3** `saude_suplementar.md` é skill morta (mono-skill atual cobre os 3 verticais). `scheduler.py:2260`. **Fix:** arquivo removido (`git rm`); teste `test_load_skill` migrado p/ `atendente_geral` (skill viva).
 
 ## Frente H — Robustez de infra
 

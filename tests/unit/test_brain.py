@@ -22,7 +22,9 @@ def _text_block(text: str):
 
 
 def test_load_skill_returns_nonempty_string():
-    content = load_skill("saude_suplementar")
+    # atendente_geral é a skill VIVA (mono-skill dos 3 verticais). A antiga
+    # saude_suplementar.md foi removida na auditoria 24/jun (G5, código morto).
+    content = load_skill("atendente_geral")
     assert "Noviello" in content
     assert len(content) > 200
 

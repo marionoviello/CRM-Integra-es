@@ -105,9 +105,52 @@ async def test_lembrete_dispara_normal_se_checagem_cancelamento_falha(db_conn):
 
 
 @pytest.mark.asyncio
-async def test_reminder_5min_dispara_com_aviso_de_cancelamento(db_conn):
-    """Lembrete de 5 min antes: dispara quando faltam <5min (mais novo da fila)
-    e inclui o aviso de cancelamento por no-show."""
+async def test_cancelamento_apos_5min_ainda_e_capturado(db_conn):
+    """G4 (auditoria 24/jun): "cancela" DEPOIS do 5min (todos os lembretes já
+    enviados → tag None) NÃO pode ser ignorado. Antes o check de cancelamento
+    vinha depois do `if tag is None: continue` → o no-show ping disparava e o
+    Mario esperava na chamada. Agora o check roda antes (janela <=24h)."""
+    lead_id = _insert_lead(db_conn, nome="Daniel")
+    reuniao = datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=2)
+    db_conn.execute(
+        """UPDATE leads SET reuniao_em=?, reuniao_event_id='evt-1',
+           reuniao_meet_link='https://meet.google.com/x', estado=?,
+           lembrete_24h_enviado_em=datetime('now','-23 hours'),
+           lembrete_2h_enviado_em=datetime('now','-2 hours'),
+           lembrete_30min_enviado_em=datetime('now','-25 minutes'),
+           lembrete_5min_enviado_em=datetime('now','-1 minutes')
+           WHERE id=?""",
+        (reuniao.isoformat(), Estado.AGUARDANDO_HUMANO, lead_id),
+    )
+    jurichat = _make_jurichat()
+    jurichat.get_conversation = AsyncMock(return_value={
+        "transcription": "Atendente: começa em 2 min\nLead: preciso cancelar",
+    })
+
+    await run_reminder_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat,
+        mario_conversation_id="MARIO-1",
+    )
+
+    # Reunião cancelada (limpa) — não fica pro no-show.
+    lead = db_conn.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+    assert lead["reuniao_em"] is None
+    # Mario avisado; nada de lembrete ao lead.
+    para_mario = [
+        c for c in jurichat.send_message.call_args_list if c.args[0] == "MARIO-1"
+    ]
+    assert len(para_mario) >= 1
+    para_lead = [
+        c for c in jurichat.send_message.call_args_list if c.args[0] == "C-1"
+    ]
+    assert para_lead == []
+
+
+@pytest.mark.asyncio
+async def test_reminder_5min_dispara_com_aviso_de_atraso(db_conn):
+    """Lembrete de 5 min antes: dispara quando faltam <5min (mais novo da fila).
+    G3 (auditoria 24/jun): NÃO promete cancelamento automático (o código nunca
+    cancela sozinho) — diz que se atrasar é só avisar pra remarcar."""
     lead_id = _insert_lead(db_conn, nome="Joao")
     reuniao = datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=3)
     db_conn.execute(
@@ -126,7 +169,9 @@ async def test_reminder_5min_dispara_com_aviso_de_cancelamento(db_conn):
     msg = jurichat.send_message.call_args.args[1]
     assert "5 minutos" in msg
     assert "https://meet.google.com/abc" in msg
-    assert "cancelada" in msg.lower()  # o aviso de no-show
+    # G3: texto de atraso honesto, SEM falsa promessa de cancelamento automático.
+    assert "remarca" in msg.lower()
+    assert "cancelada automaticamente" not in msg.lower()
     lead = db_conn.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
     assert lead["lembrete_5min_enviado_em"] is not None
 
