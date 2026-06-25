@@ -32,7 +32,6 @@ _PADROES = (
     r"me tira(r)? da lista",
     r"remov[ae].{0,15}(numero|contato|email|e-mail|cadastro)",
     r"cancelar?.{0,15}(recebimento|inscri|cadastro)",
-    r"nao me (mande|envie|manda)",
     r"sem (mais )?mensage",
     r"\bunsubscribe\b",
     r"^\s*stop\s*$",
@@ -40,9 +39,19 @@ _PADROES = (
     # E2 (auditoria 24/jun): frases coloquiais PT-BR que o regex perdia.
     # "me deixa/deixe em paz".
     r"me deix(a|e)\b.{0,12}em paz",
-    # "nao (me) envie/mande/manda mais (nada)" — sem "me" o pattern acima não
-    # pegava; o "mais" depois do verbo de parar é sinal forte de opt-out.
-    r"nao (me )?(envie|mande|manda|encha)\b.{0,8}\bmais\b",
+    # "nao (me) envie/mande/manda (mais)" — opt-out, MAS só quando o verbo NÃO é
+    # seguido de objeto CONCRETO. "nao manda mais documento errado, manda o
+    # certo" / "nao me envie mais cobranca, ja paguei" / "nao manda mais email,
+    # manda no whats" são CORREÇÃO ou troca de canal de lead ATIVO, NÃO saída
+    # (revisão adversarial 24/jun: tanto o `.{0,8}\bmais\b` quanto o antigo
+    # `nao me (mande|envie)` suprimiam esses leads permanente e silenciosamente).
+    # O lookahead casa só quando, depois do verbo (e do opcional "mais"), vem o
+    # FIM ou uma palavra de fechamento/marketing (nada/mensagem/propaganda/
+    # publicidade/spam/oferta/…). Objeto concreto (documento/link/cobranca/
+    # email/contrato) → NÃO casa.
+    r"nao (me )?(envie|mande|manda|encha)\b(?:\s+mais\b)?"
+    r"(?!\s+(?!nada\b|mensage|isso\b|disso\b|nenhum|propaganda|publicidad"
+    r"|anunci|spam|divulga|oferta|promo|novidade|comunicad)\w)",
     # "chega de ..." — exige objeto de comunicação, pra não casar "chega de
     # novidade boa".
     r"chega de (mensage|me mand|me envi|mandar|enviar|receber|isso|disso|email|e-mail|whats|contato)",

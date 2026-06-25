@@ -60,6 +60,37 @@ def test_e2_novas_frases_nao_geram_falso_positivo():
         assert not detectar_opt_out(t), t
 
 
+def test_e2_nao_envie_mais_OBJETO_e_correcao_nao_opt_out():
+    """E2 (revisão adversarial 24/jun, P0): 'não [verbo] mais OBJETO' é
+    CORREÇÃO ou troca de canal de um lead ATIVO, NÃO descadastro — não pode
+    virar supressão permanente. Só 'mais' sem objeto concreto (ou seguido de
+    nada/mensagem/isso) é opt-out."""
+    for t in (
+        "não manda mais documento errado, manda o certo",
+        "não envie mais aquele link quebrado, envie o novo",
+        "não me envie mais cobrança, já paguei",
+        "não manda mais email, me manda no whatsapp",
+        "não manda mais boleto errado, manda o certo",
+    ):
+        assert not detectar_opt_out(t), t
+    # objeto concreto SEM "mais" também é correção, não opt-out:
+    assert not detectar_opt_out("não me envie o contrato ainda")
+    assert not detectar_opt_out("não me manda o boleto, manda o pix")
+    # ...mas o opt-out genuíno CONTINUA disparando — fim, fechamento, OU
+    # objeto de marketing (propaganda/publicidade/spam):
+    for t in (
+        "não manda mais",
+        "não envie mais mensagens",
+        "não me envie mais nada",
+        "não me envie mais nada por favor",
+        "não me mande",
+        "não me envie propaganda",
+        "não me manda mais publicidade",
+        "não me envie spam",
+    ):
+        assert detectar_opt_out(t), t
+
+
 def test_nao_confunde_pedido_de_envio_com_opt_out():
     # "me manda" é pedido, não opt-out
     assert not detectar_opt_out("me manda o contrato por favor")

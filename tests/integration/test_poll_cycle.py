@@ -179,6 +179,49 @@ async def test_responder_com_promessa_de_resultado_bloqueia_e_handoff(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_promessa_de_resultado_bloqueia_tambem_no_confirmar_horario(db_conn):
+    """E3 (revisão adversarial 24/jun): o backstop OAB roda ANTES do dispatch,
+    então cobre TODOS os ramos que mandam prosa do modelo — não só o responder.
+    Promessa num confirmar_horario (lead quente) também é barrada + handoff."""
+    transcript = (
+        "Lead: jose@exemplo.com\n"
+        "Atendente: Tenho ter 14h\n"
+        "Lead: a terça 14h"
+    )
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar()
+    promessa = "Agendado! Pode ficar tranquilo, garanto o êxito da sua causa."
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="confirmar_horario",
+            mensagem=promessa,
+            horario_escolhido_iso="2027-06-08T14:00:00-03:00",
+            lead_email="jose@exemplo.com",
+            resumo_caso="Inventário SP",
+        )
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.AGUARDANDO_HUMANO
+    assert lead["erro_atual"] == "promessa_resultado_bloqueada"
+    # NÃO criou evento nem mandou a promessa (bloqueou antes do dispatch).
+    calendar_client.create_event.assert_not_awaited()
+    enviados = [c.args[1] for c in jurichat.send_message.call_args_list]
+    assert promessa not in enviados
+
+
+@pytest.mark.asyncio
 async def test_hash_changed_propor_transitions_and_notifies(db_conn):
     # NB: last line MUST be a Lead line, otherwise the "Mario assumed"
     # detector trips before we get to the Claude decision.

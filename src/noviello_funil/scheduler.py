@@ -1727,19 +1727,24 @@ async def run_poll_cycle(
         # `Lead:` do transcript vitalício e capava o lead que voltava).
         bump_turnos(conn, lead_id)
 
+        # E3 (auditoria 24/jun; ampliado na revisão adversarial): backstop OAB
+        # (Prov. 205/2021) ANTES do dispatch — cobre TODOS os ramos que mandam a
+        # prosa do modelo (decisao.mensagem) ao lead, não só o responder:
+        # oferecer/confirmar horários e propor também enviam texto autoral (ex.:
+        # "Agendado! Garanto o êxito da sua causa"). Se promete resultado/êxito,
+        # NÃO vai ao lead: bloqueia, manda msg neutra, passa pro humano e alerta
+        # o Mario (decisão dele, 24/jun). Defesa em profundidade — a skill já
+        # instrui a não prometer; isto pega o deslize do modelo.
+        if contem_promessa_resultado(decisao.mensagem):
+            await _bloquear_promessa_resultado(
+                conn=conn, lead=lead, decisao=decisao, transcript=transcript,
+                new_hash=new_hash, jurichat=jurichat,
+                mario_conversation_id=mario_conversation_id,
+            )
+            continue
+
         # Dispatch on Claude's decision.
         if decisao.acao == "responder":
-            # E3 (auditoria 24/jun): backstop OAB (Prov. 205/2021). Defesa em
-            # profundidade — a skill instrui a não prometer resultado, mas se o
-            # modelo deslizar, NÃO mandamos o texto ao lead: bloqueia, manda msg
-            # neutra, passa pro humano e alerta o Mario (decisão dele, 24/jun).
-            if contem_promessa_resultado(decisao.mensagem):
-                await _bloquear_promessa_resultado(
-                    conn=conn, lead=lead, decisao=decisao, transcript=transcript,
-                    new_hash=new_hash, jurichat=jurichat,
-                    mario_conversation_id=mario_conversation_id,
-                )
-                continue
             try:
                 # Pré-requisito: conversa em human-support mode.
                 # Idempotente — chamar repetidamente não tem efeito colateral.
