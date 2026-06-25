@@ -106,3 +106,36 @@ para `ASSINADO`, e dispara **3 sub-passos best-effort e independentes**:
 5. **INTAKE** — Pessoa já existe: só garantir, ou enriquecer (CPF/origem)?
    (enriquecer exige PATCH não exposto hoje.)
 6. **ATIVAÇÃO** — uma flag `pos_assinatura_ativo` ou três (intake/arquivo/tarefa)?
+
+---
+
+## Adendo (25/jun) — decisões, implementação e revisões
+
+**Decisões do Mario:** (1) PDF só no disco do VPS (`data/contratos_assinados/`,
+gitignored), sem cópia por email. (2) Tarefa só na Pessoa (`personIds`, sem
+lawSuit) — a aceitação da API é validada no smoke da sandbox. (4) Sem telefone E
+sem person_id → pula + alerta. (5) Pessoa já existe → só garante (sem enriquecer).
+(6) Uma flag `pos_assinatura_ativo` (default OFF). (3) Tarefa reusa
+`task_column_id`/`task_priority` existentes; título "Abrir caso — <cliente>".
+
+**Implementado:** F0 (wiring JuridiqClient) · F1 (schema + `marcar_passo_pos_assinatura`)
+· F2 (`intake_cliente_assinado`) · F3 (`arquivar_pdf_assinado`) · F4 (tarefa
+só-na-Pessoa + `create_task` async) · F5 (`processar_pos_assinatura` + wiring no
+webhook) · **F6 (SWEEPER no scheduler)**.
+
+**REVERSÃO do corte "sem sweeper (C)":** a 1ª revisão adversarial provou que a
+premissa do corte era FALSA — a ZapSign **não reentrega** o `doc_signed` após o
+200, e o gate de idempotência (`evento_id`) descartaria a reentrega mesmo se
+houvesse. Sem sweeper, um passo que falhasse na única execução ficava NULL pra
+sempre. O sweeper (passo 2.6 do `_full_cycle`, gated pela flag) re-busca o doc
+(URL fresca) e re-roda os passos pendentes; `pos_iniciado_em` (carimbado na
+transição ASSINADO) discrimina pós-deploy; carência de 120s evita corrida
+web×sweep; teto de 5 tentativas → trava + alerta o Mario.
+
+**3 revisões adversariais (multi-agente):** R1 (pós F0-F5): 7 achados → sweeper +
+`initialDate` DATE. R2 (sweeper): 9 achados → 6 fixes (escalação no finally,
+`pos_iniciado_em` na transição, grace, sweep silencioso, bool do travado, get_doc
+condicional). R3 (fixes): 6 achados, **0 confirmados** → convergiu. 702 testes.
+
+**Pendente do Mario (não-código):** smoke na sandbox (valida a tarefa-sem-lawSuit
++ o fluxo ponta-a-ponta) → só então ligar `POS_ASSINATURA_ATIVO=true`.
