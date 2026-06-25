@@ -320,9 +320,11 @@ async def _handle_oferecer_horarios(
             morning_end=calendar.morning_end,
             exclude_isos=exclude_isos,
         )
-    except GoogleCalendarError as exc:
-        # Falha TRANSITÓRIA da API do Google (timeout/5xx/quota) — re-tenta no
-        # próximo tick. Se persistir, o sweep F1 alerta o Mario após N seguidas.
+    except (GoogleCalendarError, httpx.HTTPError) as exc:
+        # Falha TRANSITÓRIA — erro do Google (GoogleCalendarError) OU de rede/
+        # HTTP cru (timeout/5xx/transport: o find_available_slots NÃO os envolve
+        # em GoogleCalendarError, então vazam como httpx) → re-tenta no próximo
+        # tick. Se persistir, o sweep F1 alerta o Mario após N seguidas.
         logger.warning(
             "find_available_slots (calendar) falhou lead=%s: %s", lead_id, exc,
         )
@@ -330,11 +332,11 @@ async def _handle_oferecer_horarios(
         schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
         return
     except Exception as exc:
-        # F2 (auditoria 24/jun): erro INESPERADO (não é GoogleCalendarError) =
-        # provável bug determinístico (ex.: regressão pós-deploy, payload mudou).
-        # Antes caía no mesmo reschedule mudo → loop infinito mascarando a
-        # regressão. Agora degrada pra handoff (que JÁ alerta o Mario via
-        # notify_mario) em vez de re-tentar pra sempre o mesmo bug.
+        # F2 (auditoria 24/jun): erro INESPERADO (nem Google, nem rede/HTTP) =
+        # provável bug determinístico (TypeError/KeyError/ValueError — ex.:
+        # regressão pós-deploy, payload mudou). Antes caía no mesmo reschedule
+        # mudo → loop infinito mascarando a regressão. Agora degrada pra handoff
+        # (que JÁ alerta o Mario via notify_mario) em vez de re-tentar o bug.
         logger.exception(
             "find_available_slots erro INESPERADO lead=%s: %s", lead_id, exc,
         )

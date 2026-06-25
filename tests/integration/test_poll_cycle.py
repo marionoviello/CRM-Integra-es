@@ -294,6 +294,35 @@ async def test_oferecer_horarios_erro_transitorio_calendar_re_tenta(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_oferecer_horarios_erro_httpx_e_transitorio_re_tenta(db_conn):
+    """F2 (revisão própria 24/jun): o find_available_slots NÃO envolve o httpx em
+    GoogleCalendarError (raise_for_status/timeout vazam crus). httpx.HTTPError é
+    TRANSITÓRIO — re-tenta, NÃO faz handoff (senão um 503 viraria handoff)."""
+    import httpx
+
+    transcript = "Atendente: Oi\nLead: Quero agendar"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar()
+    calendar_client.find_available_slots = AsyncMock(
+        side_effect=httpx.ReadTimeout("calendar timeout")
+    )
+    triagem_fn = await _triagem_returning(
+        Decisao(acao="oferecer_horarios", mensagem="Horários: {{HORARIOS}}")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA  # re-tenta, não handoff
+    assert lead["erro_atual"] == "calendar_find_slots_failed"
+
+
+@pytest.mark.asyncio
 async def test_oferecer_horarios_erro_inesperado_handoff_e_alerta(db_conn):
     """F2 (auditoria 24/jun): erro INESPERADO (bug determinístico, ex.: regressão
     pós-deploy) NÃO fica em reschedule mudo infinito — degrada pra handoff +
