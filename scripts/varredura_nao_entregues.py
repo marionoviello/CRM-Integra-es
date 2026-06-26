@@ -48,13 +48,16 @@ async def main() -> None:
         print(f"conversas varridas: {len(convs)}")
         amostra: list[str] = []
         total = 0
+        pulados = 0  # conversas que a API recusou (ex.: rate-limit) — scan incompleto
         for cv in convs:
             cid = cv.get("id")
             if not cid or cid in _EXCLUIR or cv.get("isGroup"):
                 continue
             r = await raw.get(f"/conversation/{cid}")
             if r.status_code >= 400:
+                pulados += 1
                 continue
+            await asyncio.sleep(0.15)  # gentil com o rate-limit do Jurichat
             d = r.json()
             msgs = (d.get("data") or d).get("messages") or []
             # Amostra de valores de externalStatus (pra ver o range: delivered/
@@ -73,6 +76,7 @@ async def main() -> None:
                     print(f"  • [{_campo_de_falha(m)}] {str(m.get('content'))[:110]}")
                 total += len(falhas)
         print(f"\nexternalStatus (amostra de valores): {amostra}")
+        print(f"conversas puladas (erro/rate-limit, scan incompleto se >0): {pulados}")
         print(f"=== TOTAL de OUTBOUND não-entregues (fora Joedson): {total} ===")
         print("(SÓ relatório — nada foi reenviado. Revise e me diga.)")
     finally:
