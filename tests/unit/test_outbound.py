@@ -272,6 +272,26 @@ async def test_jurichat_get_lead_tags_returns_list(respx_mock):
 
 
 @pytest.mark.asyncio
+async def test_jurichat_get_lead_tags_404_returns_empty(respx_mock):
+    # Incidente 26/jun: a rota /crm/lead não existe na Jurichat (404 "Route not
+    # found"). get_lead_tags tem que devolver [] — NÃO levantar — senão o
+    # follow-up pula o lead e mata todos os follow-ups.
+    route = respx_mock.get("https://api.jurichat.com/crm/lead/L-404").mock(
+        return_value=httpx.Response(
+            404, json={"message": "Route GET:/crm/lead/L-404 not found",
+                       "error": "Not Found", "statusCode": 404},
+        )
+    )
+    client = JurichatClient("jk-test", "https://api.jurichat.com")
+    try:
+        tags = await client.get_lead_tags("L-404")
+    finally:
+        await client.aclose()
+    assert tags == []
+    assert route.call_count == 1  # 404 é permanente → não re-tenta
+
+
+@pytest.mark.asyncio
 async def test_jurichat_retries_on_5xx(respx_mock):
     route = respx_mock.post(
         "https://api.jurichat.com/conversation/send-message"

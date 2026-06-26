@@ -414,6 +414,13 @@ class JurichatClient:
             resp = await self._client.get(
                 f"{self._base_url}/crm/lead/{lead_id}"
             )
+            # 404 = rota/lead inexistente. A Jurichat NÃO tem /crm/lead (endpoint
+            # nunca confirmado — ver docstring; corpo do 404 = "Route ... not
+            # found"). Trata como "sem tags conhecidas" → {} → []. NÃO levanta
+            # (senão o follow-up faz `continue` e mata TODOS os follow-ups) nem
+            # re-tenta (404 é permanente). 26/jun: incidente em produção.
+            if resp.status_code == 404:
+                return {}
             resp.raise_for_status()
             return resp.json()
 
