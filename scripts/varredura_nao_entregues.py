@@ -19,19 +19,18 @@ import httpx
 from noviello_funil.config import Settings
 from noviello_funil.outbound import JurichatClient
 
-_EXCLUIR = {"cmo98fprx300jlh0716a8h0i2"}  # Joedson — NÃO mexer
-_FALHA = ("fail", "undeliver", "not_delivered", "error", "invalid", "reject")
-# campos de TEXTO da mensagem — não usar na heurística (o texto pode conter
-# "erro"/"falha" e dar falso positivo).
-_TEXTO = {"content", "text", "body", "message", "caption"}
+_EXCLUIR = {"cmo98fprx300jlh0716a8h0i2"}  # Joedson — NÃO mexer (já resolvido)
+# Falha de entrega = errorMessage preenchido OU externalStatus de falha.
+_STATUS_FALHA = ("fail", "undeliver", "not_delivered", "error", "invalid", "reject")
 
 
 def _campo_de_falha(msg: dict) -> str | None:
-    for k, v in msg.items():
-        if k.lower() in _TEXTO or not isinstance(v, str):
-            continue
-        if any(f in v.lower() for f in _FALHA):
-            return f"{k}={v}"
+    err = msg.get("errorMessage")
+    st = msg.get("externalStatus") or ""
+    if err:  # errorMessage preenchido = a Jurichat marcou falha de entrega
+        return f"externalStatus={st!r} errorMessage={err!r}"
+    if isinstance(st, str) and any(f in st.lower() for f in _STATUS_FALHA):
+        return f"externalStatus={st!r}"
     return None
 
 
@@ -45,9 +44,9 @@ async def main() -> None:
         headers={"x-jurichat-api-key": s.jurichat_api_key}, timeout=30,
     )
     try:
-        convs = await client.list_active_conversations(s.jurichat_inbox_id)
+        convs = await client.list_active_conversations(inbox_id=s.jurichat_inbox_id)
         print(f"conversas varridas: {len(convs)}")
-        schema_visto = False
+        amostra: list[str] = []
         total = 0
         for cv in convs:
             cid = cv.get("id")
@@ -58,12 +57,11 @@ async def main() -> None:
                 continue
             d = r.json()
             msgs = (d.get("data") or d).get("messages") or []
-            if not schema_visto:
-                for m in msgs:
-                    if m.get("direction") == "OUTBOUND":
-                        print("CAMPOS de uma OUTBOUND:", sorted(m.keys()))
-                        schema_visto = True
-                        break
+            # Amostra de valores de externalStatus (pra ver o range: delivered/
+            # sent/failed/...), das primeiras OUTBOUND que aparecerem.
+            for m in msgs:
+                if m.get("direction") == "OUTBOUND" and len(amostra) < 8:
+                    amostra.append(repr(m.get("externalStatus")))
             falhas = [
                 m for m in msgs
                 if m.get("direction") == "OUTBOUND" and _campo_de_falha(m)
@@ -74,7 +72,8 @@ async def main() -> None:
                 for m in falhas[-5:]:
                     print(f"  • [{_campo_de_falha(m)}] {str(m.get('content'))[:110]}")
                 total += len(falhas)
-        print(f"\n=== TOTAL de OUTBOUND não-entregues (fora Joedson): {total} ===")
+        print(f"\nexternalStatus (amostra de valores): {amostra}")
+        print(f"=== TOTAL de OUTBOUND não-entregues (fora Joedson): {total} ===")
         print("(SÓ relatório — nada foi reenviado. Revise e me diga.)")
     finally:
         await client.aclose()
