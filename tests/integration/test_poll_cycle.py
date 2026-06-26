@@ -943,15 +943,25 @@ async def test_reoferta_exclui_ja_oferecidos_e_acumula(db_conn):
     _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
     lead_id = get_lead_by_conversation(db_conn, "C-1")["id"]
 
+    # Datas relativas a HOJE (sempre futuras) — com datas fixas, o filtro S5
+    # (expirados) apaga a oferta anterior assim que elas viram passado e o teste
+    # passa a quebrar com o tempo.
+    tz = ZoneInfo("America/Sao_Paulo")
+    hoje = datetime.datetime.now(tz).date()
+    d_ja = hoje + datetime.timedelta(days=5)
+    d_novo = hoje + datetime.timedelta(days=6)
+    iso_ja1 = f"{d_ja.isoformat()}T14:00:00-03:00"
+    iso_ja2 = f"{d_ja.isoformat()}T18:30:00-03:00"
+    iso_novo = f"{d_novo.isoformat()}T10:00:00-03:00"
+
     ja = [
-        {"iso": "2026-06-23T14:00:00-03:00", "label": "ter (23/jun) às 14h"},
-        {"iso": "2026-06-23T18:30:00-03:00", "label": "ter (23/jun) às 18h30"},
+        {"iso": iso_ja1, "label": "14h"},
+        {"iso": iso_ja2, "label": "18h30"},
     ]
     set_horarios_oferecidos(db_conn, lead_id, ja)
 
-    tz = ZoneInfo("America/Sao_Paulo")
-    novos = [Slot(start=datetime.datetime(2026, 6, 24, 10, 0, tzinfo=tz),
-                  duration_min=30)]
+    novos = [Slot(start=datetime.datetime(d_novo.year, d_novo.month, d_novo.day,
+                                          10, 0, tzinfo=tz), duration_min=30)]
     fake_cal = _make_calendar(novos)
     jurichat = _make_jurichat(transcript)
     triagem_fn = await _triagem_returning(
@@ -969,15 +979,10 @@ async def test_reoferta_exclui_ja_oferecidos_e_acumula(db_conn):
 
     # 1. find_available_slots recebeu os ISOs já oferecidos pra EXCLUIR.
     kwargs = fake_cal.find_available_slots.call_args.kwargs
-    assert kwargs["exclude_isos"] == {
-        "2026-06-23T14:00:00-03:00", "2026-06-23T18:30:00-03:00",
-    }
+    assert kwargs["exclude_isos"] == {iso_ja1, iso_ja2}
     # 2. ACUMULOU: os 2 antigos + o novo (re-oferta não apaga o histórico).
     acumulado = {o["iso"] for o in get_horarios_oferecidos(db_conn, lead_id)}
-    assert acumulado == {
-        "2026-06-23T14:00:00-03:00", "2026-06-23T18:30:00-03:00",
-        "2026-06-24T10:00:00-03:00",
-    }
+    assert acumulado == {iso_ja1, iso_ja2, iso_novo}
 
 
 @pytest.mark.asyncio
