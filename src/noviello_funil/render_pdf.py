@@ -2,9 +2,9 @@
 
 reportlab puro-Python (sem dep de sistema no VPS). Converte o subconjunto de
 markdown que o template usa (# título, ## cláusula, ---, **negrito**, *itálico*)
-em flowables e desenha o timbre da marca (faixa claret + cabeçalho OAB + rodapé
-CNPJ + número de página). v1 = timbre de TEXTO; quando o Mario fornecer o PNG do
-logo, basta desenhá-lo no ``_on_page`` (slot marcado).
+em flowables e desenha o **papel timbrado oficial** do escritório (extraído de
+``Papel de Carta Padrão.docx``): logo no alto-esquerda, canto geométrico claret no
+alto, faixa claret no rodapé com CNPJ/OAB + número de página.
 """
 
 from __future__ import annotations
@@ -12,8 +12,9 @@ from __future__ import annotations
 import html
 import re
 from io import BytesIO
+from pathlib import Path
 
-from reportlab.lib.colors import HexColor, black
+from reportlab.lib.colors import HexColor, white
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
@@ -21,6 +22,10 @@ from reportlab.lib.units import cm
 from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer
 
 _CLARET = HexColor("#68192E")
+_ASSETS = Path(__file__).parent / "assets"
+_LOGO = str(_ASSETS / "timbre_logo.png")  # 608x164 RGBA
+_HEADER = str(_ASSETS / "timbre_header.jpg")  # 2548x843 (canto geométrico)
+_FOOTER = str(_ASSETS / "timbre_footer.jpg")  # 2548x545 (faixa claret)
 
 _TITULO = ParagraphStyle(
     "titulo", fontName="Times-Bold", fontSize=13, leading=16, alignment=TA_CENTER,
@@ -77,30 +82,30 @@ def _flowables(minuta_md: str) -> list:
 
 
 def _on_page(canvas, doc) -> None:
-    """Timbre: cabeçalho (marca + OAB) + faixa claret + rodapé (CNPJ + página)."""
+    """Desenha o papel timbrado oficial em cada página."""
     canvas.saveState()
     w, h = A4
-    # [SLOT LOGO] quando houver PNG: canvas.drawImage(logo, 2*cm, h-2.0*cm, ...)
-    canvas.setFillColor(_CLARET)
-    canvas.setFont("Times-Bold", 15)
-    canvas.drawString(2 * cm, h - 1.5 * cm, "NOVIELLO ADVOCACIA")
-    canvas.setFillColor(black)
-    canvas.setFont("Times-Roman", 8)
-    canvas.drawString(
-        2 * cm, h - 1.95 * cm, "Mario Luiz Noviello Junior — OAB/SP 370.796",
+    # canto geométrico claret no alto (full width, proporção mantida)
+    hh = w * 843 / 2548
+    canvas.drawImage(_HEADER, 0, h - hh, width=w, height=hh, preserveAspectRatio=False)
+    # faixa claret no rodapé
+    hf = w * 545 / 2548
+    canvas.drawImage(_FOOTER, 0, 0, width=w, height=hf, preserveAspectRatio=False)
+    # logo no alto-esquerda
+    lw = 4.6 * cm
+    lh = lw * 164 / 608
+    canvas.drawImage(
+        _LOGO, 2 * cm, h - 1.3 * cm - lh, width=lw, height=lh, mask="auto",
     )
-    canvas.setStrokeColor(_CLARET)
-    canvas.setLineWidth(1.2)
-    canvas.line(2 * cm, h - 2.15 * cm, w - 2 * cm, h - 2.15 * cm)
-    # rodapé
-    canvas.setFont("Times-Roman", 7)
-    canvas.setFillColor(black)
+    # texto institucional (branco) sobre a faixa claret + número da página
+    canvas.setFillColor(white)
+    canvas.setFont("Times-Roman", 7.5)
     canvas.drawCentredString(
-        w / 2, 1.2 * cm,
-        "Noviello Advocacia — CNPJ 27.340.554/0001-94 — "
+        w / 2, 0.85 * cm,
+        "Noviello Advocacia — CNPJ 27.340.554/0001-94 — OAB/SP 21.788 — "
         "Av. do Café, 238, Vila Guarani, São Paulo/SP",
     )
-    canvas.drawRightString(w - 2 * cm, 1.2 * cm, f"Página {doc.page}")
+    canvas.drawRightString(w - 1.5 * cm, 0.85 * cm, f"Página {doc.page}")
     canvas.restoreState()
 
 
@@ -110,7 +115,7 @@ def render_contrato_pdf(minuta_md: str) -> bytes:
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
         leftMargin=2 * cm, rightMargin=2 * cm,
-        topMargin=2.7 * cm, bottomMargin=1.8 * cm,
+        topMargin=3.8 * cm, bottomMargin=4.7 * cm,
         title="Contrato de Honorários — Noviello Advocacia",
     )
     doc.build(_flowables(minuta_md), onFirstPage=_on_page, onLaterPages=_on_page)
