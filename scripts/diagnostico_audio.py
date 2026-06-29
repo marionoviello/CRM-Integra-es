@@ -35,6 +35,11 @@ def _campos_url(m: dict) -> dict:
 
 async def main() -> None:
     cid_arg = sys.argv[1].strip() if len(sys.argv) > 1 else None
+    if cid_arg:
+        # tolera colar "id=XXX", "...?id=XXX" ou só "XXX"
+        if "id=" in cid_arg:
+            cid_arg = cid_arg.split("id=")[-1]
+        cid_arg = cid_arg.split("&")[0].split("?")[0].strip()
     s = Settings()
     client = JurichatClient(
         s.jurichat_api_key, s.jurichat_base_url, bot_user_id=s.jurichat_bot_user_id,
