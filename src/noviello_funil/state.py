@@ -672,6 +672,26 @@ def marcar_pos_travado(conn: sqlite3.Connection, contrato_id: int) -> bool:
     )
 
 
+def get_audio_transcricao(conn: sqlite3.Connection, message_id: str) -> str | None:
+    """Transcrição cacheada do áudio (#áudio, 28/jun). None = nunca tentou; '' =
+    tentou e falhou (não re-tentar); texto = pronta."""
+    row = conn.execute(
+        "SELECT texto FROM audio_transcricoes WHERE message_id = ?", (message_id,),
+    ).fetchone()
+    return row["texto"] if row is not None else None
+
+
+def set_audio_transcricao(
+    conn: sqlite3.Connection, message_id: str, texto: str | None,
+) -> None:
+    """Cacheia a transcrição (ou '' se falhou, pra não re-transcrever todo tick)."""
+    conn.execute(
+        "INSERT OR REPLACE INTO audio_transcricoes (message_id, texto, criado_em) "
+        "VALUES (?, ?, datetime('now'))",
+        (message_id, texto or ""),
+    )
+
+
 def set_lead_email(conn: sqlite3.Connection, lead_id: int, email: str) -> None:
     """D4 (25/jun): persiste o email do lead (lowercase) pra casar reuniões
     marcadas FORA do bot com o lead certo. Idempotente — só grava se o valor

@@ -73,6 +73,7 @@ from noviello_funil.state import (
     create_lead_if_absent,
     event_ids_de_reunioes,
     evento_manual_ja_alertado,
+    get_audio_transcricao,
     get_horarios_oferecidos,
     get_lead_by_conversation,
     lead_com_reuniao_no_horario,
@@ -97,6 +98,7 @@ from noviello_funil.state import (
     registrar_tentativa_pos,
     reset_turnos,
     schedule_next_action_seconds,
+    set_audio_transcricao,
     set_horarios_oferecidos,
     set_lead_email,
     set_reuniao,
@@ -104,6 +106,7 @@ from noviello_funil.state import (
     ultimo_motivo_transicao,
     update_transcript_hash,
 )
+from noviello_funil.transcricao import transcrever_audio
 from noviello_funil.urgencia import detectar_urgencia
 from noviello_funil.zapsign_client import ZapSignClient
 
@@ -1279,9 +1282,31 @@ async def run_poll_cycle(
     bot_user_id: str = "",
     juridiq: JuridiqClient | None = None,
     datajud_api_key: str = "",
+    groq_api_key: str = "",
+    audio_http: Any = None,
 ) -> None:
     """Process all em_conversa leads whose poll tick is due."""
     conn = get_db()
+
+    # Áudio (28/jun): com chave Groq + cliente HTTP, monta o transcritor (cacheado
+    # por message_id) e passa ao get_conversation → a Julia "ouve" os áudios do
+    # lead (Groq Whisper). Sem isso, transcritor=None e o áudio fica como a URL
+    # (comportamento atual). Cache: '' = já falhou (não re-tenta).
+    transcritor = None
+    if groq_api_key and audio_http is not None:
+        async def _transcritor(url: str, msg_id: str) -> str | None:
+            if not msg_id:
+                return None
+            cache = get_audio_transcricao(conn, msg_id)
+            if cache is not None:
+                return cache or None
+            texto = await transcrever_audio(
+                url, groq_key=groq_api_key, http=audio_http,
+            )
+            set_audio_transcricao(conn, msg_id, texto)
+            return texto
+
+        transcritor = _transcritor
 
     # FASE 0 — REATIVAÇÃO (auditoria 2026-06-11, HIGH): leads em
     # FU1/FU2/encerrado que RESPONDERAM voltam pra em_conversa. Antes,
@@ -1295,7 +1320,7 @@ async def run_poll_cycle(
             continue
         try:
             conv = await jurichat.get_conversation(
-                lead["jurichat_conversation_id"]
+                lead["jurichat_conversation_id"], transcrever=transcritor,
             )
         except Exception as exc:
             logger.warning(
@@ -1345,7 +1370,7 @@ async def run_poll_cycle(
         if conv_id_ah in canais_alertas:
             continue
         try:
-            conv = await jurichat.get_conversation(conv_id_ah)
+            conv = await jurichat.get_conversation(conv_id_ah, transcrever=transcritor)
         except Exception as exc:
             logger.warning(
                 "re-engaje AH: get_conversation falhou lead=%s: %s",
@@ -1420,7 +1445,7 @@ async def run_poll_cycle(
             continue
 
         try:
-            conv = await jurichat.get_conversation(conv_id)
+            conv = await jurichat.get_conversation(conv_id, transcrever=transcritor)
         except Exception as exc:
             logger.exception(
                 "poll get_conversation failed for lead=%s: %s", lead_id, exc,
@@ -2975,6 +3000,11 @@ def main() -> int:
         zapsign_pos = ZapSignClient(
             settings.zapsign_api_token, settings.zapsign_base_url,
         )
+    # Áudio (28/jun): cliente HTTP pro download do arquivo de voz + Groq Whisper.
+    # Só com a chave Groq configurada (senão None → bot não transcreve áudio).
+    audio_http: httpx.AsyncClient | None = None
+    if settings.groq_api_key:
+        audio_http = httpx.AsyncClient(timeout=60)
     # Multi-vertical prompt (imobiliário + sucessório + saúde). Substitui
     # o saude_suplementar.md anterior — vê src/noviello_funil/skills/.
     skill = load_skill("atendente_geral")
@@ -3014,6 +3044,8 @@ def main() -> int:
             bot_user_id=settings.jurichat_bot_user_id,
             juridiq=juridiq_client,
             datajud_api_key=settings.datajud_api_key,
+            groq_api_key=settings.groq_api_key,
+            audio_http=audio_http,
         )
         # 2.5 (D4, 25/jun): detecta reuniões marcadas FORA do bot e vincula ao
         #    lead (pelo email do convidado) ANTES do reminder_cycle, pra elas já
@@ -3082,6 +3114,8 @@ def main() -> int:
                 await juridiq_client.aclose()
             if zapsign_pos is not None:
                 await zapsign_pos.aclose()
+            if audio_http is not None:
+                await audio_http.aclose()
 
     try:
         return asyncio.run(_full_cycle_with_cleanup())

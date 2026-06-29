@@ -252,6 +252,49 @@ async def test_jurichat_get_conversation_flattens_multiline_messages(respx_mock)
 
 
 @pytest.mark.asyncio
+async def test_get_conversation_transcreve_audio(respx_mock):
+    # áudio: content é a URL; com transcritor, vira "[áudio] <texto>" no transcript.
+    respx_mock.get("https://api.jurichat.com/conversation/C-1").mock(
+        return_value=httpx.Response(200, json={"data": {"messages": [
+            {"type": "text", "direction": "INBOUND", "content": "Oi"},
+            {"type": "audio", "direction": "INBOUND",
+             "content": "https://gcs/audio1", "id": "M-AUD"},
+        ]}})
+    )
+
+    async def fake_transcrever(url, msg_id):
+        assert url == "https://gcs/audio1" and msg_id == "M-AUD"
+        return "quero regularizar meu imóvel"
+
+    client = JurichatClient("jk", "https://api.jurichat.com")
+    try:
+        conv = await client.get_conversation("C-1", transcrever=fake_transcrever)
+    finally:
+        await client.aclose()
+    t = conv["transcription"]
+    assert "Lead: Oi" in t
+    assert "Lead: [áudio] quero regularizar meu imóvel" in t
+    assert "https://gcs/audio1" not in t  # a URL foi substituída pela transcrição
+
+
+@pytest.mark.asyncio
+async def test_get_conversation_sem_transcritor_mantem_url(respx_mock):
+    # sem transcritor (comportamento atual preservado): áudio fica como a URL.
+    respx_mock.get("https://api.jurichat.com/conversation/C-1").mock(
+        return_value=httpx.Response(200, json={"data": {"messages": [
+            {"type": "audio", "direction": "INBOUND",
+             "content": "https://gcs/audio1", "id": "M-AUD"},
+        ]}})
+    )
+    client = JurichatClient("jk", "https://api.jurichat.com")
+    try:
+        conv = await client.get_conversation("C-1")
+    finally:
+        await client.aclose()
+    assert "https://gcs/audio1" in conv["transcription"]
+
+
+@pytest.mark.asyncio
 async def test_jurichat_get_lead_tags_returns_list(respx_mock):
     respx_mock.get(
         "https://api.jurichat.com/crm/lead/L-1"

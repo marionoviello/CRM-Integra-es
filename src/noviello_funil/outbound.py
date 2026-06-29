@@ -256,6 +256,7 @@ class JurichatClient:
 
     async def get_conversation(
         self, conversation_id: str, *, base_delay: float = 1.0,
+        transcrever: Any = None,
     ) -> dict[str, Any]:
         """GET /conversation/{id} — returns full conversation with messages.
 
@@ -296,6 +297,14 @@ class JurichatClient:
             # bullets do oferecer_horarios) fura o Signal 1 e re-invoca
             # o Claude sobre a própria resposta do bot.
             content = " ".join((msg.get("content") or "").split())
+            # Áudio (voz do lead): o `content` é a URL do arquivo (GCS). Com um
+            # transcritor, transcreve (cacheado) e usa o texto; sem transcritor,
+            # fica como antes (a URL — o Claude vê um link e diz "não ouço áudio").
+            if msg.get("type") == "audio" and transcrever is not None:
+                texto = await transcrever(
+                    msg.get("content") or "", msg.get("id") or "",
+                )
+                content = f"[áudio] {texto}" if texto else "[áudio não transcrito]"
             if not content:
                 continue
             direction = msg.get("direction", "")

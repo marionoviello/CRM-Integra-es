@@ -18,6 +18,9 @@ class Settings(BaseSettings):
 
     # External APIs
     anthropic_api_key: str
+    # Groq Whisper — transcrição dos áudios (voz) que o lead manda no WhatsApp.
+    # Vazio = bot não transcreve (cai no comportamento "não consigo ouvir áudio").
+    groq_api_key: str = ""
     # Modelo da TRIAGEM (decisão + resposta ao lead): o mais capaz, pra máxima
     # precisão no atendimento — é o único atendimento do escritório.
     anthropic_model: str = "claude-opus-4-8"

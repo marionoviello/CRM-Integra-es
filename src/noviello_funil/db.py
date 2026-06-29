@@ -60,6 +60,15 @@ CREATE TABLE IF NOT EXISTS emails_aniversario (
     UNIQUE(person_id, enviado_em)
 );
 
+-- Cache da transcrição de áudio (Groq Whisper). Por message_id: evita
+-- re-transcrever o mesmo áudio a cada tick do poll. texto='' = já tentou e
+-- falhou (não re-tenta); ausente = nunca tentou.
+CREATE TABLE IF NOT EXISTS audio_transcricoes (
+    message_id  TEXT PRIMARY KEY,
+    texto       TEXT,
+    criado_em   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Processos com monitoringStatus=ERRO já vistos pelo job de saúde da
 -- carteira. Serve pra destacar 🆕 só os que entraram em erro desde a
 -- última execução (em vez de repetir a lista inteira toda semana).
