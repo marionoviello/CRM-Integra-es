@@ -217,3 +217,10 @@ class Settings(BaseSettings):
     #      da conversa é OUTRO — humano assumiu, bot não atropela.
     # Vazio = comportamento legado (isRandom, sem detecção).
     jurichat_bot_user_id: str = ""
+
+    # Espera-humano (2026-07-01): quando um humano DIGITA no painel (msg sai
+    # com o prefixo "Noviello Advocacia:"), o bot só volta a responder se o
+    # lead trouxer algo novo >= este tempo DEPOIS da última fala do humano.
+    # Fecha o buraco do Signal 0 (que só pega REATRIBUIÇÃO, não humano
+    # digitando com a conversa ainda atribuída ao bot). 0 = desliga.
+    bot_espera_humano_min: int = 60

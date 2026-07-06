@@ -103,6 +103,7 @@ from noviello_funil.state import (
     set_lead_email,
     set_reuniao,
     transicao,
+    transicao_ah_recente,
     ultimo_motivo_transicao,
     update_transcript_hash,
 )
@@ -208,6 +209,81 @@ def _last_line_from_atendente(transcript: str) -> bool:
             continue
         return stripped.startswith("Atendente:")
     return False
+
+
+# Assinatura que o painel (Fixo/Jurichat) prepende AUTOMATICAMENTE em toda
+# mensagem digitada por um humano. O bot (envio via API) nunca a usa —
+# validado com o Mario 2026-07-01. É o único sinal que separa humano de bot,
+# porque o Fixo manda os dois pela MESMA identidade (mesmo participantId).
+_ASSINATURA_HUMANO = "noviello advocacia:"
+
+
+def _msg_eh_de_humano(content: str) -> bool:
+    """True se a mensagem OUTBOUND foi DIGITADA por um humano no painel.
+
+    Limpa tags HTML (``<b>...</b>``, ``<br />``) antes de checar o prefixo.
+    """
+    if not content:
+        return False
+    texto = re.sub(r"<[^>]+>", "", content).lstrip()
+    return texto[:40].lower().startswith(_ASSINATURA_HUMANO)
+
+
+def _parse_message_at(valor: Any) -> datetime.datetime | None:
+    """``messageAt`` ISO-8601 (ex. "2026-07-01T19:45:00.051Z") → datetime aware.
+
+    None se ausente/inválido.
+    """
+    if not valor or not isinstance(valor, str):
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(valor.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    # Garante aware (assume UTC se vier naive) — senão a subtração aware−naive
+    # no _bot_deve_esperar_humano levantaria e derrubaria o tick inteiro.
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.UTC)
+    return dt
+
+
+def _bot_deve_esperar_humano(
+    messages_raw: list[dict[str, Any]], *, espera_segundos: int,
+) -> bool:
+    """True se um humano assumiu a conversa há pouco e o bot deve calar.
+
+    Regra (aval Mario 2026-07-01): quando um humano digitou no painel, o bot
+    só volta a responder se o LEAD trouxer mensagem nova >= ``espera_segundos``
+    DEPOIS da última fala do humano. Enquanto isso, quem conduz é o humano.
+    Opção A: o bot NÃO retoma proativo — só reage a algo novo do lead já fora
+    da janela.
+
+    Compara os timestamps das PRÓPRIAS mensagens (não o relógio) → robusto a
+    atraso de polling. Sem humano na conversa → nunca espera.
+    """
+    if espera_segundos <= 0:
+        return False
+    ult_humano: datetime.datetime | None = None
+    ult_lead: datetime.datetime | None = None
+    for msg in messages_raw:
+        ts = _parse_message_at(msg.get("messageAt"))
+        if ts is None:
+            continue
+        direction = msg.get("direction")
+        if direction == "INBOUND":
+            if ult_lead is None or ts > ult_lead:
+                ult_lead = ts
+        elif (
+            direction == "OUTBOUND"
+            and _msg_eh_de_humano(msg.get("content") or "")
+            and (ult_humano is None or ts > ult_humano)
+        ):
+            ult_humano = ts
+    if ult_humano is None:
+        return False  # nenhum humano falou → bot livre
+    if ult_lead is None:
+        return True  # humano falou, lead ainda não respondeu → espera
+    return (ult_lead - ult_humano).total_seconds() < espera_segundos
 
 
 def _last_lead_message(transcript: str) -> str:
@@ -1284,6 +1360,7 @@ async def run_poll_cycle(
     datajud_api_key: str = "",
     groq_api_key: str = "",
     audio_http: Any = None,
+    espera_humano_segundos: int = 3600,
 ) -> None:
     """Process all em_conversa leads whose poll tick is due."""
     conn = get_db()
@@ -1389,6 +1466,18 @@ async def run_poll_cycle(
         motivo_ah = ultimo_motivo_transicao(conn, lead["id"])
         if motivo_ah in _MOTIVOS_AH_TERMINAIS:
             # opt-out / humano assumiu / não-lead → fica mudo de propósito.
+            update_transcript_hash(conn, lead["id"], new_hash)
+            continue
+        # Signal 1.46 (2026-07-06): cooldown antes de reabrir — o handoff
+        # (ex: claude_handoff) é recente e o lead só respondeu um "ok". Sem
+        # isso o reabre rolava com 0s de atraso e a IA repetia a MESMA
+        # mensagem de encaminhamento no mesmo minuto (bug real: lead "Suporte
+        # Gadelha dos Santos" recebeu o aviso de handoff 2x). Mesma política
+        # já aprovada do Signal 1.45 (Opção A): não retoma proativo — só
+        # reage a algo novo do lead já fora da janela.
+        if transicao_ah_recente(
+            conn, lead["id"], janela_segundos=espera_humano_segundos,
+        ):
             update_transcript_hash(conn, lead["id"], new_hash)
             continue
         # Motivo reabrível → reabre pro bot + re-alerta o Mario. NÃO atualiza o
@@ -1544,6 +1633,27 @@ async def run_poll_cycle(
                 logger.exception(
                     "opt_out handling failed for lead=%s: %s", lead_id, exc,
                 )
+            continue
+
+        # Signal 1.45 (2026-07-01): HUMANO conduzindo → bot espera (default 1h).
+        # Fecha o buraco do Signal 0: aquele só pega REATRIBUIÇÃO da conversa;
+        # aqui pegamos o humano DIGITANDO com a conversa ainda atribuída ao bot
+        # (foi o que atropelou o atendimento da Alison). Distinção por texto: o
+        # painel põe "Noviello Advocacia:" em toda msg digitada por humano; o
+        # bot nunca usa. Aval Mario: só responde se a última msg do lead veio
+        # >= espera DEPOIS da última do humano; senão cala (não retoma proativo).
+        # Roda DEPOIS do opt-out (LGPD sempre processa) e ANTES da resposta.
+        # Atualiza o hash: o tick só reprocessa quando o lead mandar algo novo.
+        if _bot_deve_esperar_humano(
+            conv.get("messages_raw") or [],
+            espera_segundos=espera_humano_segundos,
+        ):
+            logger.info(
+                "lead=%s: humano conduzindo — bot aguarda (janela %ds)",
+                lead_id, espera_humano_segundos,
+            )
+            update_transcript_hash(conn, lead_id, new_hash)
+            schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
             continue
 
         # Signal 1.5: RECONHECER CLIENTE (1.6) + CONFLITO (1.7). Aditivos,
@@ -3046,6 +3156,7 @@ def main() -> int:
             datajud_api_key=settings.datajud_api_key,
             groq_api_key=settings.groq_api_key,
             audio_http=audio_http,
+            espera_humano_segundos=settings.bot_espera_humano_min * 60,
         )
         # 2.5 (D4, 25/jun): detecta reuniões marcadas FORA do bot e vincula ao
         #    lead (pelo email do convidado) ANTES do reminder_cycle, pra elas já

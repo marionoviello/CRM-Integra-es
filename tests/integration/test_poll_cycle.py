@@ -1693,6 +1693,90 @@ async def test_sem_bot_user_id_ignora_user_da_conversa(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_humano_digitando_no_painel_bot_espera(db_conn):
+    """Signal 1.45: humano DIGITOU (prefixo 'Noviello Advocacia:') e o lead
+    respondeu dentro de 1h → bot cala, nem chama o Claude. Fecha o buraco do
+    Signal 0 (conversa ainda atribuída ao bot; humano só digitou, não assumiu).
+    """
+    transcript = (
+        "Atendente: Noviello Advocacia: vamos elaborar o contrato\n"
+        "Lead: ok"
+    )
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = MagicMock()
+    jurichat.get_conversation = AsyncMock(return_value={
+        "transcription": transcript,
+        "messages_raw": [
+            {"direction": "OUTBOUND",
+             "content": "<b>Noviello Advocacia</b>:<br />vamos elaborar o contrato",
+             "messageAt": "2026-07-01T19:45:00.000Z"},
+            {"direction": "INBOUND", "content": "ok",
+             "messageAt": "2026-07-01T19:50:00.000Z"},  # 5 min depois → dentro
+        ],
+    })
+    jurichat.send_message = AsyncMock()
+    jurichat.start_human_support = AsyncMock()
+    triagem_fn = AsyncMock(side_effect=AssertionError("must not call Claude"))
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        espera_humano_segundos=3600,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA  # só espera, não é pausa terminal
+    assert lead["ultimo_transcript_hash"] == _sha(transcript)  # hash atualizado
+    triagem_fn.assert_not_called()
+    jurichat.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_humano_calado_1h_e_lead_novo_bot_responde(db_conn):
+    """Signal 1.45: humano ficou >1h calado e o lead trouxe msg nova depois
+    → bot retoma e responde (opção A: só volta com mensagem nova do lead)."""
+    transcript = (
+        "Atendente: Noviello Advocacia: aguarde que já retorno\n"
+        "Lead: voltei, tudo certo?"
+    )
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = MagicMock()
+    jurichat.get_conversation = AsyncMock(return_value={
+        "transcription": transcript,
+        "messages_raw": [
+            {"direction": "OUTBOUND",
+             "content": "<b>Noviello Advocacia</b>:<br />aguarde que já retorno",
+             "messageAt": "2026-07-01T19:00:00.000Z"},
+            {"direction": "INBOUND", "content": "voltei, tudo certo?",
+             "messageAt": "2026-07-01T20:30:00.000Z"},  # 90 min depois → fora
+        ],
+    })
+    jurichat.send_message = AsyncMock(return_value={"id": "m"})
+    jurichat.start_human_support = AsyncMock(return_value={"success": True})
+    triagem_fn = await _triagem_returning(
+        Decisao(acao="responder", mensagem="Oi! Tudo certo sim.")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        espera_humano_segundos=3600,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA
+    jurichat.send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_poll_neutraliza_lead_da_conversa_de_alertas(db_conn):
     """Lead pré-existente da conversa de alertas (criado antes do
     guardrail do sync) é pausado no poll sem chamar a API."""
@@ -2216,13 +2300,22 @@ async def test_fu_proprio_nao_reativa_lead(db_conn):
 
 # --- Auditoria 2026-06-24: re-engaje de AGUARDANDO_HUMANO (P1) --------------
 
-def _insert_transicao_ah(conn, lead_id, motivo):
+def _insert_transicao_ah(conn, lead_id, motivo, *, criado_em=None):
     """Registra uma transição para AGUARDANDO_HUMANO com um motivo (define se o
-    lead pode reabrir quando volta a falar)."""
-    conn.execute(
-        "INSERT INTO transicoes (lead_id, estado_novo, motivo) VALUES (?, ?, ?)",
-        (lead_id, Estado.AGUARDANDO_HUMANO, motivo),
-    )
+    lead pode reabrir quando volta a falar). ``criado_em`` (opcional) simula
+    a transição ter acontecido no passado — sem passar, é "agora" (default
+    SQL), útil pra testar o cooldown de reabertura (Signal 1.46)."""
+    if criado_em is None:
+        conn.execute(
+            "INSERT INTO transicoes (lead_id, estado_novo, motivo) VALUES (?, ?, ?)",
+            (lead_id, Estado.AGUARDANDO_HUMANO, motivo),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO transicoes (lead_id, estado_novo, motivo, criado_em) "
+            "VALUES (?, ?, ?, ?)",
+            (lead_id, Estado.AGUARDANDO_HUMANO, motivo, criado_em),
+        )
 
 
 @pytest.mark.asyncio
@@ -2238,7 +2331,12 @@ async def test_aguardando_humano_reabre_em_motivo_reabrivel(db_conn):
         db_conn, Estado.AGUARDANDO_HUMANO, hash_="stale", turnos=20,
     )
     lead = get_lead_by_conversation(db_conn, "C-1")
-    _insert_transicao_ah(db_conn, lead["id"], "max_turnos")
+    # Transição há 2h (fora do cooldown padrão de 1h — Signal 1.46) pra isolar
+    # o comportamento de "motivo reabrível" do cooldown de reabertura.
+    ha_2h = (datetime.datetime.utcnow() - datetime.timedelta(hours=2)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    _insert_transicao_ah(db_conn, lead["id"], "max_turnos", criado_em=ha_2h)
 
     jurichat = _make_jurichat(transcript)
     triagem_fn = AsyncMock(
@@ -2301,6 +2399,67 @@ async def test_aguardando_humano_ultima_linha_atendente_nao_reabre(db_conn):
     lead = get_lead_by_conversation(db_conn, "C-1")
     assert lead["estado"] == Estado.AGUARDANDO_HUMANO   # não reabriu
     assert lead["ultimo_transcript_hash"] == _sha(transcript)
+
+
+@pytest.mark.asyncio
+async def test_aguardando_humano_nao_reabre_logo_apos_handoff(db_conn):
+    """Signal 1.46 (2026-07-06): o handoff (ex: claude_handoff) acabou de
+    acontecer e o lead respondeu na hora (ex: "Ok obrigada") — o bot NÃO
+    reabre ainda, mesmo com motivo reabrível. Sem isso a IA reabria com 0s de
+    atraso e repetia a MESMA mensagem de encaminhamento no mesmo minuto (bug
+    real: lead "Suporte Gadelha dos Santos" recebeu o aviso de handoff 2x)."""
+    transcript = (
+        "Atendente: vou te encaminhar para nossa equipe\n"
+        "Lead: Ok obrigada"
+    )
+    _insert_lead_estado(db_conn, Estado.AGUARDANDO_HUMANO, hash_="stale")
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    _insert_transicao_ah(db_conn, lead["id"], "claude_handoff")  # "agora"
+
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = AsyncMock(side_effect=AssertionError("não devia reabrir tão cedo"))
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+        espera_humano_segundos=3600,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.AGUARDANDO_HUMANO   # NÃO reabriu (cooldown)
+    assert lead["ultimo_transcript_hash"] == _sha(transcript)
+    jurichat.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_aguardando_humano_reabre_apos_cooldown_sem_humano_digitar(db_conn):
+    """Signal 1.46: handoff aconteceu há mais de 1h (cooldown já passou) e
+    NENHUM humano digitou — o lead que respondeu de novo é reaberto pro bot
+    normalmente (o cooldown não vira uma pausa permanente)."""
+    transcript = (
+        "Atendente: vou te encaminhar para nossa equipe\n"
+        "Lead: alguma novidade?"
+    )
+    _insert_lead_estado(db_conn, Estado.AGUARDANDO_HUMANO, hash_="stale")
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    ha_2h = (datetime.datetime.utcnow() - datetime.timedelta(hours=2)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    _insert_transicao_ah(db_conn, lead["id"], "claude_handoff", criado_em=ha_2h)
+
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = AsyncMock(
+        return_value=Decisao(acao="responder", mensagem="Ainda estamos vendo!")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+        espera_humano_segundos=3600,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA   # reaberto (cooldown passou)
 
 
 # --- Auditoria 2026-06-24: follow-up herda o Signal 0 (C2) -----------------

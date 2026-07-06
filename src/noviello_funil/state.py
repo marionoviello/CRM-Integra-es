@@ -818,6 +818,28 @@ def ultimo_motivo_transicao(
     return row["motivo"] if row else None
 
 
+def transicao_ah_recente(
+    conn: sqlite3.Connection, lead_id: int, *, janela_segundos: int,
+) -> bool:
+    """True se a transição MAIS RECENTE do lead ocorreu há menos de
+    ``janela_segundos`` (cooldown antes de reabrir de AGUARDANDO_HUMANO).
+
+    Signal 1.46 (2026-07-06): reabrir com 0s de atraso logo após o handoff
+    fazia a IA repetir a MESMA mensagem quando o lead respondia na hora (ex:
+    "Ok obrigada"). Consulta ``transicoes.criado_em`` — não
+    ``leads.atualizado_em``, que outras escritas não-relacionadas (ex.
+    mark_lead_activity_now, marcar_ah_checado) também tocam e dariam falso
+    positivo. ``janela_segundos <= 0`` desliga o cooldown."""
+    if janela_segundos <= 0:
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM transicoes WHERE lead_id = ? "
+        "AND criado_em > datetime('now', ?) ORDER BY id DESC LIMIT 1",
+        (lead_id, f"-{janela_segundos} seconds"),
+    ).fetchone()
+    return row is not None
+
+
 # --- Reuniões agendadas + lembretes -------------------------------------
 
 def set_reuniao(
