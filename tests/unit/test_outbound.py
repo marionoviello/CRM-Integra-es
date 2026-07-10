@@ -466,6 +466,24 @@ def test_format_notification_encerrado_sem_resposta():
     assert "arquiv" in msg.lower()
 
 
+def test_format_notification_encerrado_sem_resposta_falha_arquivar():
+    # Revisão adversarial 2026-07-10: se o arquivamento falhar, a notificação
+    # NÃO pode dizer "arquivada" — isso mentiria pro Mario justo quando a
+    # API do Jurichat está com problema (o momento em que ele mais precisa
+    # da verdade).
+    msg = format_notification(
+        tipo="encerrado_sem_resposta",
+        nome="Carlos",
+        telefone="5511977777777",
+        ultima_msg="",
+        motivo="Client error '404 Not Found'",
+        conversation_id="C-7",
+    )
+    assert "falh" in msg.lower()
+    assert "404" in msg
+    assert "arquivada" not in msg.lower()
+
+
 def test_format_notification_handoff():
     msg = format_notification(
         tipo="handoff",

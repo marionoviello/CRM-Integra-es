@@ -3021,6 +3021,7 @@ async def run_followup_cycle(
                     proxima_acao_horas=CLEAR_PROXIMA_ACAO,
                 )
                 conv_id_encerrado = lead["jurichat_conversation_id"]
+                arquivar_falhou: str | None = None
                 try:
                     await jurichat.archive_conversation(conv_id_encerrado)
                 except Exception as exc:
@@ -3028,6 +3029,10 @@ async def run_followup_cycle(
                         "archive_conversation failed for lead=%s: %s",
                         lead["id"], exc,
                     )
+                    # Revisão adversarial 2026-07-10: não afirma "arquivada" no
+                    # aviso se o arquivamento falhou de verdade (mentiria pro
+                    # Mario justo quando a API do Jurichat tem problema).
+                    arquivar_falhou = str(exc)[:200]
                 await notify_mario(
                     jurichat,
                     mario_conversation_id=mario_conversation_id,
@@ -3036,6 +3041,7 @@ async def run_followup_cycle(
                         nome=lead["contato_nome"],
                         telefone=lead["contato_telefone"],
                         ultima_msg="",
+                        motivo=arquivar_falhou,
                         conversation_id=conv_id_encerrado,
                     ),
                 )

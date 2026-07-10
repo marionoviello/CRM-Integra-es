@@ -508,11 +508,16 @@ def format_notification(
         body = "Verifique a conversa; o lead segue em em_conversa para retry."
         extra = ""
     elif tipo == "encerrado_sem_resposta":
-        head = f"🗄️ Lead {nome_label} ({telefone}) — encerrado e arquivado"
-        body = (
-            "3 tentativas sem resposta (contato inicial + 2 follow-ups). "
-            "Conversa arquivada no Jurichat."
-        )
+        base = "3 tentativas sem resposta (contato inicial + 2 follow-ups)."
+        if motivo:
+            # motivo = erro do archive_conversation — revisão adversarial
+            # 2026-07-10: NÃO afirmar "arquivada" se o arquivamento falhou
+            # (mentiria pro Mario justo quando a API do Jurichat tem problema).
+            head = f"🗄️ Lead {nome_label} ({telefone}) — encerrado (arquivamento FALHOU)"
+            body = f"{base} NÃO foi possível arquivar no Jurichat: {motivo}"
+        else:
+            head = f"🗄️ Lead {nome_label} ({telefone}) — encerrado e arquivado"
+            body = f"{base} Conversa arquivada no Jurichat."
         extra = ""
     else:
         raise ValueError(f"unknown notification type: {tipo}")

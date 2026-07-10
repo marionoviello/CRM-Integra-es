@@ -160,6 +160,45 @@ async def test_cycle_closes_silently_when_in_follow_up_2(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_cycle_encerramento_avisa_falha_quando_arquivar_da_erro(db_conn):
+    """Revisão adversarial 2026-07-10: se archive_conversation falhar (API do
+    Jurichat fora do ar — já vimos isso hoje), o aviso ao Mario NÃO pode
+    mentir dizendo que arquivou. O lead ainda encerra normalmente (best-effort:
+    falha de arquivamento não trava o encerramento)."""
+    _make_due_lead(db_conn, "L-1", "C-1", Estado.FOLLOW_UP_2_ENVIADO)
+
+    fake_jurichat = MagicMock()
+    fake_jurichat.get_lead_tags = AsyncMock(return_value=[])
+    fake_jurichat.send_message = AsyncMock()
+    fake_jurichat.start_human_support = AsyncMock(return_value={"success": True})
+    fake_jurichat.archive_conversation = AsyncMock(
+        side_effect=Exception("Client error '404 Not Found'")
+    )
+
+    async def fake_followup_gen(**kwargs):
+        return "x"
+
+    await run_followup_cycle(
+        get_db=lambda: db_conn,
+        jurichat=fake_jurichat,
+        gerar_followup_msg=fake_followup_gen,
+        followup_2_apos_horas=72,
+        encerramento_apos_horas=24,
+        mario_conversation_id="mario-conv",
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.ENCERRADO_SEM_RESPOSTA  # encerra mesmo assim
+    mensagens_mario = [
+        c.args[1] for c in fake_jurichat.send_message.await_args_list
+        if c.args[0] == "mario-conv"
+    ]
+    assert len(mensagens_mario) == 1
+    assert "arquivada" not in mensagens_mario[0].lower()
+    assert "404" in mensagens_mario[0]
+
+
+@pytest.mark.asyncio
 async def test_cycle_skips_lead_with_excluding_tag(db_conn):
     _make_due_lead(db_conn, "L-1", "C-1", Estado.EM_CONVERSA)
 
