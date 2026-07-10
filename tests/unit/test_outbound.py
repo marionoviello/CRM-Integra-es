@@ -1,5 +1,7 @@
 """Tests for the outbound HTTP layer."""
 
+import json
+
 import httpx
 import pytest
 
@@ -174,6 +176,28 @@ async def test_jurichat_send_message_calls_correct_endpoint(respx_mock):
     assert b"text" in sent_form
     assert b"C-1" in sent_form
     assert b"Ol" in sent_form  # accent-encoded
+
+
+@pytest.mark.asyncio
+async def test_jurichat_archive_conversation_calls_correct_endpoint(respx_mock):
+    """Endpoint confirmado via inspecao de rede do painel real 2026-07-10:
+    PATCH /conversation/{id}/archive, body {"isArchived": true} (json)."""
+    route = respx_mock.patch(
+        "https://api.jurichat.com/conversation/C-1/archive"
+    ).mock(return_value=httpx.Response(200, json={"isArchived": True}))
+
+    client = JurichatClient(
+        api_key="jk-test", base_url="https://api.jurichat.com",
+    )
+    try:
+        result = await client.archive_conversation("C-1")
+    finally:
+        await client.aclose()
+
+    assert route.called
+    assert result == {"isArchived": True}
+    assert route.calls.last.request.method == "PATCH"
+    assert json.loads(route.calls.last.request.read()) == {"isArchived": True}
 
 
 @pytest.mark.asyncio
@@ -426,6 +450,20 @@ def test_format_notification_fechar():
     assert "Maria" in msg
     assert "5511999999999" in msg
     assert "C-42" in msg
+
+
+def test_format_notification_encerrado_sem_resposta():
+    msg = format_notification(
+        tipo="encerrado_sem_resposta",
+        nome="Carlos",
+        telefone="5511977777777",
+        ultima_msg="",
+        conversation_id="C-7",
+    )
+    assert "Carlos" in msg
+    assert "5511977777777" in msg
+    assert "C-7" in msg
+    assert "arquiv" in msg.lower()
 
 
 def test_format_notification_handoff():

@@ -2890,6 +2890,7 @@ async def run_followup_cycle(
     encerramento_apos_horas: int,
     followup_1_apos_horas: int = 48,
     bot_user_id: str = "",
+    mario_conversation_id: str = "",
 ) -> None:
     """Process all due leads in a single pass."""
     conn = get_db()
@@ -3009,11 +3010,34 @@ async def run_followup_cycle(
                 )
 
             elif estado == Estado.FOLLOW_UP_2_ENVIADO:
-                # Silent close — no new message. Atomic transition + clear.
+                # Silent close — no new message TO THE LEAD (3 tentativas sem
+                # resposta: contato original + FU1 + FU2). Pedido Mario
+                # 2026-07-10: arquiva a conversa no Jurichat e avisa o Mario
+                # com um resumo do que foi feito — antes esse fechamento era
+                # totalmente invisível (nem lead nem Mario sabiam).
                 transicao(
                     conn, lead["id"], Estado.ENCERRADO_SEM_RESPOSTA,
                     motivo="scheduler_encerramento",
                     proxima_acao_horas=CLEAR_PROXIMA_ACAO,
+                )
+                conv_id_encerrado = lead["jurichat_conversation_id"]
+                try:
+                    await jurichat.archive_conversation(conv_id_encerrado)
+                except Exception as exc:
+                    logger.exception(
+                        "archive_conversation failed for lead=%s: %s",
+                        lead["id"], exc,
+                    )
+                await notify_mario(
+                    jurichat,
+                    mario_conversation_id=mario_conversation_id,
+                    mensagem=format_notification(
+                        tipo="encerrado_sem_resposta",
+                        nome=lead["contato_nome"],
+                        telefone=lead["contato_telefone"],
+                        ultima_msg="",
+                        conversation_id=conv_id_encerrado,
+                    ),
                 )
 
             else:
@@ -3197,6 +3221,7 @@ def main() -> int:
             encerramento_apos_horas=settings.encerramento_apos_horas,
             followup_1_apos_horas=settings.followup_1_apos_horas,
             bot_user_id=settings.jurichat_bot_user_id,
+            mario_conversation_id=settings.mario_conversation_id,
         )
 
     async def _full_cycle_with_cleanup() -> int:

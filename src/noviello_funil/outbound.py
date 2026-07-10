@@ -254,6 +254,26 @@ class JurichatClient:
 
         return await with_retry(op, attempts=3, base_delay=base_delay)
 
+    async def archive_conversation(
+        self, conversation_id: str, *, base_delay: float = 1.0,
+    ) -> dict[str, Any]:
+        """PATCH /conversation/{id}/archive — move a conversa pro arquivo.
+
+        Endpoint confirmado via inspeção de rede do painel real 2026-07-10
+        (reverse-engineered — não documentado): body ``{"isArchived": true}``.
+        Usado no encerramento por falta de resposta (3 tentativas).
+        """
+
+        async def op() -> dict[str, Any]:
+            resp = await self._client.patch(
+                f"{self._base_url}/conversation/{conversation_id}/archive",
+                json={"isArchived": True},
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        return await with_retry(op, attempts=3, base_delay=base_delay)
+
     async def get_conversation(
         self, conversation_id: str, *, base_delay: float = 1.0,
         transcrever: Any = None,
@@ -450,7 +470,7 @@ def format_notification(
 ) -> str:
     """Format a notification message for Mario.
 
-    tipo: 'fechar' | 'handoff' | 'turnos' | 'claude_erro'
+    tipo: 'fechar' | 'handoff' | 'turnos' | 'claude_erro' | 'encerrado_sem_resposta'
     """
     nome_label = nome or "(sem nome)"
 
@@ -486,6 +506,13 @@ def format_notification(
     elif tipo == "claude_erro":
         head = f"⚠️ Lead {nome_label} ({telefone}) — Claude retornou JSON inválido"
         body = "Verifique a conversa; o lead segue em em_conversa para retry."
+        extra = ""
+    elif tipo == "encerrado_sem_resposta":
+        head = f"🗄️ Lead {nome_label} ({telefone}) — encerrado e arquivado"
+        body = (
+            "3 tentativas sem resposta (contato inicial + 2 follow-ups). "
+            "Conversa arquivada no Jurichat."
+        )
         extra = ""
     else:
         raise ValueError(f"unknown notification type: {tipo}")

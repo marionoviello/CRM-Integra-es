@@ -125,11 +125,16 @@ async def test_cycle_sends_second_followup_when_in_follow_up_1(db_conn):
 
 @pytest.mark.asyncio
 async def test_cycle_closes_silently_when_in_follow_up_2(db_conn):
+    """3 tentativas sem resposta (original + FU1 + FU2): encerra em silêncio
+    pro LEAD (nenhuma msg na conversa dele), mas arquiva no Jurichat e avisa
+    o Mario com um resumo do que foi feito (pedido Mario 2026-07-10)."""
     _make_due_lead(db_conn, "L-1", "C-1", Estado.FOLLOW_UP_2_ENVIADO)
 
     fake_jurichat = MagicMock()
     fake_jurichat.get_lead_tags = AsyncMock(return_value=[])
     fake_jurichat.send_message = AsyncMock()
+    fake_jurichat.start_human_support = AsyncMock(return_value={"success": True})
+    fake_jurichat.archive_conversation = AsyncMock(return_value={"isArchived": True})
 
     async def fake_followup_gen(**kwargs):
         return "x"
@@ -140,11 +145,18 @@ async def test_cycle_closes_silently_when_in_follow_up_2(db_conn):
         gerar_followup_msg=fake_followup_gen,
         followup_2_apos_horas=72,
         encerramento_apos_horas=24,
+        mario_conversation_id="mario-conv",
     )
 
     lead = get_lead_by_conversation(db_conn, "C-1")
     assert lead["estado"] == Estado.ENCERRADO_SEM_RESPOSTA
-    fake_jurichat.send_message.assert_not_awaited()
+    # Silêncio pro LEAD — nenhuma mensagem na conversa dele.
+    destinos = [c.args[0] for c in fake_jurichat.send_message.await_args_list]
+    assert "C-1" not in destinos
+    # Mas o Mario É avisado.
+    assert "mario-conv" in destinos
+    # E a conversa É arquivada no Jurichat.
+    fake_jurichat.archive_conversation.assert_awaited_once_with("C-1")
 
 
 @pytest.mark.asyncio
