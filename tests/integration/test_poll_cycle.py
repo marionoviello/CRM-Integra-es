@@ -1777,6 +1777,86 @@ async def test_humano_calado_1h_e_lead_novo_bot_responde(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_lead_em_rajada_bot_espera_sem_gravar_hash(db_conn):
+    """Signal 1.48 (2026-07-10, caso Gabi): lead digitando em sequência —
+    última msg há segundos → bot NÃO responde ainda (a próxima msg da rajada
+    pode responder o que ele ia perguntar). Hash NÃO é atualizado: o próximo
+    tick reprocessa a conversa COMPLETA, com a rajada inteira."""
+    transcript = "Lead: Foi pago 400 mil a vista\nLead: O apto fica em SP"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    agora = datetime.datetime.now(datetime.UTC)
+    ha_10s = (agora - datetime.timedelta(seconds=10)).isoformat()
+    ha_40s = (agora - datetime.timedelta(seconds=40)).isoformat()
+    jurichat = MagicMock()
+    jurichat.get_conversation = AsyncMock(return_value={
+        "transcription": transcript,
+        "messages_raw": [
+            {"direction": "INBOUND", "content": "Foi pago 400 mil a vista",
+             "messageAt": ha_40s},
+            {"direction": "INBOUND", "content": "O apto fica em SP",
+             "messageAt": ha_10s},
+        ],
+    })
+    jurichat.send_message = AsyncMock()
+    jurichat.start_human_support = AsyncMock()
+    triagem_fn = AsyncMock(side_effect=AssertionError("rajada — não responde ainda"))
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        espera_rajada_segundos=90,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA
+    assert lead["ultimo_transcript_hash"] == "stale"  # NÃO gravou → reprocessa
+    triagem_fn.assert_not_called()
+    jurichat.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_lead_rajada_assentada_bot_responde(db_conn):
+    """Signal 1.48: última msg do lead já tem mais de 90s → rajada assentou →
+    bot responde normalmente (a espera não vira mudez)."""
+    transcript = "Lead: Foi pago 400 mil a vista\nLead: O apto fica em SP"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    agora = datetime.datetime.now(datetime.UTC)
+    ha_5min = (agora - datetime.timedelta(minutes=5)).isoformat()
+    ha_4min = (agora - datetime.timedelta(minutes=4)).isoformat()
+    jurichat = MagicMock()
+    jurichat.get_conversation = AsyncMock(return_value={
+        "transcription": transcript,
+        "messages_raw": [
+            {"direction": "INBOUND", "content": "Foi pago 400 mil a vista",
+             "messageAt": ha_5min},
+            {"direction": "INBOUND", "content": "O apto fica em SP",
+             "messageAt": ha_4min},
+        ],
+    })
+    jurichat.send_message = AsyncMock(return_value={"id": "m"})
+    jurichat.start_human_support = AsyncMock(return_value={"success": True})
+    triagem_fn = await _triagem_returning(
+        Decisao(acao="responder", mensagem="Perfeito, anotado!")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        espera_rajada_segundos=90,
+    )
+
+    jurichat.send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_poll_neutraliza_lead_da_conversa_de_alertas(db_conn):
     """Lead pré-existente da conversa de alertas (criado antes do
     guardrail do sync) é pausado no poll sem chamar a API."""

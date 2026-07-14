@@ -286,6 +286,37 @@ def _bot_deve_esperar_humano(
     return (ult_lead - ult_humano).total_seconds() < espera_segundos
 
 
+def _lead_em_rajada(
+    messages_raw: list[dict[str, Any]], *, espera_segundos: int,
+    now: datetime.datetime | None = None,
+) -> bool:
+    """True se a ÚLTIMA mensagem do lead chegou há menos de ``espera_segundos``.
+
+    Signal 1.48 (2026-07-10, caso Gabi): lead digitando em rajada ("Foi pago
+    400 mil" → "temos mensagens" → "O apto fica em SP") fazia o bot responder
+    a cada fragmento — e re-perguntar o que a mensagem seguinte já respondia
+    (as respostas se cruzavam). Espera a rajada assentar: só responde quando a
+    última INBOUND tiver >= N segundos de idade. O caller NÃO grava o hash ao
+    esperar → o próximo tick reprocessa a conversa completa.
+
+    ``espera_segundos <= 0`` desliga. Sem INBOUND parseável → não bloqueia
+    (timestamp quebrado não pode emudecer o lead). ``now`` injetável p/ teste.
+    """
+    if espera_segundos <= 0:
+        return False
+    ult_lead: datetime.datetime | None = None
+    for msg in messages_raw:
+        if msg.get("direction") != "INBOUND":
+            continue
+        ts = _parse_message_at(msg.get("messageAt"))
+        if ts is not None and (ult_lead is None or ts > ult_lead):
+            ult_lead = ts
+    if ult_lead is None:
+        return False
+    now = now or datetime.datetime.now(datetime.UTC)
+    return (now - ult_lead).total_seconds() < espera_segundos
+
+
 def _last_lead_message(transcript: str) -> str:
     """Last ``Lead:`` message body (prefix stripped), or empty string."""
     for line in reversed(transcript.splitlines()):
@@ -1361,6 +1392,7 @@ async def run_poll_cycle(
     groq_api_key: str = "",
     audio_http: Any = None,
     espera_humano_segundos: int = 3600,
+    espera_rajada_segundos: int = 90,
 ) -> None:
     """Process all em_conversa leads whose poll tick is due."""
     conn = get_db()
@@ -1653,6 +1685,24 @@ async def run_poll_cycle(
                 lead_id, espera_humano_segundos,
             )
             update_transcript_hash(conn, lead_id, new_hash)
+            schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
+            continue
+
+        # Signal 1.48 (2026-07-10): ANTI-RAJADA — a última msg do lead chegou
+        # há segundos; ele provavelmente ainda está digitando a próxima (caso
+        # Gabi: "400 mil" → "temos mensagens" → "fica em SP", e o bot
+        # re-perguntava o que a msg seguinte já respondia). Espera assentar.
+        # NÃO grava o hash → o próximo tick reprocessa a conversa COMPLETA,
+        # com a rajada inteira de uma vez. Depois do 1.45 (humano tem
+        # prioridade) e antes de qualquer resposta ao lead.
+        if _lead_em_rajada(
+            conv.get("messages_raw") or [],
+            espera_segundos=espera_rajada_segundos,
+        ):
+            logger.info(
+                "lead=%s: rajada em andamento — aguarda assentar (%ds)",
+                lead_id, espera_rajada_segundos,
+            )
             schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
             continue
 
@@ -3187,6 +3237,7 @@ def main() -> int:
             groq_api_key=settings.groq_api_key,
             audio_http=audio_http,
             espera_humano_segundos=settings.bot_espera_humano_min * 60,
+            espera_rajada_segundos=settings.bot_espera_rajada_seg,
         )
         # 2.5 (D4, 25/jun): detecta reuniões marcadas FORA do bot e vincula ao
         #    lead (pelo email do convidado) ANTES do reminder_cycle, pra elas já

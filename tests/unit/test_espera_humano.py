@@ -6,8 +6,11 @@ a regra de janela: o bot só responde se a última msg do lead veio >= espera
 DEPOIS da última msg do humano.
 """
 
+import datetime
+
 from noviello_funil.scheduler import (
     _bot_deve_esperar_humano,
+    _lead_em_rajada,
     _msg_eh_de_humano,
     _parse_message_at,
 )
@@ -135,3 +138,51 @@ def test_borda_exatamente_na_janela_responde() -> None:
     # lead exatamente 1h depois → NÃO espera (>= espera já pode responder).
     msgs = [_humano("2026-07-01T19:00:00Z"), _lead("2026-07-01T20:00:00Z")]
     assert not _bot_deve_esperar_humano(msgs, espera_segundos=UMA_HORA)
+
+
+# ---- _lead_em_rajada (Signal 1.48, anti-rajada) ------------------------------
+
+_AGORA = datetime.datetime(2026, 7, 10, 12, 0, 0, tzinfo=datetime.UTC)
+
+
+def test_rajada_msg_recente_espera() -> None:
+    # última msg do lead há 10s → provavelmente ainda digitando → espera.
+    msgs = [_lead("2026-07-10T11:59:50Z")]
+    assert _lead_em_rajada(msgs, espera_segundos=90, now=_AGORA)
+
+
+def test_rajada_msg_antiga_responde() -> None:
+    # última msg do lead há 5 min → rajada assentou → responde.
+    msgs = [_lead("2026-07-10T11:55:00Z")]
+    assert not _lead_em_rajada(msgs, espera_segundos=90, now=_AGORA)
+
+
+def test_rajada_usa_a_ultima_inbound() -> None:
+    # rajada em andamento: msgs há 3min, 1min e 20s → a ÚLTIMA manda → espera.
+    msgs = [
+        _lead("2026-07-10T11:57:00Z", "Foi pago 400 mil a vista"),
+        _lead("2026-07-10T11:59:00Z", "Sim, temos mensagens comprovando"),
+        _lead("2026-07-10T11:59:40Z", "O apto fica em SP"),
+    ]
+    assert _lead_em_rajada(msgs, espera_segundos=90, now=_AGORA)
+
+
+def test_rajada_ignora_outbound() -> None:
+    # bot/humano falou há 5s mas a última do LEAD foi há 10min → responde.
+    msgs = [_lead("2026-07-10T11:50:00Z"), _bot("2026-07-10T11:59:55Z")]
+    assert not _lead_em_rajada(msgs, espera_segundos=90, now=_AGORA)
+
+
+def test_rajada_sem_inbound_nao_bloqueia() -> None:
+    msgs = [_bot("2026-07-10T11:59:55Z")]
+    assert not _lead_em_rajada(msgs, espera_segundos=90, now=_AGORA)
+
+
+def test_rajada_desligada_com_zero() -> None:
+    msgs = [_lead("2026-07-10T11:59:55Z")]
+    assert not _lead_em_rajada(msgs, espera_segundos=0, now=_AGORA)
+
+
+def test_rajada_timestamp_invalido_nao_bloqueia() -> None:
+    msgs = [{"direction": "INBOUND", "content": "oi", "messageAt": "invalido"}]
+    assert not _lead_em_rajada(msgs, espera_segundos=90, now=_AGORA)

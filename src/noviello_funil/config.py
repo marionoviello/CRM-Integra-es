@@ -224,3 +224,9 @@ class Settings(BaseSettings):
     # Fecha o buraco do Signal 0 (que só pega REATRIBUIÇÃO, não humano
     # digitando com a conversa ainda atribuída ao bot). 0 = desliga.
     bot_espera_humano_min: int = 60
+
+    # Anti-rajada (2026-07-10): o bot só responde quando a ÚLTIMA mensagem do
+    # lead tiver >= este tempo — lead digitando em sequência ("400 mil" →
+    # "fica em SP") era respondido fragmento a fragmento e o bot re-perguntava
+    # o que a msg seguinte já respondia (caso Gabi). 0 = desliga.
+    bot_espera_rajada_seg: int = 90
