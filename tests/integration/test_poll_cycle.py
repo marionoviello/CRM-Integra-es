@@ -3021,48 +3021,52 @@ async def test_signal_1_8_slots_no_passado_nao_cria_evento_limpa(db_conn):
 
 
 @pytest.mark.asyncio
-async def test_signal_1_8_lead_com_reuniao_marcada_defere_ao_claude(db_conn):
-    """S2: lead já tem reuniao_event_id + horarios_oferecidos pendentes +
-    msg casando um slot → Signal 1.8 NÃO confirma (não cancela/recria). Defere
-    ao Claude (que distingue remarcar de comentário casual)."""
+async def test_signal_1_8_remarcacao_confirma_e_cancela_evento_antigo(db_conn):
+    """S2 REVISTO (caso Leo, 23/jul): lead com reunião VIVA (no-show cujo
+    cancelamento 1-toque falhou) + oferta re-oferecida pendente + escolha
+    casando um slot → o 1.8 CONFIRMA a remarcação deterministicamente:
+    cancela o evento antigo e cria o novo. Antes a guarda S2 pulava o 1.8
+    nesse estado e o Claude derrapava pra re-oferecer com texto de
+    confirmação ("Vou remarcar pra 14h" + lista nova) — sem nunca marcar.
+    A proteção contra comentário casual segue de pé pela invariante
+    "reunião marcada → oferta limpa" (S4 na confirmação, S6 nos terminais,
+    D4 no vínculo manual)."""
     from noviello_funil.state import set_horarios_oferecidos
 
     transcript = (
-        "Atendente: Tenho ter (16/jun) às 14h\n"
-        "Lead: aquela terça 14h que você falou"
+        "Atendente: Qual seu email?\nLead: leo@exemplo.com\n"
+        "Atendente: Tenho esses horários:\n• qui (23/jul) às 15h\nQual prefere?\n"
+        "Lead: qui (23/jul) às 15h"
     )
     _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
     db_conn.execute(
         """UPDATE leads SET
-           reuniao_em='2099-06-20T15:00:00-03:00',
+           reuniao_em='2099-07-23T09:00:00-03:00',
            reuniao_event_id='evt-VIVO',
            reuniao_meet_link='https://meet.google.com/vivo'
            WHERE jurichat_conversation_id='C-1'"""
     )
     lead = get_lead_by_conversation(db_conn, "C-1")
     set_horarios_oferecidos(db_conn, lead["id"], [
-        {"iso": "2099-06-16T14:00:00-03:00", "label": "ter (16/jun) às 14h"},
+        {"iso": "2099-07-23T15:00:00-03:00", "label": "qui (23/jul) às 15h"},
+        {"iso": "2099-07-24T10:00:00-03:00", "label": "sex (24/jul) às 10h"},
     ])
 
     jurichat = _make_jurichat(transcript)
     calendar = _make_calendar_confirma()
-    # Defere ao Claude — que aqui apenas responde (não remarca).
-    triagem_fn = await _triagem_returning(
-        Decisao(acao="responder", mensagem="Sua reunião segue marcada!")
-    )
+    triagem_fn = AsyncMock(side_effect=AssertionError("Claude não deve ser chamado"))
 
     await run_poll_cycle(
         get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
         mario_conversation_id="mario-conv", max_turnos=20, calendar=calendar,
     )
 
-    # Signal 1.8 NÃO disparou: não cancelou nem recriou o evento.
-    calendar.client.create_event.assert_not_awaited()
-    calendar.client.cancel_event.assert_not_awaited()
-    triagem_fn_called = jurichat.send_message.call_args_list
-    assert any("segue marcada" in c[0][1] for c in triagem_fn_called)
+    calendar.client.cancel_event.assert_awaited_once_with("evt-VIVO")  # velho morre
+    calendar.client.create_event.assert_awaited_once()                 # novo nasce
     lead = get_lead_by_conversation(db_conn, "C-1")
-    assert lead["reuniao_event_id"] == "evt-VIVO"  # intacto
+    assert lead["reuniao_meet_link"] == "https://meet.google.com/xyz-fake"
+    assert lead["horarios_oferecidos"] is None  # escolha consumida
+    triagem_fn.assert_not_called()
 
 
 @pytest.mark.asyncio

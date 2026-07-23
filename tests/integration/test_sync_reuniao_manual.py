@@ -51,8 +51,17 @@ def _para_mario(jurichat):
 
 @pytest.mark.asyncio
 async def test_sync_auto_vincula_por_email(db_conn):
+    from noviello_funil.state import set_horarios_oferecidos
+
     lead = create_lead_if_absent(db_conn, "L-1", "C-1", "5511...", "João")
     set_lead_email(db_conn, lead["id"], "joao@exemplo.com")
+    # Oferta pendente ANTES do vínculo manual — o vínculo deve limpá-la
+    # (S2 revisto 23/jul: com o 1.8 confirmando remarcação, uma oferta órfã
+    # coexistindo com reunião manual deixaria um comentário casual do lead
+    # cancelar/recriar a reunião que o Mario marcou na mão).
+    set_horarios_oferecidos(db_conn, lead["id"], [
+        {"iso": "2099-06-16T14:00:00-03:00", "label": "ter (16/jun) às 14h"},
+    ])
     jurichat = _jurichat()
     cal = _calendar([_ev(
         "evt-manual", start_iso="2027-06-26T10:00:00-03:00",
@@ -68,6 +77,7 @@ async def test_sync_auto_vincula_por_email(db_conn):
     assert row["reuniao_em"] == "2027-06-26T10:00:00-03:00"
     assert row["reuniao_event_id"] == "evt-manual"
     assert row["reuniao_meet_link"] == "https://meet.google.com/x"
+    assert row["horarios_oferecidos"] is None  # oferta pendente consumida
     para = _para_mario(jurichat)
     assert len(para) == 1
     assert "vinculei" in para[0].args[1].lower()

@@ -1886,12 +1886,19 @@ async def run_poll_cycle(
         # Vem ANTES do teto: confirmar é melhor que handoff. Os guardrails de
         # email e data-no-passado seguem no _handle_confirmar_horario.
         #
-        # S2 (16/jun): só dispara se o lead AINDA NÃO tem reunião marcada —
-        # senão um comentário casual ("aquela terça que você falou") cancelaria
-        # e recriaria o evento (remarcação não pedida). Com reunião viva, defere
-        # ao Claude (que distingue remarcar de comentário).
+        # S2 REVISTO (23/jul, caso Leo): a versão original pulava o 1.8 com
+        # reunião viva (medo de comentário casual re-casar slot velho). Mas
+        # oferta pendente + reunião viva = REMARCAÇÃO em andamento (o handler
+        # de remarcar re-oferece SEM cancelar o evento) — e nesse estado o
+        # lead escolhendo um slot É a confirmação; pular o 1.8 jogava a bola
+        # pro Claude, que derrapava pra re-oferecer com texto de confirmação
+        # ("Vou remarcar pra 14h" + lista nova) sem nunca marcar. O
+        # _handle_confirmar_horario já cancela o evento antigo sozinho. A
+        # proteção contra comentário casual segue de pé pela invariante
+        # "reunião marcada → oferta limpa": S4 limpa na confirmação, S6 nos
+        # terminais, D4 no vínculo de reunião manual.
         oferecidos = get_horarios_oferecidos(conn, lead_id)
-        if oferecidos and not lead["reuniao_event_id"]:
+        if oferecidos:
             cal_cfg = calendar or CalendarConfig(
                 client=None, business_hours_start=14,
                 business_hours_end=19, slot_min=30, buffer_min=0,
@@ -2548,6 +2555,11 @@ async def sync_reunioes_manuais(
                 ev["start_iso"], exc,
             )
             continue
+        # S2 revisto (23/jul): a reunião manual SUPERSEDE qualquer oferta de
+        # horários pendente do bot — sem limpar, um comentário casual do lead
+        # casando um slot velho faria o 1.8 cancelar/recriar a reunião que o
+        # Mario marcou na mão.
+        clear_horarios_oferecidos(conn, lead["id"])
         logger.info(
             "D4: reunião manual %s vinculada ao lead=%s", event_id, lead["id"],
         )

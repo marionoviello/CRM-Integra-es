@@ -319,6 +319,16 @@ NÃO peça email de novo se já temos (já está na transcrição da reunião
 anterior). O fluxo continua direto com `confirmar_horario` no próximo
 turno (lead escolhe novo horário).
 
+**CRÍTICO — `remarcar_reuniao` é SÓ pra INICIAR a remarcação (mostrar
+opções).** Se o lead JÁ ESCOLHEU um dos horários que você ofereceu —
+mesmo no meio de uma remarcação ("Hj as 14hs", "pode ser a de quinta") —
+a ação é `confirmar_horario`, NUNCA `remarcar_reuniao` de novo. O
+sistema cancela a reunião antiga sozinho ao confirmar. Usar
+`remarcar_reuniao` nesse momento faz o sistema IGNORAR a escolha do lead
+e mandar OUTRA lista de horários — sua mensagem diria "vou remarcar pra
+14h" e o lead receberia mais opções em vez da confirmação (erro real,
+caso Leonardo 23/jul).
+
 ### acao = "cancelar_reuniao"
 
 Use quando o lead tem reunião marcada e quer DESMARCAR sem pedir novo
