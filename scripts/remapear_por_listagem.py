@@ -42,24 +42,32 @@ async def _get(http: httpx.AsyncClient, key: str, url: str, **params):
 async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--aplicar", action="store_true")
+    ap.add_argument("--conversa", default="",
+                    help="ID de QUALQUER conversa viva do painel — fonte do "
+                         "integrationId/inboxId novos. Sem ele, usa o 1º "
+                         "MARIO_CONVERSATION_ID do .env (que precisa já estar "
+                         "atualizado pro ID novo).")
     args = ap.parse_args()
 
     s = Settings()
     canais = split_conversation_ids(s.mario_conversation_id)
-    if not canais:
-        print("MARIO_CONVERSATION_ID vazio no .env — configure primeiro.")
+    fonte = args.conversa.strip() or (canais[0] if canais else "")
+    if "id=" in fonte:
+        fonte = fonte.split("id=")[-1].split("&")[0].strip()
+    if not fonte:
+        print("Passe --conversa <id> ou configure MARIO_CONVERSATION_ID.")
         return
     base = s.jurichat_base_url.rstrip("/")
 
     async with httpx.AsyncClient(timeout=30) as http:
-        # 1. integração/inbox novos, extraídos do canal de alertas novo.
-        d = await _get(http, s.jurichat_api_key, f"{base}/conversation/{canais[0]}")
+        # 1. integração/inbox novos, extraídos de uma conversa viva qualquer.
+        d = await _get(http, s.jurichat_api_key, f"{base}/conversation/{fonte}")
         data = d.get("data") or d
         integ = (data.get("integration") or {}).get("id") or ""
         inbox = (data.get("inbox") or {}).get("id") or ""
         if not integ or not inbox:
-            print(f"Nao achei integration/inbox na conversa {canais[0]} — "
-                  "confira se o .env ja tem o ID NOVO do canal de alertas.")
+            print(f"Nao achei integration/inbox na conversa {fonte} — "
+                  "confira se o ID e de uma conversa viva do painel.")
             return
         print(f"Integracao nova: {integ} | inbox: {inbox}\n")
 
