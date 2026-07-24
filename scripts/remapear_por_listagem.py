@@ -56,30 +56,31 @@ async def main() -> None:
         fonte = fonte.split("id=")[-1].split("&")[0].strip()
     if not fonte:
         print("Passe --conversa <id> ou configure MARIO_CONVERSATION_ID.")
-        return
+        raise SystemExit(1)
     base = s.jurichat_base_url.rstrip("/")
 
     async with httpx.AsyncClient(timeout=30) as http:
-        # 1. integração/inbox novos, extraídos de uma conversa viva qualquer.
+        # 1. inbox extraído do detalhe de uma conversa viva qualquer.
+        #    (Formato REAL verificado 2026-07-24: o detalhe traz só ``inboxId``
+        #    — o objeto ``integration`` aparece apenas na LISTAGEM.)
         d = await _get(http, s.jurichat_api_key, f"{base}/conversation/{fonte}")
         data = d.get("data") or d
-        integ = (data.get("integration") or {}).get("id") or ""
-        inbox = (data.get("inbox") or {}).get("id") or ""
-        if not integ or not inbox:
-            print(f"Nao achei integration/inbox na conversa {fonte} — "
+        inbox = data.get("inboxId") or (data.get("inbox") or {}).get("id") or ""
+        if not inbox:
+            print(f"Nao achei inboxId na conversa {fonte} — "
                   "confira se o ID e de uma conversa viva do painel.")
-            return
-        print(f"Integracao nova: {integ} | inbox: {inbox}\n")
+            raise SystemExit(1)
+        print(f"Inbox: {inbox}\n")
 
-        # 2. lista todas as conversas da integração nova.
+        # 2. lista todas as conversas do inbox (SEM filtro de integração —
+        #    a listagem inboxId-only volta a funcionar pós-reconexão e a
+        #    integração antiga lista 0, então tudo que vem é da nova).
         conversas: list[dict] = []
         page = 1
         while True:
             d = await _get(
                 http, s.jurichat_api_key, f"{base}/conversation",
                 page=str(page), limit="100", inboxId=inbox,
-                integrationId=integ, showGroups="false", onlyGroups="false",
-                showOnlyUnread="false", onlyArchived="false",
             )
             items = d.get("data") or []
             conversas.extend(items)
@@ -88,6 +89,23 @@ async def main() -> None:
             if page >= total or not items:
                 break
             page += 1
+        if not conversas:
+            print("Listagem vazia — nada a remapear.")
+            raise SystemExit(1)
+
+        # 2b. fixa a integração MAJORITÁRIA e filtra por ela — se alguma
+        #     conversa morta de integração velha vazar na listagem, não entra.
+        contagem: dict[str, int] = {}
+        for c in conversas:
+            iid = (c.get("integration") or {}).get("id") or ""
+            contagem[iid] = contagem.get(iid, 0) + 1
+        integ = max(contagem, key=lambda k: contagem[k])
+        print(f"Integracao majoritaria: {integ} "
+              f"({contagem[integ]}/{len(conversas)} conversas)")
+        conversas = [
+            c for c in conversas
+            if ((c.get("integration") or {}).get("id") or "") == integ
+        ]
 
         # 3. telefone -> conversa nova (a mais recente ganha, ordem da API).
         por_tel: dict[str, dict] = {}
