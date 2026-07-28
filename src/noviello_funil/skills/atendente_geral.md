@@ -249,6 +249,50 @@ lead, mostrar domínio do assunto e criar conexão — é o combustível do
 
 **Imóvel de herança sem escritura ou "de gaveta"** — É comum o falecido ter comprado um imóvel só com contrato de gaveta, ou construído sem averbar, e o bem não estar registrado no nome dele. Esse imóvel entra na herança, mas precisa ser regularizado — antes ou junto do inventário — pra poder ser partilhado e um dia vendido. Existem caminhos próprios pra isso, como usucapião e regularização em cartório. *Vale explorar:* O imóvel está registrado no nome do falecido ou só tem contrato? Há quanto tempo a família está nele? *Gancho de valor:* A equipe cruza o contrato com a matrícula real do imóvel e identifica qual rota de regularização destrava a partilha — pular essa etapa costuma fazer o inventário emperrar no cartório lá na frente.
 
+**CHECKLIST DE DOCUMENTOS DO INVENTÁRIO — pode ENVIAR (aval Mario 25/jul).**
+Quando o lead do vertical sucessório perguntar "o que precisa?", "quais
+documentos?", ou depois que você já entendeu o básico do caso (quem
+faleceu, quando, quais bens), envie a checklist abaixo COMO MENSAGEM —
+é entrega de valor concreta e não precisa esperar reunião. Adapte:
+corte seções que claramente não se aplicam (sem carro → sem VEÍCULOS)
+e SEMPRE feche com uma pergunta consultiva tipo "Desses, o que você já
+tem em mãos?" — a checklist abre conversa, não encerra.
+
+*DO FALECIDO(A)*
+• RG e CPF
+• Certidão de óbito
+• Certidão de nascimento ou casamento
+• Comprovante de residência
+
+*DOS HERDEIROS (de cada um)*
+• RG e CPF
+• Certidão de nascimento ou casamento
+• Comprovante de residência
+
+*IMÓVEIS*
+• Matrícula atualizada do imóvel
+• Carnê do IPTU
+• Certidão de valor venal
+
+*VEÍCULOS E BENS MÓVEIS*
+• CRLV (documento do veículo)
+• Notas fiscais de bens de valor
+
+*DOCUMENTOS FINANCEIROS*
+• Extratos bancários e de investimentos
+• Contratos de previdência privada
+• Documentos de cotas em empresas
+
+*DOCUMENTOS FISCAIS*
+• Declaração de IR dos últimos anos
+• Certidões negativas de débitos
+• CCIR (se houver imóvel rural)
+
+*OUTROS*
+• Testamento (se houver)
+• Procuração (se necessário)
+• Documentos de dívidas do espólio
+
 ### Conhecimento de fundo — SAÚDE SUPLEMENTAR (planos de saúde)
 
 **Negativa de cobertura e o "rol da ANS"** — A ANS mantém uma lista de procedimentos que todo plano é obrigado a cobrir — mas essa lista não é o teto absoluto: desde uma lei de 2022, tratamento fora da lista também pode ser devido quando há prescrição médica e comprovação científica de que funciona. Ou seja, "não está no rol" não encerra a conversa — muitas negativas com essa justificativa são revertidas. O que decide é a prescrição do médico e a fundamentação da recusa. *Vale explorar:* O plano deu a negativa por escrito ou só falou por telefone? O que exatamente o médico prescreveu e com qual justificativa? *Gancho de valor:* comparando a prescrição médica com o texto exato da negativa, a equipe identifica se a operadora usou uma justificativa que a Justiça já vem derrubando — e isso pode mudar a força do caso.
