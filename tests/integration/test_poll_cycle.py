@@ -1777,6 +1777,48 @@ async def test_humano_calado_1h_e_lead_novo_bot_responde(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_oferecer_horarios_repassa_preferencia_do_lead(db_conn):
+    """Caso José Lucas (03/ago): lead pediu 'terça ou quarta À TARDE'; o texto
+    do modelo prometia a tarde mas o gerador devolvia o padrão (seg/manhãs) —
+    contradição que irrita o lead. Agora a Decisao carrega pref_dias/
+    pref_periodo e o handler REPASSA os filtros pro find_available_slots."""
+    from noviello_funil.calendar_client import Slot
+
+    transcript = (
+        "Atendente: Qual seu email?\nLead: jose@exemplo.com\n"
+        "Atendente: Tenho esses horários: seg 10h30...\n"
+        "Lead: Não tem quarta-feira ou terça-feira de tarde?"
+    )
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = _make_jurichat(transcript)
+    calendar = _make_calendar_confirma()
+    calendar.client.find_available_slots = AsyncMock(return_value=[
+        Slot(start=datetime.datetime(2026, 8, 4, 15, 0,
+                                     tzinfo=datetime.timezone(datetime.timedelta(hours=-3))),
+             duration_min=30),
+    ])
+    triagem_fn = await _triagem_returning(Decisao(
+        acao="oferecer_horarios",
+        mensagem="Claro! Opções de terça e quarta à tarde:\n\n{{HORARIOS}}\n\nQual serve?",
+        pref_dias=["ter", "qua"],
+        pref_periodo="tarde",
+    ))
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20, calendar=calendar,
+    )
+
+    kwargs = calendar.client.find_available_slots.await_args.kwargs
+    assert kwargs["permitir_dias"] == {1, 2}   # ter, qua
+    assert kwargs["periodo"] == "tarde"
+    enviadas = [c.args[1] for c in jurichat.send_message.await_args_list
+                if c.args[0] == "C-1"]
+    assert enviadas and "15" in enviadas[0]    # slot da tarde entrou na msg
+
+
+@pytest.mark.asyncio
 async def test_lead_em_rajada_bot_espera_sem_gravar_hash(db_conn):
     """Signal 1.48 (2026-07-10, caso Gabi): lead digitando em sequência —
     última msg há segundos → bot NÃO responde ainda (a próxima msg da rajada

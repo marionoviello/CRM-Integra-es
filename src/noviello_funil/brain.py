@@ -36,6 +36,7 @@ DECISAO_SCHEMA = {
     "required": [
         "acao", "mensagem", "resumo_caso", "motivo_handoff",
         "horario_escolhido_iso", "lead_email", "lead_recusou_videochamada",
+        "pref_dias", "pref_periodo",
     ],
     "properties": {
         "acao": {
@@ -56,6 +57,15 @@ DECISAO_SCHEMA = {
         # usa isso pra fazer handoff em vez de insistir no Meet. Regex não
         # distinguia "recusa" de "restrição de horário"; o modelo distingue.
         "lead_recusou_videochamada": {"type": "boolean"},
+        # Caso José Lucas (03/ago): lead pede dia/período específico ("terça
+        # ou quarta À TARDE") — o modelo sinaliza e o scheduler FILTRA a
+        # agenda de verdade (antes o texto prometia a tarde e a lista vinha
+        # no padrão, contradizendo a mensagem e irritando o lead).
+        "pref_dias": {
+            "type": ["array", "null"],
+            "items": {"type": "string", "enum": ["seg", "ter", "qua", "qui", "sex"]},
+        },
+        "pref_periodo": {"type": ["string", "null"]},
     },
 }
 
@@ -83,6 +93,12 @@ class Decisao:
     # dia/horário. O scheduler usa no ramo ``propor`` pra fazer handoff em vez
     # de insistir no Meet.
     lead_recusou_videochamada: bool = False
+    # Preferência de agenda do lead (caso José Lucas 03/ago). Presentes em
+    # ``oferecer_horarios``/``remarcar_reuniao`` quando o lead pediu dia(s)
+    # ("seg".."sex") e/ou período ("manha"/"tarde") — o handler filtra o
+    # find_available_slots com isso, pra lista bater com a mensagem.
+    pref_dias: list[str] | None = None
+    pref_periodo: str | None = None
 
 
 class DecisaoInvalida(Exception):
@@ -145,6 +161,16 @@ def parse_decisao(raw: str) -> Decisao:
         lead_email=data.get("lead_email"),
         lead_recusou_videochamada=bool(
             data.get("lead_recusou_videochamada", False)
+        ),
+        pref_dias=(
+            [str(d) for d in data["pref_dias"]]
+            if isinstance(data.get("pref_dias"), list) and data["pref_dias"]
+            else None
+        ),
+        pref_periodo=(
+            str(data["pref_periodo"]).strip().lower() or None
+            if isinstance(data.get("pref_periodo"), str)
+            else None
         ),
     )
 

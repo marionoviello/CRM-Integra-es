@@ -397,6 +397,10 @@ _MSG_HANDOFF_LEAD = (
 # antes de mandar pro lead — usado no handoff, único send sem replace dedicado.
 _RE_PLACEHOLDER = re.compile(r"\s*\{\{[^}]+\}\}")
 
+# Mapa dos dias que o modelo sinaliza em ``pref_dias`` → weekday() do Python
+# (caso José Lucas 03/ago). Prefixo de 3 letras tolera "terça"/"ter".
+_DIAS_SEMANA = {"seg": 0, "ter": 1, "qua": 2, "qui": 3, "sex": 4}
+
 
 async def _handle_oferecer_horarios(
     *,
@@ -457,6 +461,18 @@ async def _handle_oferecer_horarios(
     # → handoff avisado abaixo.
     ja_oferecidos = get_horarios_oferecidos(conn, lead_id)
     exclude_isos = {o["iso"] for o in ja_oferecidos}
+    # Preferência do lead (caso José Lucas 03/ago): a Decisao carrega os
+    # dias/período pedidos e o gerador FILTRA de verdade — a lista tem que
+    # bater com o que a mensagem promete. Sem match → cai no ramo de agenda
+    # vazia abaixo (handoff avisado), nunca em slots que contradizem o pedido.
+    permitir_dias = {
+        _DIAS_SEMANA[d[:3].lower()]
+        for d in (decisao.pref_dias or [])
+        if d[:3].lower() in _DIAS_SEMANA
+    } or None
+    periodo = (decisao.pref_periodo or "").strip().lower()
+    if periodo not in ("manha", "tarde"):
+        periodo = ""
     try:
         slots = await calendar.client.find_available_slots(
             business_hours_start=calendar.business_hours_start,
@@ -468,6 +484,8 @@ async def _handle_oferecer_horarios(
             morning_start=calendar.morning_start,
             morning_end=calendar.morning_end,
             exclude_isos=exclude_isos,
+            permitir_dias=permitir_dias,
+            periodo=periodo,
         )
     except (GoogleCalendarError, httpx.HTTPError) as exc:
         # Falha TRANSITÓRIA — erro do Google (GoogleCalendarError) OU de rede/

@@ -190,6 +190,80 @@ async def test_find_slots_escassez_dia1_com_um_slot_so(respx_mock):
 
 
 @pytest.mark.asyncio
+async def test_find_slots_filtra_dias_e_periodo_da_preferencia(respx_mock):
+    """Caso José Lucas (03/ago): lead pediu 'terça ou quarta À TARDE' e o
+    gerador devolvia seg/manhãs (não tinha COMO saber da preferência). Com
+    ``permitir_dias`` + ``periodo``, só saem slots que respeitam o pedido."""
+    respx_mock.post("https://oauth2.googleapis.com/token").mock(
+        return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600}),
+    )
+    respx_mock.post(
+        "https://www.googleapis.com/calendar/v3/freeBusy",
+    ).mock(return_value=httpx.Response(
+        200, json={"calendars": {"primary": {"busy": []}}},
+    ))
+
+    # 2026-08-03 = segunda 08h; manhã 9-11 LIGADA (pra provar que o filtro
+    # de período derruba a janela da manhã mesmo disponível).
+    now = _dt(2026, 8, 3, 8, 0)
+    client = GoogleCalendarClient(client_id="c", client_secret="s", refresh_token="r")
+    try:
+        slots = await client.find_available_slots(
+            business_hours_start=14, business_hours_end=19,
+            slot_min=30, buffer_min=0,
+            lookahead_days=5, num_slots=4,
+            morning_start=9, morning_end=11,
+            permitir_dias={1, 2},  # ter, qua
+            periodo="tarde",
+            now=now,
+        )
+    finally:
+        await client.aclose()
+
+    # ter (04) 14h + ter 18h30 (primeiro+último do dia 1) + qua (05) 14h +
+    # ter (11) 14h — pular dia não-pedido NÃO gasta o lookahead, então a
+    # busca alcança a semana seguinte dentro da preferência.
+    assert len(slots) == 4
+    assert slots[0].start == _dt(2026, 8, 4, 14, 0)
+    assert slots[1].start == _dt(2026, 8, 4, 18, 30)
+    assert slots[2].start == _dt(2026, 8, 5, 14, 0)
+    assert slots[3].start == _dt(2026, 8, 11, 14, 0)
+    for s in slots:
+        assert s.start.weekday() in (1, 2)
+        assert s.start.hour >= 12
+
+
+@pytest.mark.asyncio
+async def test_find_slots_periodo_manha_exclui_a_tarde(respx_mock):
+    respx_mock.post("https://oauth2.googleapis.com/token").mock(
+        return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600}),
+    )
+    respx_mock.post(
+        "https://www.googleapis.com/calendar/v3/freeBusy",
+    ).mock(return_value=httpx.Response(
+        200, json={"calendars": {"primary": {"busy": []}}},
+    ))
+
+    now = _dt(2026, 8, 3, 8, 0)
+    client = GoogleCalendarClient(client_id="c", client_secret="s", refresh_token="r")
+    try:
+        slots = await client.find_available_slots(
+            business_hours_start=14, business_hours_end=19,
+            slot_min=30, buffer_min=0,
+            lookahead_days=5, num_slots=4,
+            morning_start=9, morning_end=11,
+            periodo="manha",
+            now=now,
+        )
+    finally:
+        await client.aclose()
+
+    assert slots
+    for s in slots:
+        assert s.start.hour < 12
+
+
+@pytest.mark.asyncio
 async def test_find_slots_skips_busy_intervals(respx_mock):
     respx_mock.post("https://oauth2.googleapis.com/token").mock(
         return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600}),

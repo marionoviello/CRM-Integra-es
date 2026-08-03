@@ -180,6 +180,8 @@ class GoogleCalendarClient:
         morning_start: int = 0,
         morning_end: int = 0,
         exclude_isos: set[str] | None = None,
+        permitir_dias: set[int] | None = None,
+        periodo: str = "",
         now: datetime.datetime | None = None,
     ) -> list[Slot]:
         """Slots livres com estratégia de ESCASSEZ (decisão Mario 2026-06-10).
@@ -222,6 +224,13 @@ class GoogleCalendarClient:
         if morning_start and morning_end and morning_end > morning_start:
             windows.append((morning_start, morning_end))
         windows.append((business_hours_start, business_hours_end))
+        # Preferência do lead (caso José Lucas 03/ago): "manha"/"tarde"
+        # derruba as janelas fora do período — antes o texto do modelo
+        # prometia a tarde e a lista vinha da estratégia padrão.
+        if periodo == "manha":
+            windows = [w for w in windows if w[0] < 12]
+        elif periodo == "tarde":
+            windows = [w for w in windows if w[0] >= 12]
 
         # 1. Coleta slots livres AGRUPADOS POR DIA (até 3 dias com vaga).
         dias_com_vagas: list[list[Slot]] = []
@@ -234,6 +243,12 @@ class GoogleCalendarClient:
             and len(dias_com_vagas) < 3
         ):
             if cursor_day.weekday() >= 5:  # pula fim de semana
+                cursor_day += datetime.timedelta(days=1)
+                continue
+            # Preferência de DIA (caso José Lucas): fora dos dias pedidos →
+            # pula SEM consumir o orçamento de lookahead (senão "só sex"
+            # esgotaria os dias úteis antes de chegar na sexta).
+            if permitir_dias is not None and cursor_day.weekday() not in permitir_dias:
                 cursor_day += datetime.timedelta(days=1)
                 continue
             dias_uteis_visitados += 1

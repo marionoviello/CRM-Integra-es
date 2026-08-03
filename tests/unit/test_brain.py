@@ -38,6 +38,24 @@ def test_parse_decisao_responder():
     assert d.motivo_handoff is None
 
 
+def test_parse_decisao_com_preferencia_de_horario():
+    # Caso José Lucas (03/ago): lead pediu "terça ou quarta à tarde" — o
+    # modelo sinaliza a preferência e o scheduler filtra a agenda de verdade.
+    raw = (
+        '{"acao": "oferecer_horarios", "mensagem": "Claro! {{HORARIOS}}", '
+        '"pref_dias": ["ter", "qua"], "pref_periodo": "tarde"}'
+    )
+    d = parse_decisao(raw)
+    assert d.pref_dias == ["ter", "qua"]
+    assert d.pref_periodo == "tarde"
+
+
+def test_parse_decisao_sem_preferencia_fica_none():
+    d = parse_decisao('{"acao": "oferecer_horarios", "mensagem": "{{HORARIOS}}"}')
+    assert d.pref_dias is None
+    assert d.pref_periodo is None
+
+
 def test_parse_decisao_propor():
     raw = '{"acao": "propor", "mensagem": "proposta x", "resumo_caso": "plano negou"}'
     d = parse_decisao(raw)
