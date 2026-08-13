@@ -21,6 +21,7 @@ import argparse
 import datetime
 import shutil
 import sys
+from pathlib import Path
 
 import httpx
 
@@ -109,7 +110,7 @@ def main() -> None:
 
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         shutil.copy(".env", f"/root/env-backup-{stamp}")
-        linhas = open(".env", encoding="utf-8").read().splitlines()
+        linhas = Path(".env").read_text(encoding="utf-8").splitlines()
         saida, mexeu = [], False
         for ln in linhas:
             if ln.startswith("MARIO_CONVERSATION_ID="):
@@ -126,7 +127,7 @@ def main() -> None:
         if not mexeu:
             saida.append(f"MARIO_CONVERSATION_ID={cid}")
             print("linha MARIO_CONVERSATION_ID criada")
-        open(".env", "w", encoding="utf-8").write("\n".join(saida) + "\n")
+        Path(".env").write_text("\n".join(saida) + "\n", encoding="utf-8")
 
         if a.testar:
             http.post(
