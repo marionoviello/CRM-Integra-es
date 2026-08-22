@@ -517,6 +517,39 @@ def get_horarios_oferecidos(
     ]
 
 
+def set_resumo_caso(
+    conn: sqlite3.Connection, lead_id: int, resumo: str,
+) -> None:
+    """Guarda o último ``resumo_caso`` que o Claude produziu pro lead.
+
+    O resumo nasce no turno do `propor`/`oferecer_horarios` (quando o modelo
+    entende o caso) e morria ali. O Signal 1.8 confirma o horário SEM chamar o
+    Claude — sem isto, o evento do Calendar saía com placeholder no lugar do
+    resumo (auditoria 22/ago: 20 de 36 eventos sem resumo).
+
+    Só sobrescreve com conteúdo real: um turno posterior sem resumo (ex.:
+    `responder`) não apaga o que já foi entendido.
+    """
+    limpo = (resumo or "").strip()
+    if not limpo:
+        return
+    conn.execute(
+        "UPDATE leads SET resumo_caso = ?, "
+        "atualizado_em = datetime('now') WHERE id = ?",
+        (limpo, lead_id),
+    )
+
+
+def get_resumo_caso(conn: sqlite3.Connection, lead_id: int) -> str | None:
+    """Último resumo conhecido do caso (None se o bot ainda não produziu um)."""
+    row = conn.execute(
+        "SELECT resumo_caso FROM leads WHERE id = ?", (lead_id,),
+    ).fetchone()
+    if not row or not row["resumo_caso"]:
+        return None
+    return str(row["resumo_caso"]).strip() or None
+
+
 def clear_horarios_oferecidos(conn: sqlite3.Connection, lead_id: int) -> None:
     """Limpa os horários pendentes (após confirmar/cancelar)."""
     conn.execute(

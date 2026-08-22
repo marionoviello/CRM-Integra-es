@@ -327,6 +327,11 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     # transcript. Usado pra casar reuniões marcadas FORA do bot (Google Calendar)
     # com o lead certo, pelo email do convidado do evento.
     _ensure_column(conn, "leads", "contato_email", "TEXT")
+    # Auditoria 22/ago: último resumo_caso produzido pelo Claude. O Signal 1.8
+    # (confirmação determinística de horário) não chama o modelo, então não tem
+    # resumo pra passar ao create_event — sem isto o evento do Calendar saía com
+    # "(horário confirmado pela escolha do lead)" no lugar do caso.
+    _ensure_column(conn, "leads", "resumo_caso", "TEXT")
     # Reconhecer cliente existente (roadmap 1.6). Timestamp do check
     # contra o person_index — NULL = ainda não checado. Roda 1x por lead.
     _ensure_column(conn, "leads", "cliente_checado_em", "TEXT")

@@ -80,6 +80,7 @@ from noviello_funil.state import (
     get_audio_transcricao,
     get_horarios_oferecidos,
     get_lead_by_conversation,
+    get_resumo_caso,
     lead_com_reuniao_no_horario,
     lead_por_email,
     list_contratos_pos_pendentes,
@@ -108,6 +109,7 @@ from noviello_funil.state import (
     set_audio_transcricao,
     set_horarios_oferecidos,
     set_lead_email,
+    set_resumo_caso,
     set_reuniao,
     transicao,
     transicao_ah_recente,
@@ -2220,7 +2222,14 @@ async def run_poll_cycle(
                         ),
                         horario_escolhido_iso=iso_escolhido,
                         lead_email=_extrair_email_do_lead(transcript),
-                        resumo_caso="(horário confirmado pela escolha do lead)",
+                        # Auditoria 22/ago: reaproveita o resumo que o Claude
+                        # produziu no turno do propor/oferecer. O placeholder
+                        # só sobra se o lead escolheu horário antes de o
+                        # modelo entender o caso (raro).
+                        resumo_caso=(
+                            get_resumo_caso(conn, lead_id)
+                            or "(horário confirmado pela escolha do lead)"
+                        ),
                     )
                     await _handle_confirmar_horario(
                         conn=conn, lead=lead, decisao=decisao_det,
@@ -2333,6 +2342,12 @@ async def run_poll_cycle(
         # que alimenta o teto de forma RESETÁVEL na reativação (antes contava
         # `Lead:` do transcript vitalício e capava o lead que voltava).
         bump_turnos(conn, lead_id)
+
+        # Auditoria 22/ago: persiste o resumo assim que o modelo o produz. O
+        # Signal 1.8 confirma horário SEM Claude e não teria resumo pra passar
+        # ao create_event — o evento saía com placeholder. set_resumo_caso
+        # ignora vazio, então um turno `responder` não apaga o já entendido.
+        set_resumo_caso(conn, lead_id, decisao.resumo_caso or "")
 
         # E3 (auditoria 24/jun; ampliado na revisão adversarial): backstop OAB
         # (Prov. 205/2021) ANTES do dispatch — cobre TODOS os ramos que mandam a

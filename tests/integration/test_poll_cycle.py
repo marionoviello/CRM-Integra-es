@@ -439,6 +439,9 @@ async def test_hash_changed_propor_transitions_and_notifies(db_conn):
     assert lead["estado"] == Estado.AGUARDANDO_HUMANO
     assert lead["proxima_acao_em"] is None
     assert lead["ultimo_transcript_hash"] == _sha(transcript)
+    # Auditoria 22/ago: o ciclo PERSISTE o resumo que o modelo produziu — é o
+    # que o Signal 1.8 reaproveita depois pra não criar evento com placeholder.
+    assert lead["resumo_caso"] == "Cliente quer plano familiar."
     # Two sends: the closing message to lead + notification to Mario.
     assert jurichat.send_message.await_count == 2
     sent_conv_ids = [call.args[0] for call in jurichat.send_message.await_args_list]
@@ -2927,6 +2930,72 @@ async def test_signal_1_8_escolha_deterministica_confirma_sem_claude(db_conn):
     assert any(
         c.args[0] == "C-1" for c in jurichat.send_message.await_args_list
     )
+
+
+# --- Signal 1.8 x resumo do caso (auditoria 22/ago) ------------------------
+
+def _monta_lead_que_escolheu_horario(db_conn):
+    """Cenário comum aos dois testes abaixo: oferta pendente + lead escolhendo."""
+    from noviello_funil.state import set_horarios_oferecidos
+
+    transcript = (
+        "Atendente: Qual seu email?\nLead: camila@exemplo.com\n"
+        "Atendente: Tenho esses horários:\n• ter (16/jun) às 14h\nQual prefere?\n"
+        "Lead: Ter (16/jun) às 14h"
+    )
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    set_horarios_oferecidos(db_conn, lead["id"], [
+        {"iso": "2099-06-16T14:00:00-03:00", "label": "ter (16/jun) às 14h"},
+    ])
+    return transcript, lead
+
+
+@pytest.mark.asyncio
+async def test_signal_1_8_usa_resumo_salvo_no_evento(db_conn):
+    """O evento do Calendar leva o resumo que o Claude produziu ANTES, no turno
+    do propor/oferecer — e não o placeholder. Causa dos 20 de 36 eventos sem
+    resumo na agenda (auditoria 22/ago)."""
+    from noviello_funil.state import set_resumo_caso
+
+    transcript, lead = _monta_lead_que_escolheu_horario(db_conn)
+    set_resumo_caso(
+        db_conn, lead["id"],
+        "Inventário extrajudicial em SP, 3 herdeiros de acordo, 1 imóvel.",
+    )
+
+    jurichat = _make_jurichat(transcript)
+    calendar = _make_calendar_confirma()
+    triagem_fn = AsyncMock(side_effect=AssertionError("Claude não deve ser chamado"))
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20, calendar=calendar,
+    )
+
+    kwargs = calendar.client.create_event.await_args.kwargs
+    assert kwargs["resumo_caso"] == (
+        "Inventário extrajudicial em SP, 3 herdeiros de acordo, 1 imóvel."
+    )
+
+
+@pytest.mark.asyncio
+async def test_signal_1_8_sem_resumo_salvo_mantem_placeholder(db_conn):
+    """Sem resumo algum (lead escolheu horário antes de o bot entender o caso),
+    o placeholder segue como fallback — não quebra, só não inventa."""
+    transcript, _ = _monta_lead_que_escolheu_horario(db_conn)
+
+    jurichat = _make_jurichat(transcript)
+    calendar = _make_calendar_confirma()
+    triagem_fn = AsyncMock(side_effect=AssertionError("Claude não deve ser chamado"))
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20, calendar=calendar,
+    )
+
+    kwargs = calendar.client.create_event.await_args.kwargs
+    assert kwargs["resumo_caso"] == "(horário confirmado pela escolha do lead)"
 
 
 @pytest.mark.asyncio

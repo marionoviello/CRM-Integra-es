@@ -10,6 +10,7 @@ from noviello_funil.state import (
     bump_turnos,
     create_lead_if_absent,
     get_lead_by_conversation,
+    get_resumo_caso,
     is_webhook_processed,
     lead_com_reuniao_no_horario,
     lead_por_email,
@@ -22,10 +23,52 @@ from noviello_funil.state import (
     record_lead_message_received,
     register_error,
     set_lead_email,
+    set_resumo_caso,
     set_reuniao,
     transicao,
     update_transcript_hash,
 )
+
+
+def _lead_novo(conn, sufixo="R1"):
+    return create_lead_if_absent(
+        conn,
+        jurichat_lead_id=f"L-{sufixo}",
+        jurichat_conversation_id=f"C-{sufixo}",
+        contato_telefone="5500000000001",
+        contato_nome="Fulano Teste",
+    )
+
+
+# --- resumo_caso (auditoria 22/ago) ---------------------------------------
+
+def test_resumo_caso_comeca_vazio(db_conn):
+    lead = _lead_novo(db_conn)
+    assert get_resumo_caso(db_conn, lead["id"]) is None
+
+
+def test_resumo_caso_ida_e_volta(db_conn):
+    lead = _lead_novo(db_conn)
+    set_resumo_caso(db_conn, lead["id"], "Inventário extrajudicial, 3 herdeiros.")
+    assert get_resumo_caso(db_conn, lead["id"]) == (
+        "Inventário extrajudicial, 3 herdeiros."
+    )
+
+
+def test_resumo_vazio_nao_apaga_o_existente(db_conn):
+    """Turno `responder` vem sem resumo — não pode zerar o que já se sabia."""
+    lead = _lead_novo(db_conn)
+    set_resumo_caso(db_conn, lead["id"], "Caso real entendido pelo bot.")
+    set_resumo_caso(db_conn, lead["id"], "")
+    set_resumo_caso(db_conn, lead["id"], "   ")
+    assert get_resumo_caso(db_conn, lead["id"]) == "Caso real entendido pelo bot."
+
+
+def test_resumo_mais_recente_sobrescreve(db_conn):
+    lead = _lead_novo(db_conn)
+    set_resumo_caso(db_conn, lead["id"], "Primeira leitura do caso.")
+    set_resumo_caso(db_conn, lead["id"], "Leitura revisada, mais completa.")
+    assert get_resumo_caso(db_conn, lead["id"]) == "Leitura revisada, mais completa."
 
 
 def test_create_lead_if_absent_creates_new(db_conn):

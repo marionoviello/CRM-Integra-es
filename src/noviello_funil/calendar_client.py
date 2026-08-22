@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import datetime
 import logging
+import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -35,6 +37,37 @@ import httpx
 from .outbound import OutboundError, with_retry
 
 logger = logging.getLogger(__name__)
+
+# Auditoria 22/ago: o push name do WhatsApp vira título de evento na agenda do
+# Mario, e vinha cru — "[Atendimento] 🙏", "Lu🌹", "14 99181-7005" ou vazio
+# (lead 207). Limpamos só pra EXIBIÇÃO; o contato_nome no banco fica intacto,
+# porque outros 20+ pontos (notificações, conflito, contrato) dependem do cru.
+# Variation selector-16, zero-width joiner e zero-width space — sobram quando
+# se remove o emoji e deixariam lixo invisível no título.
+_SEM_LARGURA = "️‍​"
+
+
+def _nome_exibicao(nome: str | None, telefone: str) -> str:
+    """Nome apresentável pro título do evento.
+
+    Tira emoji/pictogramas e, quando o que sobra não identifica ninguém
+    (vazio ou só dígitos), cai pros 4 últimos dígitos do telefone — que ao
+    menos permite achar a conversa no WhatsApp.
+    """
+    bruto = (nome or "").strip()
+    sem_emoji = "".join(
+        c for c in bruto
+        if unicodedata.category(c) not in {"So", "Sk"} and c not in _SEM_LARGURA
+    )
+    limpo = re.sub(r"\s+", " ", sem_emoji).strip(" -_.,·|")
+    # Push name que é só o número ("14 99181-7005") não é nome.
+    if limpo and not re.search(r"[A-Za-zÀ-ÿ]", limpo):
+        limpo = ""
+    if limpo:
+        return limpo
+    digits = "".join(c for c in telefone if c.isdigit())
+    return f"Lead {digits[-4:]}" if len(digits) >= 4 else "Lead"
+
 
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
 _CAL_BASE = "https://www.googleapis.com/calendar/v3"
@@ -381,8 +414,10 @@ class GoogleCalendarClient:
         digits = "".join(c for c in lead_telefone if c.isdigit())
         wa_link = f"https://wa.me/{digits}" if digits else lead_telefone
 
+        nome_titulo = _nome_exibicao(lead_nome, lead_telefone)
+
         body: dict[str, Any] = {
-            "summary": f"[Atendimento] {lead_nome}",
+            "summary": f"[Atendimento] {nome_titulo}",
             "description": (
                 f"Lead qualificado pelo bot.\n\n"
                 f"Nome: {lead_nome}\n"

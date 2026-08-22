@@ -9,6 +9,7 @@ import pytest
 from noviello_funil.calendar_client import (
     GoogleCalendarClient,
     Slot,
+    _nome_exibicao,
     _overlaps_any,
 )
 
@@ -599,3 +600,44 @@ async def test_list_events_parseia_eventos(respx_mock):
     externos = [a for a in e1["attendees"] if not a["self"] and not a["organizer"]]
     assert externos == [{"email": "joao@exemplo.com", "self": False, "organizer": False}]
     assert eventos[1]["start_iso"] is None  # all-day
+
+
+# --- _nome_exibicao (auditoria 22/ago) ------------------------------------
+
+TEL = "5511900000001"
+
+
+def test_nome_limpo_passa_intacto():
+    assert _nome_exibicao("Alexandre Beneducci", TEL) == "Alexandre Beneducci"
+
+
+def test_nome_com_acento_preservado():
+    assert _nome_exibicao("Dayane Félix", TEL) == "Dayane Félix"
+
+
+def test_emoji_no_fim_removido():
+    assert _nome_exibicao("Lu🌹", TEL) == "Lu"
+    assert _nome_exibicao("Glauce 🌷", TEL) == "Glauce"
+
+
+def test_nome_so_de_emoji_cai_pro_telefone():
+    assert _nome_exibicao("🙏", TEL) == "Lead 0001"
+    assert _nome_exibicao("🙏🙌", TEL) == "Lead 0001"
+
+
+def test_nome_vazio_ou_none_cai_pro_telefone():
+    # Lead 207 entrou sem nome nenhum no banco.
+    assert _nome_exibicao("", TEL) == "Lead 0001"
+    assert _nome_exibicao(None, TEL) == "Lead 0001"
+
+
+def test_push_name_que_e_so_telefone_cai_pro_telefone():
+    assert _nome_exibicao("14 99181-7005", TEL) == "Lead 0001"
+
+
+def test_sem_telefone_usavel_usa_rotulo_generico():
+    assert _nome_exibicao("🙏", "") == "Lead"
+
+
+def test_espacos_colapsados():
+    assert _nome_exibicao("  Maria   Silva  ", TEL) == "Maria Silva"
