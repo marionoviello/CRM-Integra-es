@@ -215,3 +215,56 @@ def criar_andamento(
     if r.status_code >= 400:
         return False, f"http_{r.status_code}: {r.text[:400]}"
     return True, "ok"
+
+
+def montar_mensagem(
+    casadas: list[dict], fora_carteira: list[dict], n_tarefas: int,
+) -> str | None:
+    """Resumo WhatsApp do run. None = nada novo (silêncio)."""
+    total = len(casadas) + len(fora_carteira)
+    if not total:
+        return None
+    plural = "intimações novas" if total > 1 else "intimação nova"
+    blocos = [f"📨 *AASP: {total} {plural} no recorte*"]
+    ok = sum(1 for c in casadas if c.get("andamento_ok"))
+    if ok:
+        blocos.append(f"✅ {ok} registrada(s) como andamento [AASP] no Juridiq.")
+    falhas = len(casadas) - ok
+    if falhas:
+        blocos.append(
+            f"⚠️ {falhas} falhou(aram) ao gravar — nova tentativa no próximo run."
+        )
+    if n_tarefas:
+        blocos.append(
+            f"✅ {n_tarefas} virou tarefa no painel (prazo SUGERIDO — confira "
+            "a contagem)."
+        )
+
+    urgentes = [c for c in casadas if c.get("urgente")]
+    if urgentes:
+        blocos.append("\n⚠️ *Urgentes:*")
+        for c in urgentes[:MAX_ITENS]:
+            linha = f"• {c.get('data') or '?'} — {c.get('processo') or '(sem nº)'}"
+            motivo = (c.get("motivo") or "").strip()
+            prazo = (c.get("prazo") or "").strip()
+            detalhe = motivo
+            if prazo:
+                detalhe = f"{motivo} (prazo: {prazo})" if motivo else f"prazo: {prazo}"
+            if detalhe:
+                linha += f"\n   _{detalhe[:_RESUMO_CHARS]}_"
+            blocos.append(linha)
+
+    if fora_carteira:
+        blocos.append(
+            "\n🚨 *Fora da carteira* (intimação de processo que NÃO está no "
+            "Juridiq — cadastrar):"
+        )
+        for f in fora_carteira[:MAX_ITENS]:
+            ref = f.get("processo") or f.get("jornal") or "(sem referência)"
+            blocos.append(f"• {f.get('data') or '?'} — {ref}")
+
+    blocos.append(
+        "\nFonte: recorte AASP. Andamentos entram privados (não vão pro "
+        "cliente no Jurichat)."
+    )
+    return "\n".join(blocos)

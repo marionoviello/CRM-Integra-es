@@ -107,6 +107,36 @@ def test_normalizar_item_sem_processo_nao_quebra():
     assert item["teor"] == "Edital genérico."
 
 
+# --- montar_mensagem ----------------------------------------------------------
+
+def test_montar_mensagem_vazia():
+    from noviello_funil.aasp_intimacoes import montar_mensagem
+    assert montar_mensagem([], [], 0) is None
+
+
+def test_montar_mensagem_completa():
+    from noviello_funil.aasp_intimacoes import montar_mensagem
+    casadas = [
+        {"processo": "1234567-08.2026.8.26.0100", "data": "20/08/2026",
+         "jornal": "DJE SP", "urgente": True, "motivo": "sentença publicada",
+         "prazo": "15 dias", "andamento_ok": True},
+        {"processo": "7654321-08.2026.8.26.0200", "data": "20/08/2026",
+         "jornal": "DJE SP", "urgente": False, "motivo": "",
+         "prazo": "", "andamento_ok": True},
+    ]
+    fora = [{"processo": "9999999-08.2026.8.26.0300", "data": "20/08/2026",
+             "jornal": "DJE SP", "urgente": True,
+             "motivo": "citação", "prazo": ""}]
+    txt = montar_mensagem(casadas, fora, n_tarefas=1)
+    assert "3" in txt                       # total de novas
+    assert "2" in txt                       # viraram andamento
+    assert "sentença publicada" in txt
+    assert "prazo: 15 dias" in txt
+    assert "9999999-08.2026.8.26.0300" in txt
+    assert "fora da carteira" in txt.lower()
+    assert "tarefa" in txt.lower()
+
+
 # --- indexar_carteira / criar_andamento --------------------------------------
 
 def _jq_client():
