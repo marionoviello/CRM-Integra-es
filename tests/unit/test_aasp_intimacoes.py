@@ -107,6 +107,68 @@ def test_normalizar_item_sem_processo_nao_quebra():
     assert item["teor"] == "Edital genérico."
 
 
+# --- processar_novas ----------------------------------------------------------
+
+def test_processar_novas_casa_grava_e_marca(respx_mock, conn):
+    from noviello_funil.aasp_intimacoes import normalizar_item, processar_novas
+    respx_mock.post("https://api.juridiq.com.br/lawSuit/movements").mock(
+        return_value=httpx.Response(201, json={"id": "mv-1"}),
+    )
+    novas = [normalizar_item({
+        "numeroProcesso": "1234567-08.2026.8.26.0100",
+        "conteudo": "Intime-se.", "dataDisponibilizacao": "20/08/2026",
+        "jornal": "DJE SP",
+    })]
+    idx = {"12345670820268260100": "uuid-1"}
+    c = _jq_client()
+    try:
+        casadas, fora = processar_novas(c, conn, novas, idx)
+    finally:
+        c.close()
+    assert len(casadas) == 1 and not fora
+    assert casadas[0]["andamento_ok"] is True
+    assert casadas[0]["law_suit_id"] == "uuid-1"
+    # marcada como vista SÓ depois do 201
+    row = conn.execute(
+        "SELECT law_suit_id FROM aasp_intimacao_vista WHERE chave = ?",
+        (novas[0]["chave"],),
+    ).fetchone()
+    assert row["law_suit_id"] == "uuid-1"
+
+
+def test_processar_novas_falha_no_post_nao_marca(respx_mock, conn):
+    from noviello_funil.aasp_intimacoes import normalizar_item, processar_novas
+    respx_mock.post("https://api.juridiq.com.br/lawSuit/movements").mock(
+        return_value=httpx.Response(500, json={"message": "boom"}),
+    )
+    novas = [normalizar_item({
+        "numeroProcesso": "1234567-08.2026.8.26.0100", "conteudo": "X",
+    })]
+    idx = {"12345670820268260100": "uuid-1"}
+    c = _jq_client()
+    try:
+        casadas, fora = processar_novas(c, conn, novas, idx)
+    finally:
+        c.close()
+    assert casadas[0]["andamento_ok"] is False
+    n = conn.execute("SELECT COUNT(*) FROM aasp_intimacao_vista").fetchone()[0]
+    assert n == 0    # não marcada → retry no próximo run
+
+
+def test_processar_novas_fora_da_carteira_nao_posta(respx_mock, conn):
+    from noviello_funil.aasp_intimacoes import normalizar_item, processar_novas
+    novas = [normalizar_item({
+        "numeroProcesso": "9999999-08.2026.8.26.0300", "conteudo": "X",
+    })]
+    c = _jq_client()
+    try:
+        casadas, fora = processar_novas(c, conn, novas, {})
+    finally:
+        c.close()
+    assert not casadas and len(fora) == 1
+    assert not respx_mock.calls    # nenhum POST
+
+
 # --- montar_mensagem ----------------------------------------------------------
 
 def test_montar_mensagem_vazia():

@@ -268,3 +268,228 @@ def montar_mensagem(
         "cliente no Jurichat)."
     )
     return "\n".join(blocos)
+
+
+def processar_novas(
+    jq: httpx.Client, conn, novas: list[dict], idx: dict[str, str],
+) -> tuple[list[dict], list[dict]]:
+    """Cria o andamento das casadas; separa as fora-da-carteira.
+
+    try/except POR intimação (padrão publicacoes.py): uma falha não
+    derruba as demais. Vista só é marcada após 201 — retry natural.
+    Fora-da-carteira NÃO é marcada aqui (só depois do alerta enviado,
+    no main — senão um crash antes do alerta silenciaria pra sempre).
+    """
+    casadas, fora = [], []
+    for item in novas:
+        try:
+            law_suit_id = idx.get(item["processo_digitos"] or "—")
+            if not law_suit_id:
+                fora.append(item)
+                continue
+            ok, det = criar_andamento(
+                jq, law_suit_id, montar_conteudo(item),
+                instance=instancia_sugerida(item["processo_digitos"]),
+            )
+            item["law_suit_id"] = law_suit_id
+            item["andamento_ok"] = ok
+            if ok:
+                marcar_vista(conn, item["chave"], item["processo"], law_suit_id)
+            else:
+                logger.error(
+                    "aasp: andamento falhou processo=%s: %s",
+                    item["processo"], det,
+                )
+            casadas.append(item)
+        except Exception as exc:
+            logger.exception(
+                "aasp: erro na intimação %s: %s", item.get("chave"), exc,
+            )
+    return casadas, fora
+
+
+def _criar_tarefas(settings, conn, jq: httpx.Client, casadas: list[dict]) -> int:
+    """Urgente + andamento gravado → TAREFA de prazo (reuso prazo_tarefa).
+
+    Idempotência pela MESMA tabela das publicações (tarefa_publicacao),
+    com publication_id prefixado "aasp:". Falha em tarefa não derruba
+    nada (o alerta é o canal fail-safe).
+    """
+    from noviello_funil.prazo_tarefa import (
+        calcular_prazo_sugerido,
+        criar_tarefa,
+        deve_criar_tarefa,
+        ja_criada,
+        marcar_criada,
+        montar_corpo_tarefa,
+        montar_descricao,
+        montar_titulo,
+    )
+
+    if not (settings.aasp_criar_tarefa and settings.task_column_id):
+        return 0
+    hoje = datetime.date.today()
+    n = 0
+    for item in casadas:
+        try:
+            if not (deve_criar_tarefa(item) and item.get("andamento_ok")):
+                continue
+            pid = f"aasp:{item['chave']}"
+            if ja_criada(conn, pid):
+                continue
+            corpo = montar_corpo_tarefa(
+                titulo=montar_titulo(
+                    item.get("motivo") or "intimação AASP", item["processo"],
+                ),
+                descricao=montar_descricao(
+                    item.get("motivo"), item.get("prazo"), item.get("teor"),
+                    item.get("data"),
+                ),
+                final_date=calcular_prazo_sugerido(
+                    item.get("prazo"), item.get("data"), hoje=hoje,
+                ),
+                initial_date=hoje.isoformat(),
+                law_suit_id=item["law_suit_id"],
+                column_id=settings.task_column_id,
+                priority=settings.task_priority,
+            )
+            tid, det = criar_tarefa(jq, corpo)
+            if not tid:
+                logger.error("aasp: tarefa falhou %s: %s", item["processo"], det)
+                continue
+            try:
+                marcar_criada(conn, pid, item["processo"], tid)
+            except Exception as exc:
+                logger.error(
+                    "aasp: tarefa %s CRIADA mas marcar_criada falhou (órfã): %s",
+                    tid, exc,
+                )
+            n += 1
+        except Exception as exc:
+            logger.exception(
+                "aasp: erro na tarefa de %s: %s", item.get("chave"), exc,
+            )
+    return n
+
+
+def main() -> int:
+    """Entry point do console script ``noviello-aasp``.
+
+    Nada novo no recorte → exit 0 silencioso.
+    """
+    import asyncio
+
+    from anthropic import AsyncAnthropic
+
+    from noviello_funil.config import Settings
+    from noviello_funil.db import connect, run_migrations
+    from noviello_funil.outbound import JurichatClient, notify_mario
+    from noviello_funil.publicacoes import classificar_urgencia
+
+    settings = Settings()
+    logging.basicConfig(level=settings.log_level)
+
+    for campo in ("aasp_chave", "juridiq_api_key"):
+        if not getattr(settings, campo):
+            logger.warning("aasp: %s não configurada — pulando", campo.upper())
+            return 0
+    if (
+        not settings.mario_conversation_id
+        or settings.mario_conversation_id == "placeholder-pendente"
+    ):
+        logger.warning("aasp: MARIO_CONVERSATION_ID não configurado — pulando")
+        return 0
+
+    hoje = datetime.date.today()
+    aasp = httpx.Client(base_url=settings.aasp_base_url, timeout=30.0)
+    brutos: list[tuple[str, dict]] = []
+    try:
+        for i in range(settings.aasp_dias_janela):
+            d = hoje - datetime.timedelta(days=i)
+            for raw in buscar_intimacoes(aasp, settings.aasp_chave, d):
+                brutos.append((d.isoformat(), raw))
+    finally:
+        aasp.close()
+    logger.info(
+        "aasp: %d itens na janela de %d dias",
+        len(brutos), settings.aasp_dias_janela,
+    )
+
+    conn = connect(settings.database_path)
+    run_migrations(conn)
+    jq = httpx.Client(
+        base_url=settings.juridiq_base_url,
+        headers={"x-juridiq-api-key": settings.juridiq_api_key},
+        timeout=30.0,
+    )
+    try:
+        novas = []
+        for data_consulta, raw in brutos:
+            salvar_raw(conn, raw, data_consulta)
+            item = normalizar_item(raw)
+            if not ja_vista(conn, item["chave"]):
+                novas.append(item)
+        logger.info("aasp: %d nova(s)", len(novas))
+        if not novas:
+            return 0
+
+        idx = indexar_carteira(jq)
+        casadas, fora = processar_novas(jq, conn, novas, idx)
+
+        async def _run() -> None:
+            anthropic = AsyncAnthropic(api_key=settings.anthropic_api_key)
+            # Classifica TODAS as novas (casadas e fora) de uma vez; o
+            # id/resumo que o classificador espera vem do adapter abaixo.
+            para_classificar = [
+                {**it, "id": it["chave"],
+                 "resumo": f"Intimação AASP — {it['jornal'] or 'diário'}"}
+                for it in casadas + fora
+            ]
+            classificadas = await classificar_urgencia(
+                anthropic, settings.anthropic_model, para_classificar,
+            )
+            por_chave = {c["chave"]: c for c in classificadas}
+            for it in casadas + fora:
+                v = por_chave.get(it["chave"], {})
+                it["urgente"] = bool(v.get("urgente"))
+                it["motivo"] = v.get("motivo") or ""
+                it["prazo"] = v.get("prazo") or ""
+
+            n_tarefas = 0
+            try:
+                n_tarefas = _criar_tarefas(settings, conn, jq, casadas)
+            except Exception as exc:
+                logger.exception(
+                    "aasp: criação de tarefas falhou (alerta segue): %s", exc,
+                )
+
+            texto = montar_mensagem(casadas, fora, n_tarefas)
+            if texto is None:
+                return
+            logger.info("aasp:\n%s", texto)
+            jurichat = JurichatClient(
+                api_key=settings.jurichat_api_key,
+                base_url=settings.jurichat_base_url,
+                bot_user_id=settings.jurichat_bot_user_id,
+            )
+            try:
+                await notify_mario(
+                    jurichat,
+                    mario_conversation_id=settings.mario_conversation_id,
+                    mensagem=texto,
+                )
+            finally:
+                await jurichat.aclose()
+            # Alerta enviado → agora sim as fora-da-carteira estão tratadas.
+            for it in fora:
+                marcar_vista(conn, it["chave"], it["processo"], "")
+
+        asyncio.run(_run())
+    finally:
+        jq.close()
+        conn.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

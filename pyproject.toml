@@ -39,6 +39,7 @@ noviello-higiene = "noviello_funil.higiene_base:main"
 noviello-gerencial = "noviello_funil.relatorio_gerencial:main"
 noviello-triagem-financeira = "noviello_funil.triagem_financeira:main"
 noviello-boletim = "noviello_funil.boletim_mensal:main"
+noviello-aasp = "noviello_funil.aasp_intimacoes:main"
 
 [build-system]
 requires = ["hatchling"]
