@@ -293,6 +293,30 @@ async def test_noshow_sem_acao_em_1h_cobra_o_mario_e_mantem_o_link(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_noshow_nao_martela_pra_sempre_com_canal_morto(db_conn):
+    """Cenário 24/jul (canais de alerta mortos): sem teto, a reunião nunca era
+    limpa — retry a cada 30s pra sempre, e o lead ficava com reuniao_em preso
+    (sem follow-up). Passado o teto, sai do ciclo mesmo sem conseguir avisar."""
+    lead_id = _insert_lead(db_conn, nome="Pedro")
+    reuniao = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=25)
+    db_conn.execute(
+        "UPDATE leads SET reuniao_em=?, reuniao_event_id='evt-1', "
+        "noshow_token='tok-abc' WHERE id=?",
+        (reuniao.isoformat(), lead_id),
+    )
+    jurichat = _make_jurichat()
+    jurichat.send_message = AsyncMock(side_effect=httpx.RequestError("canal morto"))
+
+    await run_reminder_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat,
+        mario_conversation_id="MARIO-1", base_url="https://funil.example",
+    )
+
+    lead = db_conn.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+    assert lead["reuniao_em"] is None, "passado o teto, a reunião sai do ciclo"
+
+
+@pytest.mark.asyncio
 async def test_reuniao_passada_sem_ping_nao_cobra_ninguem(db_conn):
     """Reunião antiga que nunca gerou ping (ex.: importada já vencida) segue
     saindo em silêncio — cobrar remarcação de algo que ninguém acompanhou seria

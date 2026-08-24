@@ -1117,14 +1117,18 @@ def classificar_erro_api(exc: BaseException) -> str | None:
     if not isinstance(status, int):
         status = None
 
-    if any(m in texto for m in _MARCADORES_SALDO):
-        return "saldo"
+    # O STATUS manda quando existe: um 429 cuja mensagem cite "quota" não é
+    # saldo zerado, e dizer que é manda o Mario checar a conta errada no meio
+    # do incidente. Os marcadores de texto valem pro 400 de billing (que é
+    # indistinguível de um 400 comum sem ler a mensagem) e pro caso sem status.
     if status in (401, 403):
         return "chave"
     if status == 429:
         return "rate_limit"
     if status is not None and status >= 500:
         return "sobrecarga"
+    if any(m in texto for m in _MARCADORES_SALDO):
+        return "saldo"
     nome = type(exc).__name__.lower()
     if "connection" in nome or "timeout" in nome:
         return "conexao"
@@ -1255,7 +1259,11 @@ async def _alertar_nao_entregues(
     for item in pendentes[:_ENTREGA_MAX_LISTADOS]:
         lead, alvo = item["lead"], item["alvo"]
         nota = ""
-        if reenviar and item["e_ultima"] and alvo.get("content"):
+        # Mensagem digitada pela EQUIPE no painel: o bot reenviar seria falar
+        # no lugar de quem escreveu. Avisa e devolve a decisão a ela.
+        if reenviar and _msg_eh_de_humano(alvo.get("content") or ""):
+            nota = " — texto da equipe, não reenviei"
+        elif reenviar and item["e_ultima"] and alvo.get("content"):
             # Carimba ANTES de compor o aviso: o cliente nunca pode receber o
             # texto duas vezes, nem que o aviso ao Mario se perca depois.
             marcar_falha_vista(conn, str(alvo["id"]), lead_id=lead["id"])
@@ -2669,6 +2677,12 @@ async def _cancelar_reuniao_auto(
 
 _NOSHOW_GRACE = datetime.timedelta(hours=1)
 
+# Teto do no-show: passado isto a reunião sai do ciclo mesmo SEM conseguir
+# avisar. Sem teto, um canal de alerta morto (cenário 24/jul, quando a
+# reconexão do Fixo matou todos os ids) prendia o `reuniao_em` do lead pra
+# sempre — re-tentando a cada 30s e bloqueando o follow-up dele.
+_NOSHOW_TETO = datetime.timedelta(hours=24)
+
 
 async def _ping_noshow(
     conn: Any,
@@ -3112,13 +3126,20 @@ async def run_reminder_cycle(
                 # limpa EM SILÊNCIO: o lead que faltou sumia do radar e ninguém
                 # oferecia remarcação. Cobra uma última vez, preservando o token
                 # (o link de 1 toque é o que oferece a remarcação ao lead).
-                if lead["noshow_token"]:
+                if lead["noshow_token"] and passou < _NOSHOW_TETO:
                     if not await _cobrar_noshow_final(
                         conn, lead, jurichat, mario_conversation_id, base_url,
                     ):
                         continue  # aviso não saiu → re-tenta no próximo tick
                 else:
-                    logger.info("lead=%s reuniao passou, limpando", lead["id"])
+                    if lead["noshow_token"]:
+                        logger.warning(
+                            "lead=%s no-show sem aviso entregue em %s — limpando "
+                            "no teto pra não prender a reunião",
+                            lead["id"], _NOSHOW_TETO,
+                        )
+                    else:
+                        logger.info("lead=%s reuniao passou, limpando", lead["id"])
                     clear_reuniao(conn, lead["id"])
             elif (
                 passou >= datetime.timedelta(minutes=5)

@@ -3337,6 +3337,37 @@ async def test_reenvio_automatico_manda_o_texto_uma_vez(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_reenvio_nao_repete_texto_digitado_por_humano(db_conn):
+    """OUTBOUND inclui o que a EQUIPE digita no painel (o Fixo prefixa
+    "Noviello Advocacia:"). O bot reenviar a fala de um humano seria falar no
+    lugar dele — avisa e deixa a decisão com quem escreveu."""
+    transcript = "Lead: bom dia\nAtendente: Noviello Advocacia: bom dia, Dr. retorna já"
+    _insert_lead_due_for_poll(db_conn, transcript_hash=_sha(transcript))
+    messages = [
+        {"id": "m1", "direction": "INBOUND", "content": "bom dia"},
+        {"id": "m2", "direction": "OUTBOUND",
+         "content": "Noviello Advocacia: bom dia, Dr. retorna já",
+         "externalStatus": "FAILED"},
+    ]
+    jurichat = _make_jurichat_com_mensagens(transcript, messages)
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat,
+        triagem_fn=AsyncMock(side_effect=AssertionError("hash igual")),
+        mario_conversation_id="mario-conv", max_turnos=20,
+        reenvio_falha_ativo=True,
+    )
+
+    assert [c for c in jurichat.send_message.call_args_list if c.args[0] == "C-1"] == []
+    para_mario = [
+        c.args[1] for c in jurichat.send_message.call_args_list
+        if c.args[0] == "mario-conv"
+    ]
+    assert len(para_mario) == 1
+    assert "equipe" in para_mario[0].lower()
+
+
+@pytest.mark.asyncio
 async def test_reenvio_so_vale_pra_ultima_mensagem(db_conn):
     """Se a conversa ANDOU depois da falha, repetir o texto velho é confuso —
     avisa o Mario e não reenvia."""

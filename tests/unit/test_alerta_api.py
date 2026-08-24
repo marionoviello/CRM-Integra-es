@@ -47,6 +47,13 @@ def test_rate_limit():
     assert classificar_erro_api(_ErroAPI("rate limited", 429)) == "rate_limit"
 
 
+def test_429_que_cita_quota_nao_vira_saldo_zerado():
+    # O status manda: dizer "SALDO ZERADO" num rate limit manda o Mario checar
+    # a conta errada no meio de um incidente.
+    exc = _ErroAPI("rate_limit_error: quota exceeded for this minute", 429)
+    assert classificar_erro_api(exc) == "rate_limit"
+
+
 @pytest.mark.parametrize("status", [500, 529])
 def test_erro_do_servidor_e_sobrecarga(status):
     assert classificar_erro_api(_ErroAPI("overloaded", status)) == "sobrecarga"
