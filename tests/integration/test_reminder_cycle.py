@@ -249,6 +249,73 @@ async def test_noshow_ping_falha_no_envio_nao_marca_token_e_retenta(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_noshow_sem_acao_em_1h_cobra_o_mario_e_mantem_o_link(db_conn):
+    """Follow-up de no-show: passada 1h sem ação, a reunião era limpa EM
+    SILÊNCIO — o lead que faltou sumia do radar e ninguém oferecia remarcação.
+
+    Agora o ciclo cobra o Mario uma última vez e PRESERVA o token, pra o link
+    de 1 toque (que oferece a remarcação ao lead) continuar valendo depois de
+    a reunião sair do sistema."""
+    lead_id = _insert_lead(db_conn, nome="Pedro")
+    reuniao = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=70)
+    db_conn.execute(
+        "UPDATE leads SET reuniao_em=?, reuniao_event_id='evt-1', "
+        "noshow_token='tok-abc' WHERE id=?",
+        (reuniao.isoformat(), lead_id),
+    )
+    jurichat = _make_jurichat()
+
+    await run_reminder_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat,
+        mario_conversation_id="MARIO-1", base_url="https://funil.example",
+    )
+
+    para_mario = [
+        c.args[1] for c in jurichat.send_message.call_args_list
+        if c.args[0] == "MARIO-1"
+    ]
+    assert len(para_mario) == 1
+    assert "/reuniao/cancelar/tok-abc" in para_mario[0]
+    # Nada ao lead: o bot não enxerga presença no Meet (decisão do Mario 22/jun).
+    assert [c for c in jurichat.send_message.call_args_list if c.args[0] == "C-1"] == []
+
+    lead = db_conn.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+    assert lead["reuniao_em"] is None, "a reunião sai do ciclo"
+    assert lead["noshow_token"] == "tok-abc", "o link de remarcação segue válido"
+
+    # Segundo tick: nada de novo (a reunião já saiu do ciclo).
+    jurichat2 = _make_jurichat()
+    await run_reminder_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat2,
+        mario_conversation_id="MARIO-1", base_url="https://funil.example",
+    )
+    assert jurichat2.send_message.call_args_list == []
+
+
+@pytest.mark.asyncio
+async def test_reuniao_passada_sem_ping_nao_cobra_ninguem(db_conn):
+    """Reunião antiga que nunca gerou ping (ex.: importada já vencida) segue
+    saindo em silêncio — cobrar remarcação de algo que ninguém acompanhou seria
+    ruído."""
+    lead_id = _insert_lead(db_conn, nome="Pedro")
+    reuniao = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=3)
+    db_conn.execute(
+        "UPDATE leads SET reuniao_em=?, reuniao_event_id='evt-1' WHERE id=?",
+        (reuniao.isoformat(), lead_id),
+    )
+    jurichat = _make_jurichat()
+
+    await run_reminder_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat,
+        mario_conversation_id="MARIO-1", base_url="https://funil.example",
+    )
+
+    assert jurichat.send_message.call_args_list == []
+    lead = db_conn.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+    assert lead["reuniao_em"] is None
+
+
+@pytest.mark.asyncio
 async def test_reuniao_em_invalido_e_limpa_e_alerta_mario(db_conn):
     """D5 (auditoria 24/jun): reunião com reuniao_em inparseável (fantasma) é
     LIMPA + alerta o Mario, em vez de ficar presa pra sempre no ciclo (sem

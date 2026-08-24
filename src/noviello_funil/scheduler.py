@@ -2677,6 +2677,55 @@ async def _ping_noshow(
         marcar_noshow_avisado(conn, lead["id"], token)
 
 
+async def _cobrar_noshow_final(
+    conn: Any,
+    lead: dict[str, Any],
+    jurichat: JurichatClient,
+    mario_conversation_id: str,
+    base_url: str,
+) -> bool:
+    """Última cobrança de no-show, 1h depois: tira a reunião do ciclo mas
+    mantém o link de remarcação vivo. Retorna se pode seguir (aviso saiu).
+
+    O bot NÃO fala com o lead aqui: ele não enxerga presença no Meet, e mandar
+    "não conseguimos te encontrar" pra quem compareceu é pior que o silêncio
+    (por isso o fluxo é semi-auto desde 22/jun). Quem toca o link é o Mario.
+
+    ``clear_reuniao`` zera o noshow_token (single-use) — re-carimbamos DEPOIS,
+    senão o link morreria justo quando ele é a única forma de oferecer a
+    remarcação.
+    """
+    token = lead["noshow_token"]
+    if not mario_conversation_id:
+        clear_reuniao(conn, lead["id"])
+        marcar_noshow_avisado(conn, lead["id"], token)
+        return True
+
+    link = (
+        f"{base_url.rstrip('/')}/reuniao/cancelar/{token}"
+        if base_url else "(FUNIL_BASE_URL não configurada)"
+    )
+    enviado = await notify_mario(
+        jurichat,
+        mario_conversation_id=mario_conversation_id,
+        mensagem=(
+            "🕐 *No-show sem desfecho*\n\n"
+            f"Lead: {lead['contato_nome']}\n"
+            f"Tel: {lead['contato_telefone']}\n\n"
+            "Já faz 1h da reunião e não vi ação. Tirei o encontro dos "
+            "lembretes.\n\n"
+            "Se o lead não apareceu, ofereça a remarcação em 1 toque "
+            "(o link segue valendo):\n"
+            f"{link}"
+        ),
+    )
+    if not enviado:
+        return False
+    clear_reuniao(conn, lead["id"])
+    marcar_noshow_avisado(conn, lead["id"], token)
+    return True
+
+
 def _convidados_externos(ev: dict[str, Any]) -> list[str]:
     """D4 (25/jun): emails dos attendees que NÃO são o dono/organizador do
     calendário (flags self/organizer do Google) — i.e., o cliente convidado."""
@@ -3010,9 +3059,19 @@ async def run_reminder_cycle(
         if delta.total_seconds() < 0:
             passou = -delta
             if passou >= _NOSHOW_GRACE:
-                # Bem passada (além da janela de no-show) → limpa.
-                logger.info("lead=%s reuniao passou, limpando", lead["id"])
-                clear_reuniao(conn, lead["id"])
+                # Bem passada (além da janela de no-show) → sai do ciclo.
+                # Se houve ping de no-show e o Mario não agiu, a reunião era
+                # limpa EM SILÊNCIO: o lead que faltou sumia do radar e ninguém
+                # oferecia remarcação. Cobra uma última vez, preservando o token
+                # (o link de 1 toque é o que oferece a remarcação ao lead).
+                if lead["noshow_token"]:
+                    if not await _cobrar_noshow_final(
+                        conn, lead, jurichat, mario_conversation_id, base_url,
+                    ):
+                        continue  # aviso não saiu → re-tenta no próximo tick
+                else:
+                    logger.info("lead=%s reuniao passou, limpando", lead["id"])
+                    clear_reuniao(conn, lead["id"])
             elif (
                 passou >= datetime.timedelta(minutes=5)
                 and lead["noshow_token"] is None
