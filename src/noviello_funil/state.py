@@ -21,6 +21,12 @@ from typing import Any, Final
 _MAX_RETRY_LOCK: Final = 4
 _RETRY_LOCK_BASE: Final = 0.05
 
+# Prefixo de `erro_atual` para falha de INFRA da API (saldo, chave, rate limit,
+# sobrecarga, conexão). Marca o erro como GLOBAL — não é sintoma daquele lead —
+# e é o que o circuit-breaker usa pra não despejar a carteira numa pane. Escrito
+# pelos DOIS ciclos que chamam o Claude (triagem e follow-up).
+ERRO_API_PREFIXO: Final = "api_"
+
 
 class Estado:
     """All valid lead states. Used as string constants in DB."""
@@ -387,14 +393,17 @@ def list_leads_para_circuit_breaker(
     já foi alertado lá atrás (no limiar menor) e continua martelando. Mesmos
     estados ativos — nos terminais o bot já não tenta.
 
-    EXCLUI falha GLOBAL de API (``triagem_api_*``): numa pane da Anthropic o
-    contador de TODOS os leads sobe junto, e o breaker despejaria a carteira
-    inteira em ~10 min de apagão (poll de 60s × limiar 10). Pane geral já tem o
-    alerta de sistema; aqui o bot só espera a API voltar. O breaker existe pro
-    lead preso INDIVIDUAL (caso Daniel)."""
+    EXCLUI falha GLOBAL de API (``api_*``): numa pane da Anthropic o contador de
+    TODOS os leads sobe junto, e o breaker despejaria a carteira inteira em ~10
+    min de apagão (poll de 60s × limiar 10). Pane geral já tem o alerta de
+    sistema; aqui o bot só espera a API voltar. O breaker existe pro lead preso
+    INDIVIDUAL (caso Daniel).
+
+    ``ESCAPE`` porque ``_`` é curinga de 1 caractere no LIKE do SQLite — sem ele
+    o filtro casaria por acidente qualquer ``apiX...``."""
     return conn.execute(
         "SELECT * FROM leads WHERE erro_consecutivo >= ? AND estado IN (?, ?, ?) "
-        "AND (erro_atual IS NULL OR erro_atual NOT LIKE 'triagem_api_%')",
+        r"AND (erro_atual IS NULL OR erro_atual NOT LIKE 'api\_%' ESCAPE '\')",
         (
             min_erros, Estado.EM_CONVERSA,
             Estado.FOLLOW_UP_1_ENVIADO, Estado.FOLLOW_UP_2_ENVIADO,

@@ -67,6 +67,7 @@ from noviello_funil.pos_assinatura import processar_pos_assinatura
 from noviello_funil.redacao import contem_promessa_resultado
 from noviello_funil.state import (
     CLEAR_PROXIMA_ACAO,
+    ERRO_API_PREFIXO,
     Estado,
     bump_turnos,
     clear_horarios_oferecidos,
@@ -2309,7 +2310,7 @@ async def run_poll_cycle(
             categoria = classificar_erro_api(exc)
             register_error(
                 conn, lead_id,
-                f"triagem_api_{categoria}" if categoria
+                f"{ERRO_API_PREFIXO}{categoria}" if categoria
                 else "triagem_unexpected_error",
             )
             schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
@@ -3494,7 +3495,26 @@ async def run_followup_cycle(
             logger.exception(
                 "scheduler step failed for lead %s: %s", lead["id"], exc,
             )
-            register_error(conn, lead["id"], "scheduler_step_failed")
+            # O follow-up também chama o Claude: uma pane de API (crédito
+            # zerado) morria aqui como "scheduler_step_failed" — sem aviso e,
+            # pior, sem ser reconhecida como falha GLOBAL, o que faria o
+            # circuit-breaker despejar os leads em FU1/FU2.
+            categoria = classificar_erro_api(exc)
+            register_error(
+                conn, lead["id"],
+                f"{ERRO_API_PREFIXO}{categoria}" if categoria
+                else "scheduler_step_failed",
+            )
+            if categoria:
+                try:
+                    await _alertar_falha_api(
+                        conn, jurichat, mario_conversation_id,
+                        categoria=categoria, detalhe=str(exc),
+                    )
+                except Exception as exc2:
+                    logger.exception(
+                        "alerta de falha de API não saiu (follow-up): %s", exc2,
+                    )
 
 
 def main() -> int:

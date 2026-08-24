@@ -27,6 +27,31 @@ def test_migrations_are_idempotent(db_conn):
     run_migrations(db_conn)
 
 
+def test_tabelas_novas_nascem_em_banco_ja_existente(db_conn):
+    """O banco de produção já existe — as tabelas novas só aparecem lá porque o
+    boot roda executescript(SCHEMA) inteiro, não só na criação. Simula o deploy:
+    banco sem as tabelas → run_migrations → tabelas de pé e graváveis."""
+    novas = ("alertas_globais", "mensagem_falha_vista")
+    for t in novas:
+        db_conn.execute(f"DROP TABLE IF EXISTS {t}")
+
+    run_migrations(db_conn)
+
+    tabelas = {
+        r["name"] for r in db_conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    assert set(novas).issubset(tabelas)
+    # E realmente utilizáveis (não só presentes no sqlite_master).
+    db_conn.execute(
+        "INSERT INTO alertas_globais (chave) VALUES ('smoke')"
+    )
+    db_conn.execute(
+        "INSERT INTO mensagem_falha_vista (message_id, lead_id) VALUES ('m', 1)"
+    )
+
+
 def test_leads_table_has_required_columns(db_conn):
     cursor = db_conn.execute("PRAGMA table_info(leads)")
     cols = {r["name"] for r in cursor.fetchall()}

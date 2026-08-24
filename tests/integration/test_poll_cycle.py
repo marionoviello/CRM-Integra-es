@@ -2650,6 +2650,39 @@ async def test_followup_dispara_quando_bot_e_responsavel(db_conn):
     jurichat.send_message.assert_awaited()
 
 
+@pytest.mark.asyncio
+async def test_pane_de_api_no_followup_alerta_e_nao_conta_pro_breaker(db_conn):
+    """O follow-up também chama o Claude. A exceção caía num except genérico
+    (`scheduler_step_failed`), então numa pane de billing: (a) ninguém era
+    avisado por esse caminho e (b) o erro NÃO era reconhecido como global — o
+    breaker despejaria os leads em FU1/FU2, justo o que corrigimos no poll."""
+    class _ErroSaldo(Exception):
+        status_code = 400
+
+    _insert_lead_vencido_em_conversa(db_conn)
+    jurichat = _jurichat_followup(conv_user_id="bot-123")
+
+    async def _sem_credito(**kwargs):
+        raise _ErroSaldo("Your credit balance is too low")
+
+    await run_followup_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat,
+        gerar_followup_msg=_sem_credito,
+        followup_2_apos_horas=72, encerramento_apos_horas=24,
+        followup_1_apos_horas=48, bot_user_id="bot-123",
+        mario_conversation_id="mario-conv",
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["erro_atual"] == "api_saldo", "erro global reconhecido como tal"
+    para_mario = [
+        c.args[1] for c in jurichat.send_message.call_args_list
+        if c.args[0] == "mario-conv"
+    ]
+    assert len(para_mario) == 1
+    assert "saldo" in para_mario[0].lower()
+
+
 # --- 1.12 escalonamento de urgência jurídica --------------------------------
 
 @pytest.mark.asyncio
@@ -3444,7 +3477,7 @@ async def test_breaker_nao_despeja_a_carteira_numa_pane_global_de_api(db_conn):
     _insert_lead_due_for_poll(db_conn, transcript_hash=_sha("Lead: oi"))
     lead = get_lead_by_conversation(db_conn, "C-1")
     db_conn.execute(
-        "UPDATE leads SET erro_consecutivo = 12, erro_atual = 'triagem_api_saldo' "
+        "UPDATE leads SET erro_consecutivo = 12, erro_atual = 'api_saldo' "
         "WHERE id = ?",
         (lead["id"],),
     )
@@ -3568,7 +3601,7 @@ async def test_falha_de_billing_na_triagem_alerta_mario_uma_vez(db_conn):
     for conv in ("C-1", "C-2"):
         lead = get_lead_by_conversation(db_conn, conv)
         assert lead["estado"] == Estado.EM_CONVERSA
-        assert lead["erro_atual"] == "triagem_api_saldo"
+        assert lead["erro_atual"] == "api_saldo"
     # Hash NÃO atualizado → quando o crédito voltar, a mensagem é reprocessada.
     assert get_lead_by_conversation(db_conn, "C-1")["ultimo_transcript_hash"] == "stale"
 
