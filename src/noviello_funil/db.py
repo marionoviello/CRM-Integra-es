@@ -215,6 +215,25 @@ CREATE TABLE IF NOT EXISTS boletim_competencia (
     enviado_em  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Intimações AASP (aasp_intimacoes). aasp_raw guarda TODO payload bruto
+-- antes do parse (schema da AASP é desconhecido até o recorte fluir —
+-- nada se perde se o parser errar). aasp_intimacao_vista = idempotência:
+-- linha existe = intimação já processada (andamento criado OU não-casada
+-- já alertada).
+CREATE TABLE IF NOT EXISTS aasp_raw (
+    hash          TEXT PRIMARY KEY,
+    payload       TEXT NOT NULL,
+    data_consulta TEXT NOT NULL,
+    criado_em     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS aasp_intimacao_vista (
+    chave       TEXT PRIMARY KEY,
+    processo    TEXT,
+    law_suit_id TEXT,
+    criado_em   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Contrato de honorários com assinatura eletrônica (ZapSign, roadmap 3.x).
 -- Fluxo 1-TOQUE: o bot monta a minuta (estado pendente_aprovacao); o Mario
 -- aprova UM contrato (estado aprovado); SÓ então o create-doc é chamado

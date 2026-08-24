@@ -157,6 +157,18 @@ class Settings(BaseSettings):
     task_column_id: str = ""
     task_priority: str = "Alta"
 
+    # AASP (recorte de intimações) → andamento manual no Juridiq
+    # (aasp_intimacoes). aasp_chave é fornecida pela AASP (portal do
+    # associado) — só no .env. Janela de N dias por run: cobre fim de
+    # semana/falha de execução; a dedup local (aasp_intimacao_vista)
+    # evita duplicar. Não usamos o `diferencial=true` da API: o flag
+    # "não consultada" deles é consumido na leitura — job morrendo no
+    # meio perderia intimação.
+    aasp_chave: str = ""
+    aasp_base_url: str = "https://intimacaoapi.aasp.org.br"
+    aasp_dias_janela: int = Field(default=3, ge=1)
+    aasp_criar_tarefa: bool = True
+
     # ZapSign — fechamento de contrato com assinatura eletrônica (3.x).
     # Fluxo 1-TOQUE: o bot monta a minuta e o Mario aprova UM contrato por
     # vez. O create-doc SÓ roda depois da aprovação humana — nunca 100%
