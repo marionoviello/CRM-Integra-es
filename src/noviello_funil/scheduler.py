@@ -82,6 +82,7 @@ from noviello_funil.state import (
     list_contratos_pos_pendentes,
     list_leads_aguardando_humano,
     list_leads_com_reuniao_futura,
+    list_leads_para_circuit_breaker,
     list_leads_para_polling,
     list_leads_para_reativacao,
     list_leads_presos,
@@ -107,6 +108,7 @@ from noviello_funil.state import (
     transicao_ah_recente,
     ultimo_motivo_transicao,
     update_transcript_hash,
+    zerar_erro_consecutivo,
 )
 from noviello_funil.transcricao import transcrever_audio
 from noviello_funil.urgencia import detectar_urgencia
@@ -1184,6 +1186,51 @@ async def _alertar_leads_presos(
         )
         if enviado or not mario_conversation_id:
             marcar_erro_alertado(conn, lead["id"])
+
+
+# Circuit-breaker do F1: a partir daqui o bot PARA de tentar este lead. O
+# alerta único de 3 falhas dava visibilidade mas não freava nada — o Daniel
+# Fernandes martelou 24 dias / 41k erros depois de alertado (27/jun).
+_CIRCUIT_BREAKER_ERRO_CONSECUTIVO = 10
+
+
+async def _parar_leads_martelando(
+    conn: Any,
+    jurichat: JurichatClient,
+    mario_conversation_id: str,
+) -> None:
+    """Entrega ao humano os leads presos em falha CRÔNICA e para de re-tentar.
+
+    O lead vai pra AGUARDANDO_HUMANO (reabrível: se ele escrever de novo, a
+    sweep de AH reabre) e o contador zera, pra recontar do zero se voltar. NADA
+    é enviado ao lead — a falha pode ser exatamente no envio a ele.
+
+    Só freia se o aviso SAIU (espelha D3/D5): parar em silêncio seria trocar um
+    lead martelado por um lead esquecido.
+    """
+    for lead in list_leads_para_circuit_breaker(
+        conn, _CIRCUIT_BREAKER_ERRO_CONSECUTIVO,
+    ):
+        enviado = await notify_mario(
+            jurichat,
+            mario_conversation_id=mario_conversation_id,
+            mensagem=(
+                "🛑 O bot PAROU de tentar este lead depois de "
+                f"{lead['erro_consecutivo']} falhas seguidas: "
+                f"{lead['contato_nome'] or '?'} "
+                f"({lead['contato_telefone'] or '?'}). "
+                f"Último erro: {lead['erro_atual'] or '?'}. "
+                "Ele está em aguardando_humano — assuma no painel."
+            ),
+        )
+        if not (enviado or not mario_conversation_id):
+            continue
+        transicao(
+            conn, lead["id"], Estado.AGUARDANDO_HUMANO,
+            motivo="circuit_breaker_erro_cronico",
+            proxima_acao_horas=CLEAR_PROXIMA_ACAO,
+        )
+        zerar_erro_consecutivo(conn, lead["id"])
 
 
 async def _bloquear_promessa_resultado(
@@ -2399,6 +2446,10 @@ async def run_poll_cycle(
     # recorrente e alerta o Mario UMA vez por lead (visibilidade — antes ficavam
     # mudos e invisíveis). Fora do loop pra não duplicar alerta no mesmo tick.
     await _alertar_leads_presos(conn, jurichat, mario_conversation_id)
+
+    # Circuit-breaker: quem passou do limiar crônico sai da roda de re-tentativa
+    # e vai pro humano (o alerta de visibilidade sozinho não freava nada).
+    await _parar_leads_martelando(conn, jurichat, mario_conversation_id)
 
 
 _RE_CANCELAMENTO = re.compile(r"\b(?:cancel|desmarc)\w*", re.IGNORECASE)

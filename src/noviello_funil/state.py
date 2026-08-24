@@ -378,6 +378,35 @@ def list_leads_presos(
     ).fetchall()
 
 
+def list_leads_para_circuit_breaker(
+    conn: sqlite3.Connection, min_erros: int,
+) -> list[sqlite3.Row]:
+    """Leads que já passaram do limiar do circuit-breaker (falhas consecutivas).
+
+    Diferente de ``list_leads_presos``, NÃO filtra por erro_alertado_em: o lead
+    já foi alertado lá atrás (no limiar menor) e continua martelando. Mesmos
+    estados ativos — nos terminais o bot já não tenta."""
+    return conn.execute(
+        "SELECT * FROM leads WHERE erro_consecutivo >= ? AND estado IN (?, ?, ?)",
+        (
+            min_erros, Estado.EM_CONVERSA,
+            Estado.FOLLOW_UP_1_ENVIADO, Estado.FOLLOW_UP_2_ENVIADO,
+        ),
+    ).fetchall()
+
+
+def zerar_erro_consecutivo(conn: sqlite3.Connection, lead_id: int) -> None:
+    """Zera o contador de falhas (e o carimbo de alerta) sem tocar no hash.
+
+    Usado quando o circuit-breaker entrega o lead ao humano: se ele voltar pro
+    bot depois, a contagem recomeça do zero em vez de disparar na 1ª falha."""
+    conn.execute(
+        "UPDATE leads SET erro_consecutivo = 0, erro_alertado_em = NULL, "
+        "atualizado_em = datetime('now') WHERE id = ?",
+        (lead_id,),
+    )
+
+
 def marcar_erro_alertado(conn: sqlite3.Connection, lead_id: int) -> None:
     """Carimba erro_alertado_em = now → o alerta de 'lead preso' sai UMA vez
     (não a cada tick enquanto a falha durar). Zerado em update_transcript_hash."""

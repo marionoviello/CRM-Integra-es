@@ -3152,6 +3152,101 @@ async def test_terminal_path_limpa_horarios_oferecidos(db_conn, cenario):
 
 
 @pytest.mark.asyncio
+async def test_lead_em_falha_cronica_para_de_ser_martelado(db_conn):
+    """Circuit-breaker do F1: o Daniel Fernandes martelou 24 dias / 41k erros
+    depois do alerta único. Passado o limiar, o bot PARA (aguardando_humano) e
+    avisa que parou — em vez de bater na API pra sempre."""
+    _insert_lead_due_for_poll(db_conn, transcript_hash=_sha("Lead: oi"))
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    db_conn.execute(
+        "UPDATE leads SET erro_consecutivo = 10, erro_atual = 'jurichat_404', "
+        "erro_alertado_em = datetime('now') WHERE id = ?",
+        (lead["id"],),
+    )
+
+    jurichat = _make_jurichat("Lead: oi")
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat,
+        triagem_fn=AsyncMock(side_effect=AssertionError("hash igual")),
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.AGUARDANDO_HUMANO
+    assert lead["proxima_acao_em"] is None, "sem próxima ação = para de martelar"
+    assert lead["erro_consecutivo"] == 0, "zera pra recontar se o humano devolver"
+
+    para_mario = [
+        c.args[1] for c in jurichat.send_message.call_args_list
+        if c.args[0] == "mario-conv"
+    ]
+    assert len(para_mario) == 1
+    assert "parou" in para_mario[0].lower()
+    assert "jurichat_404" in para_mario[0]
+    # NADA vai pro lead: a falha pode ser justamente no envio a ele.
+    assert [c for c in jurichat.send_message.call_args_list if c.args[0] == "C-1"] == []
+
+
+@pytest.mark.asyncio
+async def test_abaixo_do_limiar_o_bot_segue_tentando(db_conn):
+    """Entre o alerta (3 falhas) e o breaker (10) o comportamento é o de hoje:
+    avisa e continua tentando, porque a falha costuma ser transitória."""
+    _insert_lead_due_for_poll(db_conn, transcript_hash=_sha("Lead: oi"))
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    db_conn.execute(
+        "UPDATE leads SET erro_consecutivo = 3, erro_atual = 'jurichat_404' "
+        "WHERE id = ?",
+        (lead["id"],),
+    )
+
+    jurichat = _make_jurichat("Lead: oi")
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat,
+        triagem_fn=AsyncMock(side_effect=AssertionError("hash igual")),
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA
+    para_mario = [
+        c.args[1] for c in jurichat.send_message.call_args_list
+        if c.args[0] == "mario-conv"
+    ]
+    assert len(para_mario) == 1
+    assert "preso" in para_mario[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_breaker_nao_dispara_se_o_aviso_nao_saiu(db_conn):
+    """Espelha D3/D5: só para de tentar se o Mario FOI avisado — senão o lead
+    sumiria em silêncio (o pior dos dois mundos)."""
+    _insert_lead_due_for_poll(db_conn, transcript_hash=_sha("Lead: oi"))
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    db_conn.execute(
+        "UPDATE leads SET erro_consecutivo = 10, erro_atual = 'jurichat_404', "
+        "erro_alertado_em = datetime('now') WHERE id = ?",
+        (lead["id"],),
+    )
+
+    jurichat = _make_jurichat("Lead: oi")
+    jurichat.send_message = AsyncMock(
+        side_effect=httpx.RequestError("jurichat fora do ar")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat,
+        triagem_fn=AsyncMock(side_effect=AssertionError("hash igual")),
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA
+    assert lead["erro_consecutivo"] == 10
+
+
+@pytest.mark.asyncio
 async def test_falha_de_billing_na_triagem_alerta_mario_uma_vez(db_conn):
     """Crédito zerado (incidente ~09/jul): a triagem morria em silêncio.
 
