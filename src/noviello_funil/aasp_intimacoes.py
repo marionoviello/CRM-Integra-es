@@ -162,3 +162,56 @@ def marcar_vista(conn, chave: str, processo: str, law_suit_id: str) -> None:
         "(chave, processo, law_suit_id) VALUES (?, ?, ?)",
         (chave, processo, law_suit_id),
     )
+
+
+def indexar_carteira(client: httpx.Client) -> dict[str, str]:
+    """GET /lawSuit/ paginado → {dígitos do nº CNJ: lawSuitId}.
+
+    Comparação por dígitos (não máscara): imune a diferença de formatação
+    entre AASP e Juridiq. Processo sem número fica de fora (não casável).
+    """
+    idx: dict[str, str] = {}
+    page = 1
+    while True:
+        r = client.get("/lawSuit/", params={"page": page, "limit": 100})
+        r.raise_for_status()
+        data = r.json()
+        for p in data.get("data", []):
+            digits = _so_digitos(p.get("processNumber"))
+            if digits and p.get("id"):
+                idx[digits] = p["id"]
+        if page >= int(data.get("totalPages") or 1):
+            break
+        page += 1
+    return idx
+
+
+def montar_conteudo(item: dict) -> str:
+    """Texto do andamento: cabeçalho [AASP] reconhecível + teor."""
+    cab = "[AASP] Intimação"
+    if item.get("jornal"):
+        cab += f" — {item['jornal']}"
+    if item.get("data"):
+        cab += f" — {item['data']}"
+    teor = (item.get("teor") or "").strip()
+    if not teor:
+        teor = "(sem teor no retorno da AASP — conferir no portal)"
+    return f"{cab}\n\n{teor[:_TEOR_ANDAMENTO_CHARS]}"
+
+
+def criar_andamento(
+    client: httpx.Client, law_suit_id: str, content: str,
+    instance: int | None = None,
+) -> tuple[bool, str]:
+    """POST /lawSuit/movements → (ok, detalhe). Não levanta — o caller
+    decide (uma falha não pode derrubar as outras intimações)."""
+    body: dict = {"lawSuitId": law_suit_id, "content": content}
+    if instance:
+        body["instance"] = instance
+    try:
+        r = client.post("/lawSuit/movements", json=body)
+    except httpx.HTTPError as exc:
+        return False, f"erro_{type(exc).__name__}"
+    if r.status_code >= 400:
+        return False, f"http_{r.status_code}: {r.text[:400]}"
+    return True, "ok"

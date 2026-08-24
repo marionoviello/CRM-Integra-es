@@ -107,6 +107,72 @@ def test_normalizar_item_sem_processo_nao_quebra():
     assert item["teor"] == "Edital genérico."
 
 
+# --- indexar_carteira / criar_andamento --------------------------------------
+
+def _jq_client():
+    return httpx.Client(
+        base_url="https://api.juridiq.com.br",
+        headers={"x-juridiq-api-key": "jq-test"},
+    )
+
+
+def test_indexar_carteira_paginada(respx_mock):
+    from noviello_funil.aasp_intimacoes import indexar_carteira
+    url = "https://api.juridiq.com.br/lawSuit/"
+    respx_mock.get(url, params={"page": 1, "limit": 100}).mock(
+        return_value=httpx.Response(200, json={
+            "data": [{"id": "uuid-1",
+                      "processNumber": "1234567-08.2026.8.26.0100"}],
+            "totalPages": 2,
+        }),
+    )
+    respx_mock.get(url, params={"page": 2, "limit": 100}).mock(
+        return_value=httpx.Response(200, json={
+            "data": [{"id": "uuid-2", "processNumber": ""}],  # sem número: fora
+            "totalPages": 2,
+        }),
+    )
+    c = _jq_client()
+    try:
+        idx = indexar_carteira(c)
+    finally:
+        c.close()
+    assert idx == {"12345670820268260100": "uuid-1"}
+
+
+def test_montar_conteudo():
+    from noviello_funil.aasp_intimacoes import montar_conteudo
+    txt = montar_conteudo({
+        "jornal": "DJE SP", "data": "20/08/2026", "teor": "Intime-se.",
+    })
+    assert txt.startswith("[AASP] Intimação — DJE SP — 20/08/2026")
+    assert "Intime-se." in txt
+    sem_teor = montar_conteudo({"jornal": "", "data": "", "teor": ""})
+    assert "[AASP]" in sem_teor and "conferir" in sem_teor
+
+
+def test_criar_andamento_ok_e_erro(respx_mock):
+    from noviello_funil.aasp_intimacoes import criar_andamento
+    respx_mock.post("https://api.juridiq.com.br/lawSuit/movements").mock(
+        return_value=httpx.Response(201, json={"id": "mv-1"}),
+    )
+    c = _jq_client()
+    try:
+        ok, det = criar_andamento(c, "uuid-1", "[AASP] x", instance=2)
+        assert (ok, det) == (True, "ok")
+        body = json.loads(respx_mock.calls.last.request.content)
+        assert body == {"lawSuitId": "uuid-1", "content": "[AASP] x",
+                        "instance": 2}
+
+        respx_mock.post("https://api.juridiq.com.br/lawSuit/movements").mock(
+            return_value=httpx.Response(400, json={"message": "ruim"}),
+        )
+        ok, det = criar_andamento(c, "uuid-1", "x")
+        assert ok is False and det.startswith("http_400")
+    finally:
+        c.close()
+
+
 # --- buscar_intimacoes / raw / vista -----------------------------------------
 
 def _aasp_client():
