@@ -1192,70 +1192,110 @@ async def _alertar_leads_presos(
             marcar_erro_alertado(conn, lead["id"])
 
 
-async def _tratar_nao_entregues(
-    *,
-    conn: Any,
-    lead: Any,
-    conv: dict[str, Any],
-    jurichat: JurichatClient,
-    mario_conversation_id: str,
-    reenviar: bool,
-) -> None:
-    """Avisa (e opcionalmente reenvia) mensagens nossas que o WhatsApp perdeu.
+# Alerta de não-entrega: janela mínima entre dois avisos AGREGADOS, e teto de
+# leads listados por aviso. Um aviso por lead viraria enxurrada no 1º ciclo
+# pós-deploy (todo FAILED histórico é "novo") e em qualquer apagão de WhatsApp.
+_ENTREGA_COOLDOWN_MIN = 15
+_ENTREGA_MAX_LISTADOS = 10
 
-    Caso Vizca (20/jul): ``send-message`` devolve 200 — que é só o aceite da
-    Jurichat. Quando a perna Jurichat→WhatsApp falha, a mensagem fica
-    ``externalStatus=FAILED`` e o bot segue achando que respondeu.
 
-    O reenvio automático fica atrás de flag e só vale pra ÚLTIMA mensagem da
-    conversa: se o papo andou depois, repetir texto velho confunde o lead.
-    Sempre 1× por message_id — a mensagem velha continua FAILED pra sempre.
-    """
+def _coletar_nao_entregues(
+    conn: Any, lead: Any, conv: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Falhas de entrega AINDA NÃO tratadas deste lead. Só lê — nada é marcado
+    nem enviado aqui: quem alerta é a varredura no fim do ciclo, agregada."""
     falhas = [
         m for m in mensagens_nao_entregues(conv.get("messages_raw"))
         if not falha_ja_vista(conn, str(m.get("id") or ""))
     ]
     if not falhas:
-        return
-
-    lead_id = lead["id"]
-    conv_id = lead["jurichat_conversation_id"]
-    for msg in falhas:
-        marcar_falha_vista(conn, str(msg["id"]), lead_id=lead_id)
-
+        return None
     todas = conv.get("messages_raw") or []
     ultima = todas[-1] if todas else {}
     alvo = falhas[-1]
-    pode_reenviar = (
-        reenviar
-        and str(alvo.get("id")) == str(ultima.get("id"))
-        and bool(alvo.get("content"))
-    )
+    return {
+        "lead": lead,
+        "falhas": falhas,
+        "alvo": alvo,
+        # Reenvio só vale pra ÚLTIMA mensagem: se o papo andou depois da falha,
+        # repetir texto velho confunde o lead.
+        "e_ultima": str(alvo.get("id")) == str(ultima.get("id")),
+    }
 
-    reenvio_txt = "Reenvio automático DESLIGADO."
-    if pode_reenviar:
-        try:
-            await jurichat.start_human_support(conv_id)
-            await jurichat.send_message(conv_id, alvo["content"])
+
+async def _alertar_nao_entregues(
+    conn: Any,
+    jurichat: JurichatClient,
+    mario_conversation_id: str,
+    pendentes: list[dict[str, Any]],
+    *,
+    reenviar: bool,
+) -> None:
+    """UM aviso agregado por ciclo sobre mensagens que o WhatsApp não entregou.
+
+    Caso Vizca (20/jul): ``send-message`` devolve 200 — que é só o aceite da
+    Jurichat. Quando a perna Jurichat→WhatsApp falha, a mensagem fica
+    ``externalStatus=FAILED`` e o bot segue achando que respondeu.
+
+    Duas travas aprendidas na marra:
+      * AGREGA + cooldown — um aviso por lead viraria enxurrada no primeiro
+        ciclo pós-deploy e em qualquer apagão de WhatsApp;
+      * só marca a falha como tratada SE o aviso saiu (D5) — marcar antes
+        perdia o aviso pra sempre quando o Jurichat estava fora. Dentro do
+        cooldown, nada é marcado: as falhas esperam o próximo ciclo.
+    """
+    if not pendentes:
+        return
+    if not deve_alertar_global(
+        conn, "entrega:nao_entregue", cooldown_min=_ENTREGA_COOLDOWN_MIN,
+    ):
+        return  # segura sem engolir: volta no próximo ciclo
+
+    linhas: list[str] = []
+    for item in pendentes[:_ENTREGA_MAX_LISTADOS]:
+        lead, alvo = item["lead"], item["alvo"]
+        nota = ""
+        if reenviar and item["e_ultima"] and alvo.get("content"):
+            # Carimba ANTES de compor o aviso: o cliente nunca pode receber o
+            # texto duas vezes, nem que o aviso ao Mario se perca depois.
+            marcar_falha_vista(conn, str(alvo["id"]), lead_id=lead["id"])
             marcar_falha_reenviada(conn, str(alvo["id"]))
-            reenvio_txt = "Reenviei o texto automaticamente (1×)."
-        except Exception as exc:
-            logger.exception("reenvio da msg perdida falhou lead=%s: %s", lead_id, exc)
-            reenvio_txt = f"O reenvio automático TAMBÉM falhou: {exc}"
-    elif reenviar:
-        reenvio_txt = "Não reenviei: a conversa andou depois da falha."
+            try:
+                await jurichat.start_human_support(lead["jurichat_conversation_id"])
+                await jurichat.send_message(
+                    lead["jurichat_conversation_id"], alvo["content"],
+                )
+                nota = " — reenviei 1×"
+            except Exception as exc:
+                logger.exception(
+                    "reenvio da msg perdida falhou lead=%s: %s", lead["id"], exc,
+                )
+                nota = f" — o reenvio TAMBÉM falhou ({exc})"
+        elif reenviar:
+            nota = " — não reenviei (a conversa andou depois da falha)"
+        linhas.append(
+            f"• {lead['contato_nome'] or '?'} ({lead['contato_telefone'] or '?'}): "
+            f'"{(alvo.get("content") or "")[:120]}"{nota}'
+        )
 
-    await notify_mario(
+    resto = len(pendentes) - len(linhas)
+    if resto > 0:
+        linhas.append(f"… e mais {resto} lead(s) na mesma situação.")
+
+    enviado = await notify_mario(
         jurichat,
         mario_conversation_id=mario_conversation_id,
         mensagem=(
-            f"📵 Mensagem NÃO ENTREGUE ao lead {lead['contato_nome'] or '?'} "
-            f"({lead['contato_telefone'] or '?'}) — "
-            f"{len(falhas)} mensagem(ns) marcada(s) como falha no WhatsApp.\n"
-            f'Texto: "{(alvo.get("content") or "")[:200]}"\n'
-            f"{reenvio_txt}"
+            f"📵 Mensagem NÃO ENTREGUE pelo WhatsApp — {len(pendentes)} lead(s):\n"
+            + "\n".join(linhas)
+            + ("\n(Reenvio automático desligado.)" if not reenviar else "")
         ),
     )
+    if not (enviado or not mario_conversation_id):
+        return  # aviso não saiu → nada é dado por tratado; re-tenta no próximo
+    for item in pendentes:
+        for msg in item["falhas"]:
+            marcar_falha_vista(conn, str(msg["id"]), lead_id=item["lead"]["id"])
 
 
 # Circuit-breaker do F1: a partir daqui o bot PARA de tentar este lead. O
@@ -1762,6 +1802,10 @@ async def run_poll_cycle(
     leads = list_leads_para_polling(conn)
     logger.info("poll tick: %d leads em_conversa due", len(leads))
 
+    # Falhas de entrega (Signal 0.7) coletadas no loop e avisadas em UM alerta
+    # agregado no fim do ciclo — por lead viraria enxurrada.
+    pendentes_entrega: list[dict[str, Any]] = []
+
     for lead in leads:
         lead_id = lead["id"]
         conv_id = lead["jurichat_conversation_id"]
@@ -1830,11 +1874,9 @@ async def run_poll_cycle(
         # hash-check: a mensagem perdida não muda o transcript, então sem isto
         # o lead ficaria em silêncio pra sempre e ninguém saberia.
         try:
-            await _tratar_nao_entregues(
-                conn=conn, lead=lead, conv=conv, jurichat=jurichat,
-                mario_conversation_id=mario_conversation_id,
-                reenviar=reenvio_falha_ativo,
-            )
+            pendente_entrega = _coletar_nao_entregues(conn, lead, conv)
+            if pendente_entrega is not None:
+                pendentes_entrega.append(pendente_entrega)
         except Exception as exc:
             logger.exception(
                 "checagem de entrega falhou lead=%s: %s", lead_id, exc,
@@ -2536,6 +2578,12 @@ async def run_poll_cycle(
     # Circuit-breaker: quem passou do limiar crônico sai da roda de re-tentativa
     # e vai pro humano (o alerta de visibilidade sozinho não freava nada).
     await _parar_leads_martelando(conn, jurichat, mario_conversation_id)
+
+    # Signal 0.7: um aviso agregado das mensagens que o WhatsApp não entregou.
+    await _alertar_nao_entregues(
+        conn, jurichat, mario_conversation_id, pendentes_entrega,
+        reenviar=reenvio_falha_ativo,
+    )
 
 
 _RE_CANCELAMENTO = re.compile(r"\b(?:cancel|desmarc)\w*", re.IGNORECASE)

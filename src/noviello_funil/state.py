@@ -385,9 +385,16 @@ def list_leads_para_circuit_breaker(
 
     Diferente de ``list_leads_presos``, NÃO filtra por erro_alertado_em: o lead
     já foi alertado lá atrás (no limiar menor) e continua martelando. Mesmos
-    estados ativos — nos terminais o bot já não tenta."""
+    estados ativos — nos terminais o bot já não tenta.
+
+    EXCLUI falha GLOBAL de API (``triagem_api_*``): numa pane da Anthropic o
+    contador de TODOS os leads sobe junto, e o breaker despejaria a carteira
+    inteira em ~10 min de apagão (poll de 60s × limiar 10). Pane geral já tem o
+    alerta de sistema; aqui o bot só espera a API voltar. O breaker existe pro
+    lead preso INDIVIDUAL (caso Daniel)."""
     return conn.execute(
-        "SELECT * FROM leads WHERE erro_consecutivo >= ? AND estado IN (?, ?, ?)",
+        "SELECT * FROM leads WHERE erro_consecutivo >= ? AND estado IN (?, ?, ?) "
+        "AND (erro_atual IS NULL OR erro_atual NOT LIKE 'triagem_api_%')",
         (
             min_erros, Estado.EM_CONVERSA,
             Estado.FOLLOW_UP_1_ENVIADO, Estado.FOLLOW_UP_2_ENVIADO,

@@ -3151,6 +3151,15 @@ async def test_terminal_path_limpa_horarios_oferecidos(db_conn, cenario):
     assert lead["horarios_oferecidos"] is None
 
 
+def _reabrir_para_poll(conn):
+    """Devolve os leads pro tick seguinte. Sem isto o 2º ciclo não varre nada
+    (o 1º reagenda proxima_acao_em pra +60s) e um teste de 'não repete' passaria
+    por não ter olhado o lead — não por ter deduplicado."""
+    conn.execute(
+        "UPDATE leads SET proxima_acao_em = datetime('now', '-10 seconds')"
+    )
+
+
 def _make_jurichat_com_mensagens(transcript, messages_raw):
     """Fake cujo get_conversation devolve também as mensagens cruas (com o
     campo externalStatus, que é onde a não-entrega aparece)."""
@@ -3177,6 +3186,8 @@ async def test_mensagem_nao_entregue_avisa_o_mario_uma_vez(db_conn):
     jurichat = _make_jurichat_com_mensagens(transcript, messages)
 
     for _ in range(2):  # dois ticks: o aviso não pode repetir
+        _reabrir_para_poll(db_conn)
+        db_conn.execute("DELETE FROM alertas_globais")  # isola do cooldown
         await run_poll_cycle(
             get_db=lambda: db_conn, jurichat=jurichat,
             triagem_fn=AsyncMock(side_effect=AssertionError("hash igual")),
@@ -3194,6 +3205,108 @@ async def test_mensagem_nao_entregue_avisa_o_mario_uma_vez(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_varios_leads_nao_entregues_viram_um_alerta_so(db_conn):
+    """REGRESSÃO: o aviso era por lead. No 1º ciclo pós-deploy TODO FAILED
+    histórico é 'novo' → uma enxurrada de mensagens de uma vez (e um apagão de
+    WhatsApp faria o mesmo). Agora é um alerta agregado por ciclo."""
+    transcript = "Lead: bom dia\nAtendente: bom dia!"
+    for i in (1, 2, 3):
+        _insert_lead_due_for_poll(
+            db_conn, jurichat_lead_id=f"L-{i}", conversation_id=f"C-{i}",
+            transcript_hash=_sha(transcript),
+        )
+    messages = [
+        {"id": "m1", "direction": "INBOUND", "content": "bom dia"},
+        {"id": "m2", "direction": "OUTBOUND", "content": "bom dia!",
+         "externalStatus": "FAILED"},
+    ]
+    jurichat = _make_jurichat_com_mensagens(transcript, messages)
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat,
+        triagem_fn=AsyncMock(side_effect=AssertionError("hash igual")),
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    para_mario = [
+        c.args[1] for c in jurichat.send_message.call_args_list
+        if c.args[0] == "mario-conv"
+    ]
+    assert len(para_mario) == 1, "3 leads = 1 alerta agregado"
+    assert para_mario[0].count("Maria") == 3, "os 3 leads aparecem no mesmo aviso"
+
+
+@pytest.mark.asyncio
+async def test_aviso_que_nao_saiu_nao_marca_a_falha_como_tratada(db_conn):
+    """D5: marcar a falha como vista ANTES de avisar perdia o aviso pra sempre
+    quando o Jurichat estava fora. Agora só marca se o aviso saiu."""
+    transcript = "Lead: bom dia\nAtendente: bom dia!"
+    _insert_lead_due_for_poll(db_conn, transcript_hash=_sha(transcript))
+    messages = [
+        {"id": "m2", "direction": "OUTBOUND", "content": "bom dia!",
+         "externalStatus": "FAILED"},
+    ]
+
+    # 1º tick: o envio ao Mario falha.
+    jurichat = _make_jurichat_com_mensagens(transcript, messages)
+    jurichat.send_message = AsyncMock(side_effect=httpx.RequestError("down"))
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat,
+        triagem_fn=AsyncMock(side_effect=AssertionError("hash igual")),
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+    assert db_conn.execute(
+        "SELECT COUNT(*) c FROM mensagem_falha_vista"
+    ).fetchone()["c"] == 0
+
+    # 2º tick: envio OK → o aviso não se perdeu.
+    _reabrir_para_poll(db_conn)
+    db_conn.execute("DELETE FROM alertas_globais")  # fura o cooldown do tick 1
+    jurichat2 = _make_jurichat_com_mensagens(transcript, messages)
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat2,
+        triagem_fn=AsyncMock(side_effect=AssertionError("hash igual")),
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+    para_mario = [
+        c for c in jurichat2.send_message.call_args_list
+        if c.args[0] == "mario-conv"
+    ]
+    assert len(para_mario) == 1
+
+
+@pytest.mark.asyncio
+async def test_cooldown_segura_o_alerta_sem_perder_a_falha(db_conn):
+    """Dentro do cooldown o alerta espera — e a falha NÃO é marcada como
+    tratada, então ela sai no próximo ciclo (segura, não engole)."""
+    transcript = "Lead: bom dia\nAtendente: bom dia!"
+    _insert_lead_due_for_poll(db_conn, transcript_hash=_sha(transcript))
+    db_conn.execute(
+        "INSERT INTO alertas_globais (chave, ultimo_em) "
+        "VALUES ('entrega:nao_entregue', datetime('now'))"
+    )
+    messages = [
+        {"id": "m2", "direction": "OUTBOUND", "content": "bom dia!",
+         "externalStatus": "FAILED"},
+    ]
+    jurichat = _make_jurichat_com_mensagens(transcript, messages)
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat,
+        triagem_fn=AsyncMock(side_effect=AssertionError("hash igual")),
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    assert [
+        c for c in jurichat.send_message.call_args_list
+        if c.args[0] == "mario-conv"
+    ] == []
+    assert db_conn.execute(
+        "SELECT COUNT(*) c FROM mensagem_falha_vista"
+    ).fetchone()["c"] == 0, "falha segurada não pode ser dada por tratada"
+
+
+@pytest.mark.asyncio
 async def test_reenvio_automatico_manda_o_texto_uma_vez(db_conn):
     """Com REENVIO_FALHA_ATIVO=true o bot repete o texto perdido — 1× só,
     mesmo que a Jurichat siga marcando a mensagem velha como FAILED."""
@@ -3207,6 +3320,8 @@ async def test_reenvio_automatico_manda_o_texto_uma_vez(db_conn):
     jurichat = _make_jurichat_com_mensagens(transcript, messages)
 
     for _ in range(2):
+        _reabrir_para_poll(db_conn)
+        db_conn.execute("DELETE FROM alertas_globais")
         await run_poll_cycle(
             get_db=lambda: db_conn, jurichat=jurichat,
             triagem_fn=AsyncMock(side_effect=AssertionError("hash igual")),
@@ -3285,6 +3400,39 @@ async def test_lead_em_falha_cronica_para_de_ser_martelado(db_conn):
     assert "jurichat_404" in para_mario[0]
     # NADA vai pro lead: a falha pode ser justamente no envio a ele.
     assert [c for c in jurichat.send_message.call_args_list if c.args[0] == "C-1"] == []
+
+
+@pytest.mark.asyncio
+async def test_breaker_nao_despeja_a_carteira_numa_pane_global_de_api(db_conn):
+    """REGRESSÃO: falha GLOBAL (crédito zerado) incrementa erro_consecutivo de
+    TODOS os leads a cada tick. Com poll de 60s, ~10 min de pane levariam a
+    carteira inteira pra aguardando_humano, cada lead com um 🛑.
+
+    O breaker é pro lead preso individual (caso Daniel). Pane geral já tem o
+    alerta de sistema — aqui o bot só espera a API voltar."""
+    _insert_lead_due_for_poll(db_conn, transcript_hash=_sha("Lead: oi"))
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    db_conn.execute(
+        "UPDATE leads SET erro_consecutivo = 12, erro_atual = 'triagem_api_saldo' "
+        "WHERE id = ?",
+        (lead["id"],),
+    )
+
+    jurichat = _make_jurichat("Lead: oi")
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat,
+        triagem_fn=AsyncMock(side_effect=AssertionError("hash igual")),
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA, "pane global não despeja o lead"
+    para_mario = [
+        c.args[1] for c in jurichat.send_message.call_args_list
+        if c.args[0] == "mario-conv"
+    ]
+    assert not [m for m in para_mario if "parou" in m.lower()]
 
 
 @pytest.mark.asyncio
