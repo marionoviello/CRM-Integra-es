@@ -1,0 +1,16 @@
+[Unit]
+Description=Noviello Funil Saude - Intimacoes AASP -> Juridiq
+After=network.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=600
+User=noviello
+Group=noviello
+WorkingDirectory=/opt/noviello-funil-saude
+EnvironmentFile=/opt/noviello-funil-saude/.env
+ExecStart=/opt/noviello-funil-saude/.venv/bin/noviello-aasp
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true

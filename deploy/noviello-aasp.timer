@@ -1,0 +1,13 @@
+[Unit]
+Description=Noviello Funil Saude - Intimacoes AASP (diario 07h45 BRT)
+
+[Timer]
+# 10:45 UTC = 07:45 America/Sao_Paulo — antes do noviello-publicacoes
+# (08h30 BRT). Diario incluindo fds: publicacao e rara no sabado mas a
+# janela de 3 dias + dedup tornam o run barato e idempotente.
+OnCalendar=*-*-* 10:45:00
+Persistent=true
+Unit=noviello-aasp.service
+
+[Install]
+WantedBy=timers.target
