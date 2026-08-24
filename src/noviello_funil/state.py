@@ -806,6 +806,41 @@ def marcar_evento_manual_alertado(
     )
 
 
+def falha_ja_vista(conn: sqlite3.Connection, message_id: str) -> bool:
+    """True se esta mensagem não-entregue já foi tratada (avisada/reenviada)."""
+    if not message_id:
+        return True  # sem id não há dedupe → não trata (evita alerta eterno)
+    row = conn.execute(
+        "SELECT 1 FROM mensagem_falha_vista WHERE message_id = ?",
+        (message_id,),
+    ).fetchone()
+    return row is not None
+
+
+def marcar_falha_vista(
+    conn: sqlite3.Connection, message_id: str, *, lead_id: int,
+) -> None:
+    """Registra a mensagem não-entregue. Idempotente."""
+    if not message_id:
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO mensagem_falha_vista (message_id, lead_id) "
+        "VALUES (?, ?)",
+        (message_id, lead_id),
+    )
+
+
+def marcar_falha_reenviada(conn: sqlite3.Connection, message_id: str) -> None:
+    """Carimba o reenvio — garante que o texto sai no máximo 1× a mais."""
+    if not message_id:
+        return
+    conn.execute(
+        "UPDATE mensagem_falha_vista SET reenviada_em = datetime('now') "
+        "WHERE message_id = ?",
+        (message_id,),
+    )
+
+
 def deve_alertar_global(
     conn: sqlite3.Connection, chave: str, *, cooldown_min: int,
 ) -> bool:

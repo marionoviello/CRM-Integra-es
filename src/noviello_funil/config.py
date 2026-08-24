@@ -230,3 +230,9 @@ class Settings(BaseSettings):
     # "fica em SP") era respondido fragmento a fragmento e o bot re-perguntava
     # o que a msg seguinte já respondia (caso Gabi). 0 = desliga.
     bot_espera_rajada_seg: int = 90
+
+    # Reenvio automático de mensagem NÃO ENTREGUE (externalStatus=FAILED, caso
+    # Vizca 20/jul). DESLIGADO por padrão: a detecção + o aviso ao Mario valem
+    # sempre; repetir texto ao cliente é caminho sensível e fica sob decisão
+    # explícita. Ligar com REENVIO_FALHA_ATIVO=true no .env.
+    reenvio_falha_ativo: bool = False

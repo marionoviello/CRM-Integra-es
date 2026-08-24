@@ -458,6 +458,30 @@ class JurichatClient:
         return [t["name"] for t in data.get("tags", []) if "name" in t]
 
 
+# Marcadores de NÃO-entrega no campo externalStatus da mensagem (caso Vizca,
+# 20/jul): o 200 do send-message é só o aceite da Jurichat — a perna
+# Jurichat→WhatsApp pode falhar depois, em silêncio.
+_STATUS_NAO_ENTREGUE = ("fail", "error", "undeliver", "reject")
+
+
+def mensagens_nao_entregues(
+    messages_raw: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Mensagens NOSSAS (OUTBOUND) que o WhatsApp não entregou.
+
+    Sem id a mensagem é ignorada: não haveria como deduplicar o aviso, e ele
+    voltaria a cada tick do poll.
+    """
+    falhas = []
+    for msg in messages_raw or []:
+        if msg.get("direction") != "OUTBOUND" or not msg.get("id"):
+            continue
+        status = str(msg.get("externalStatus") or "").lower()
+        if any(marcador in status for marcador in _STATUS_NAO_ENTREGUE):
+            falhas.append(msg)
+    return falhas
+
+
 def format_notification(
     *,
     tipo: str,

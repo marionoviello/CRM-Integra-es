@@ -3151,6 +3151,105 @@ async def test_terminal_path_limpa_horarios_oferecidos(db_conn, cenario):
     assert lead["horarios_oferecidos"] is None
 
 
+def _make_jurichat_com_mensagens(transcript, messages_raw):
+    """Fake cujo get_conversation devolve também as mensagens cruas (com o
+    campo externalStatus, que é onde a não-entrega aparece)."""
+    fake = MagicMock()
+    fake.get_conversation = AsyncMock(return_value={
+        "transcription": transcript, "messages_raw": messages_raw,
+    })
+    fake.send_message = AsyncMock(return_value={"id": "msg-novo"})
+    fake.start_human_support = AsyncMock(return_value={"success": True})
+    return fake
+
+
+@pytest.mark.asyncio
+async def test_mensagem_nao_entregue_avisa_o_mario_uma_vez(db_conn):
+    """Caso Vizca (20/jul): send-message deu 200, o WhatsApp não entregou e o
+    bot não via nada. Agora avisa — uma vez por mensagem, não a cada tick."""
+    transcript = "Lead: bom dia\nAtendente: bom dia, como posso ajudar?"
+    _insert_lead_due_for_poll(db_conn, transcript_hash=_sha(transcript))
+    messages = [
+        {"id": "m1", "direction": "INBOUND", "content": "bom dia"},
+        {"id": "m2", "direction": "OUTBOUND", "content": "bom dia, como posso ajudar?",
+         "externalStatus": "FAILED"},
+    ]
+    jurichat = _make_jurichat_com_mensagens(transcript, messages)
+
+    for _ in range(2):  # dois ticks: o aviso não pode repetir
+        await run_poll_cycle(
+            get_db=lambda: db_conn, jurichat=jurichat,
+            triagem_fn=AsyncMock(side_effect=AssertionError("hash igual")),
+            mario_conversation_id="mario-conv", max_turnos=20,
+        )
+
+    para_mario = [
+        c.args[1] for c in jurichat.send_message.call_args_list
+        if c.args[0] == "mario-conv"
+    ]
+    assert len(para_mario) == 1
+    assert "não entregue" in para_mario[0].lower()
+    # Reenvio DESLIGADO por padrão → nada foi mandado ao lead.
+    assert [c for c in jurichat.send_message.call_args_list if c.args[0] == "C-1"] == []
+
+
+@pytest.mark.asyncio
+async def test_reenvio_automatico_manda_o_texto_uma_vez(db_conn):
+    """Com REENVIO_FALHA_ATIVO=true o bot repete o texto perdido — 1× só,
+    mesmo que a Jurichat siga marcando a mensagem velha como FAILED."""
+    transcript = "Lead: bom dia\nAtendente: bom dia, como posso ajudar?"
+    _insert_lead_due_for_poll(db_conn, transcript_hash=_sha(transcript))
+    messages = [
+        {"id": "m1", "direction": "INBOUND", "content": "bom dia"},
+        {"id": "m2", "direction": "OUTBOUND", "content": "bom dia, como posso ajudar?",
+         "externalStatus": "FAILED"},
+    ]
+    jurichat = _make_jurichat_com_mensagens(transcript, messages)
+
+    for _ in range(2):
+        await run_poll_cycle(
+            get_db=lambda: db_conn, jurichat=jurichat,
+            triagem_fn=AsyncMock(side_effect=AssertionError("hash igual")),
+            mario_conversation_id="mario-conv", max_turnos=20,
+            reenvio_falha_ativo=True,
+        )
+
+    ao_lead = [
+        c.args[1] for c in jurichat.send_message.call_args_list
+        if c.args[0] == "C-1"
+    ]
+    assert ao_lead == ["bom dia, como posso ajudar?"]
+
+
+@pytest.mark.asyncio
+async def test_reenvio_so_vale_pra_ultima_mensagem(db_conn):
+    """Se a conversa ANDOU depois da falha, repetir o texto velho é confuso —
+    avisa o Mario e não reenvia."""
+    transcript = "Lead: bom dia\nAtendente: perdida\nLead: alô?"
+    _insert_lead_due_for_poll(db_conn, transcript_hash=_sha(transcript))
+    messages = [
+        {"id": "m1", "direction": "INBOUND", "content": "bom dia"},
+        {"id": "m2", "direction": "OUTBOUND", "content": "perdida",
+         "externalStatus": "FAILED"},
+        {"id": "m3", "direction": "INBOUND", "content": "alô?"},
+    ]
+    jurichat = _make_jurichat_com_mensagens(transcript, messages)
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat,
+        triagem_fn=AsyncMock(side_effect=AssertionError("hash igual")),
+        mario_conversation_id="mario-conv", max_turnos=20,
+        reenvio_falha_ativo=True,
+    )
+
+    assert [c for c in jurichat.send_message.call_args_list if c.args[0] == "C-1"] == []
+    para_mario = [
+        c.args[1] for c in jurichat.send_message.call_args_list
+        if c.args[0] == "mario-conv"
+    ]
+    assert len(para_mario) == 1
+
+
 @pytest.mark.asyncio
 async def test_lead_em_falha_cronica_para_de_ser_martelado(db_conn):
     """Circuit-breaker do F1: o Daniel Fernandes martelou 24 dias / 41k erros

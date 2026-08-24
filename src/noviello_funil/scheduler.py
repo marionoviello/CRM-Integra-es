@@ -58,6 +58,7 @@ from noviello_funil.opt_out import (
 from noviello_funil.outbound import (
     JurichatClient,
     format_notification,
+    mensagens_nao_entregues,
     notify_mario,
     split_conversation_ids,
 )
@@ -74,6 +75,7 @@ from noviello_funil.state import (
     deve_alertar_global,
     event_ids_de_reunioes,
     evento_manual_ja_alertado,
+    falha_ja_vista,
     get_audio_transcricao,
     get_horarios_oferecidos,
     get_lead_by_conversation,
@@ -90,6 +92,8 @@ from noviello_funil.state import (
     marcar_ah_checado,
     marcar_erro_alertado,
     marcar_evento_manual_alertado,
+    marcar_falha_reenviada,
+    marcar_falha_vista,
     marcar_noshow_avisado,
     marcar_pos_travado,
     mark_cliente_checado,
@@ -1188,6 +1192,72 @@ async def _alertar_leads_presos(
             marcar_erro_alertado(conn, lead["id"])
 
 
+async def _tratar_nao_entregues(
+    *,
+    conn: Any,
+    lead: Any,
+    conv: dict[str, Any],
+    jurichat: JurichatClient,
+    mario_conversation_id: str,
+    reenviar: bool,
+) -> None:
+    """Avisa (e opcionalmente reenvia) mensagens nossas que o WhatsApp perdeu.
+
+    Caso Vizca (20/jul): ``send-message`` devolve 200 — que é só o aceite da
+    Jurichat. Quando a perna Jurichat→WhatsApp falha, a mensagem fica
+    ``externalStatus=FAILED`` e o bot segue achando que respondeu.
+
+    O reenvio automático fica atrás de flag e só vale pra ÚLTIMA mensagem da
+    conversa: se o papo andou depois, repetir texto velho confunde o lead.
+    Sempre 1× por message_id — a mensagem velha continua FAILED pra sempre.
+    """
+    falhas = [
+        m for m in mensagens_nao_entregues(conv.get("messages_raw"))
+        if not falha_ja_vista(conn, str(m.get("id") or ""))
+    ]
+    if not falhas:
+        return
+
+    lead_id = lead["id"]
+    conv_id = lead["jurichat_conversation_id"]
+    for msg in falhas:
+        marcar_falha_vista(conn, str(msg["id"]), lead_id=lead_id)
+
+    todas = conv.get("messages_raw") or []
+    ultima = todas[-1] if todas else {}
+    alvo = falhas[-1]
+    pode_reenviar = (
+        reenviar
+        and str(alvo.get("id")) == str(ultima.get("id"))
+        and bool(alvo.get("content"))
+    )
+
+    reenvio_txt = "Reenvio automático DESLIGADO."
+    if pode_reenviar:
+        try:
+            await jurichat.start_human_support(conv_id)
+            await jurichat.send_message(conv_id, alvo["content"])
+            marcar_falha_reenviada(conn, str(alvo["id"]))
+            reenvio_txt = "Reenviei o texto automaticamente (1×)."
+        except Exception as exc:
+            logger.exception("reenvio da msg perdida falhou lead=%s: %s", lead_id, exc)
+            reenvio_txt = f"O reenvio automático TAMBÉM falhou: {exc}"
+    elif reenviar:
+        reenvio_txt = "Não reenviei: a conversa andou depois da falha."
+
+    await notify_mario(
+        jurichat,
+        mario_conversation_id=mario_conversation_id,
+        mensagem=(
+            f"📵 Mensagem NÃO ENTREGUE ao lead {lead['contato_nome'] or '?'} "
+            f"({lead['contato_telefone'] or '?'}) — "
+            f"{len(falhas)} mensagem(ns) marcada(s) como falha no WhatsApp.\n"
+            f'Texto: "{(alvo.get("content") or "")[:200]}"\n'
+            f"{reenvio_txt}"
+        ),
+    )
+
+
 # Circuit-breaker do F1: a partir daqui o bot PARA de tentar este lead. O
 # alerta único de 3 falhas dava visibilidade mas não freava nada — o Daniel
 # Fernandes martelou 24 dias / 41k erros depois de alertado (27/jun).
@@ -1535,6 +1605,7 @@ async def run_poll_cycle(
     audio_http: Any = None,
     espera_humano_segundos: int = 3600,
     espera_rajada_segundos: int = 90,
+    reenvio_falha_ativo: bool = False,
 ) -> None:
     """Process all em_conversa leads whose poll tick is due."""
     conn = get_db()
@@ -1753,6 +1824,21 @@ async def run_poll_cycle(
             )
             update_transcript_hash(conn, lead_id, new_hash)
             continue
+
+        # Signal 0.7 (caso Vizca, 20/jul): a Jurichat aceitou (200) mas o
+        # WhatsApp NÃO entregou (externalStatus=FAILED). Roda ANTES do
+        # hash-check: a mensagem perdida não muda o transcript, então sem isto
+        # o lead ficaria em silêncio pra sempre e ninguém saberia.
+        try:
+            await _tratar_nao_entregues(
+                conn=conn, lead=lead, conv=conv, jurichat=jurichat,
+                mario_conversation_id=mario_conversation_id,
+                reenviar=reenvio_falha_ativo,
+            )
+        except Exception as exc:
+            logger.exception(
+                "checagem de entrega falhou lead=%s: %s", lead_id, exc,
+            )
 
         # Nothing new since the last poll → just reschedule.
         if new_hash == old_hash:
@@ -3414,6 +3500,7 @@ def main() -> int:
             audio_http=audio_http,
             espera_humano_segundos=settings.bot_espera_humano_min * 60,
             espera_rajada_segundos=settings.bot_espera_rajada_seg,
+            reenvio_falha_ativo=settings.reenvio_falha_ativo,
         )
         # 2.5 (D4, 25/jun): detecta reuniões marcadas FORA do bot e vincula ao
         #    lead (pelo email do convidado) ANTES do reminder_cycle, pra elas já

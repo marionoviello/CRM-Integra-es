@@ -69,6 +69,16 @@ CREATE TABLE IF NOT EXISTS audio_transcricoes (
     criado_em   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Mensagens OUTBOUND que a Jurichat marcou como NÃO ENTREGUES
+-- (externalStatus=FAILED). Uma linha por message_id: o aviso sai 1× e o
+-- reenvio (quando ligado) acontece 1× — nunca a cada tick do poll.
+CREATE TABLE IF NOT EXISTS mensagem_falha_vista (
+    message_id   TEXT PRIMARY KEY,
+    lead_id      INTEGER,
+    visto_em     TEXT NOT NULL DEFAULT (datetime('now')),
+    reenviada_em TEXT
+);
+
 -- Cooldown de alertas de SISTEMA (não são por lead). Ex.: a triagem parou
 -- por falha de API/billing — 100 leads na fila não podem virar 100 avisos.
 -- Uma linha por chave de alerta, com o carimbo do último envio.
