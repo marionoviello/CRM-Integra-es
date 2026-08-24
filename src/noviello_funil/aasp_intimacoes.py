@@ -76,7 +76,10 @@ def instancia_sugerida(digits: str) -> int | None:
 
 def _limpar_html(html: object) -> str:
     txt = re.sub(r"<[^>]+>", " ", str(html or ""))
-    return re.sub(r"\s+", " ", txt).strip()
+    txt = re.sub(r"\s+", " ", txt).strip()
+    # Tag removida no meio da frase deixa espaço órfão antes da pontuação
+    # ("autora .") — o andamento vai pro painel, então vale o polimento.
+    return re.sub(r"\s+([.,;:!?])", r"\1", txt)
 
 
 def _primeiro_campo(raw: dict, campos: tuple[str, ...]) -> str:
