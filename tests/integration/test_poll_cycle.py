@@ -64,6 +64,13 @@ def _insert_lead_due_for_poll(
     )
 
 
+# Janela de horário dos follow-ups (24/ago): chamadas de run_followup_cycle
+# nos testes congelam o relógio DENTRO da janela (qua 10h BRT).
+_AGORA_JANELA = datetime.datetime(
+    2026, 8, 26, 10, 0, tzinfo=ZoneInfo("America/Sao_Paulo"),
+)
+
+
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -785,6 +792,7 @@ async def test_active_em_conversa_picked_by_poll_not_by_followup(db_conn):
 
     await run_followup_cycle(
         get_db=lambda: db_conn,
+        agora=_AGORA_JANELA,
         jurichat=jurichat,
         gerar_followup_msg=fake_gen,
         followup_2_apos_horas=72,
@@ -2681,7 +2689,8 @@ async def test_followup_nao_dispara_quando_humano_assumiu(db_conn):
     gerar = AsyncMock(side_effect=AssertionError("não deve gerar FU"))
 
     await run_followup_cycle(
-        get_db=lambda: db_conn, jurichat=jurichat, gerar_followup_msg=gerar,
+        get_db=lambda: db_conn,
+        agora=_AGORA_JANELA, jurichat=jurichat, gerar_followup_msg=gerar,
         followup_2_apos_horas=72, encerramento_apos_horas=24,
         followup_1_apos_horas=48, bot_user_id="bot-123",
     )
@@ -2700,7 +2709,8 @@ async def test_followup_dispara_quando_bot_e_responsavel(db_conn):
     gerar = AsyncMock(return_value="Oi Maria, retomando nosso papo!")
 
     await run_followup_cycle(
-        get_db=lambda: db_conn, jurichat=jurichat, gerar_followup_msg=gerar,
+        get_db=lambda: db_conn,
+        agora=_AGORA_JANELA, jurichat=jurichat, gerar_followup_msg=gerar,
         followup_2_apos_horas=72, encerramento_apos_horas=24,
         followup_1_apos_horas=48, bot_user_id="bot-123",
     )
@@ -2726,7 +2736,8 @@ async def test_pane_de_api_no_followup_alerta_e_nao_conta_pro_breaker(db_conn):
         raise _ErroSaldo("Your credit balance is too low")
 
     await run_followup_cycle(
-        get_db=lambda: db_conn, jurichat=jurichat,
+        get_db=lambda: db_conn,
+        agora=_AGORA_JANELA, jurichat=jurichat,
         gerar_followup_msg=_sem_credito,
         followup_2_apos_horas=72, encerramento_apos_horas=24,
         followup_1_apos_horas=48, bot_user_id="bot-123",

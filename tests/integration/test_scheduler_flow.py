@@ -1,6 +1,7 @@
 """Integration tests for the follow-up scheduler."""
 
 import datetime
+import zoneinfo
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -12,6 +13,13 @@ from noviello_funil.scheduler import (
 from noviello_funil.state import (
     Estado,
     get_lead_by_conversation,
+)
+
+# Janela de horário dos follow-ups (regra Mario 24/ago): os testes congelam o
+# relógio DENTRO da janela (qua 10h BRT) — sem isso a suíte falharia rodando
+# à noite, fim de semana ou feriado.
+_AGORA_JANELA = datetime.datetime(
+    2026, 8, 26, 10, 0, tzinfo=zoneinfo.ZoneInfo("America/Sao_Paulo"),
 )
 
 
@@ -82,6 +90,7 @@ async def test_cycle_sends_first_followup_when_in_em_conversa(db_conn):
 
     await run_followup_cycle(
         get_db=lambda: db_conn,
+        agora=_AGORA_JANELA,
         jurichat=fake_jurichat,
         gerar_followup_msg=fake_followup_gen,
         followup_2_apos_horas=72,
@@ -111,6 +120,7 @@ async def test_cycle_sends_second_followup_when_in_follow_up_1(db_conn):
 
     await run_followup_cycle(
         get_db=lambda: db_conn,
+        agora=_AGORA_JANELA,
         jurichat=fake_jurichat,
         gerar_followup_msg=fake_followup_gen,
         followup_2_apos_horas=72,
@@ -121,6 +131,41 @@ async def test_cycle_sends_second_followup_when_in_follow_up_1(db_conn):
     assert lead["estado"] == Estado.FOLLOW_UP_2_ENVIADO
     sent_text = fake_jurichat.send_message.call_args[0][1]
     assert "encerrar" in sent_text.lower()
+
+
+@pytest.mark.asyncio
+async def test_followup_fora_da_janela_fica_na_fila(db_conn):
+    """Regra Mario 24/ago: sem follow-up antes das 8h/depois das 20h (o FU2 do
+    Renato saiu 01:40!). Fora da janela o ciclo NÃO envia nada e o lead segue
+    vencido — sai no próximo tick dentro do horário."""
+    import zoneinfo
+
+    _make_due_lead(db_conn, "L-1", "C-1", Estado.EM_CONVERSA)
+
+    fake_jurichat = MagicMock()
+    fake_jurichat.get_lead_tags = AsyncMock(return_value=[])
+    fake_jurichat.send_message = AsyncMock()
+    fake_jurichat.start_human_support = AsyncMock(return_value={"success": True})
+    fake_jurichat.get_conversation = AsyncMock(return_value={"transcription": ""})
+
+    async def fake_followup_gen(**kwargs):
+        return "follow-up"
+
+    madrugada = datetime.datetime(
+        2026, 8, 26, 1, 40, tzinfo=zoneinfo.ZoneInfo("America/Sao_Paulo"),
+    )
+    await run_followup_cycle(
+        get_db=lambda: db_conn,
+        jurichat=fake_jurichat,
+        gerar_followup_msg=fake_followup_gen,
+        followup_2_apos_horas=72,
+        encerramento_apos_horas=24,
+        agora=madrugada,
+    )
+
+    fake_jurichat.send_message.assert_not_awaited()   # nada saiu
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.EM_CONVERSA       # segue na fila
 
 
 @pytest.mark.asyncio
@@ -141,6 +186,7 @@ async def test_cycle_closes_silently_when_in_follow_up_2(db_conn):
 
     await run_followup_cycle(
         get_db=lambda: db_conn,
+        agora=_AGORA_JANELA,
         jurichat=fake_jurichat,
         gerar_followup_msg=fake_followup_gen,
         followup_2_apos_horas=72,
@@ -180,6 +226,7 @@ async def test_cycle_encerramento_avisa_falha_quando_arquivar_da_erro(db_conn):
 
     await run_followup_cycle(
         get_db=lambda: db_conn,
+        agora=_AGORA_JANELA,
         jurichat=fake_jurichat,
         gerar_followup_msg=fake_followup_gen,
         followup_2_apos_horas=72,
@@ -211,6 +258,7 @@ async def test_cycle_skips_lead_with_excluding_tag(db_conn):
 
     await run_followup_cycle(
         get_db=lambda: db_conn,
+        agora=_AGORA_JANELA,
         jurichat=fake_jurichat,
         gerar_followup_msg=fake_followup_gen,
         followup_2_apos_horas=72,
@@ -242,6 +290,7 @@ async def test_cycle_flags_lead_when_get_tags_fails(db_conn):
 
     await run_followup_cycle(
         get_db=lambda: db_conn,
+        agora=_AGORA_JANELA,
         jurichat=fake_jurichat,
         gerar_followup_msg=fake_followup_gen,
         followup_2_apos_horas=72,
@@ -276,6 +325,7 @@ async def test_cycle_flags_lead_when_dispatch_step_fails(db_conn):
 
     await run_followup_cycle(
         get_db=lambda: db_conn,
+        agora=_AGORA_JANELA,
         jurichat=fake_jurichat,
         gerar_followup_msg=fake_followup_gen,
         followup_2_apos_horas=72,
@@ -317,6 +367,7 @@ async def test_cycle_pula_lead_suprimido_opt_out(db_conn):
 
     await run_followup_cycle(
         get_db=lambda: db_conn,
+        agora=_AGORA_JANELA,
         jurichat=fake_jurichat,
         gerar_followup_msg=fake_followup_gen,
         followup_2_apos_horas=72,
@@ -350,6 +401,7 @@ async def test_cycle_nao_manda_followup_pra_lead_com_reuniao(db_conn):
 
     await run_followup_cycle(
         get_db=lambda: db_conn,
+        agora=_AGORA_JANELA,
         jurichat=fake_jurichat,
         gerar_followup_msg=fake_followup_gen,
         followup_2_apos_horas=72,

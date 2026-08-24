@@ -22,6 +22,7 @@ import hashlib
 import logging
 import re
 import secrets
+import zoneinfo
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -410,6 +411,68 @@ _RE_PLACEHOLDER = re.compile(r"\s*\{\{[^}]+\}\}")
 # Mapa dos dias que o modelo sinaliza em ``pref_dias`` → weekday() do Python
 # (caso José Lucas 03/ago). Prefixo de 3 letras tolera "terça"/"ter".
 _DIAS_SEMANA = {"seg": 0, "ter": 1, "qua": 2, "qui": 3, "sex": 4}
+
+# --- Janela de horário dos follow-ups (regra Mario 24/ago) -------------------
+# Sem follow-up proativo fora do horário social: seg-sex 08h-20h, sábado
+# 09h-12h, domingo e feriado NUNCA (o FU2 do Renato saiu 01:40 da manhã).
+# Fora da janela o lead fica na fila e sai no próximo tick permitido. Vale só
+# pro run_followup_cycle — resposta reativa, lembrete de reunião (atrelado ao
+# horário da reunião) e aniversários (timer 08h) não passam por aqui.
+_TZ_BRT = zoneinfo.ZoneInfo("America/Sao_Paulo")
+_FERIADOS_FIXOS = {
+    (1, 1),    # Confraternização
+    (1, 25),   # Aniversário de São Paulo (carteira é SP)
+    (4, 21),   # Tiradentes
+    (5, 1),    # Trabalho
+    (7, 9),    # Revolução Constitucionalista (SP)
+    (9, 7),    # Independência
+    (10, 12),  # Nossa Senhora Aparecida
+    (11, 2),   # Finados
+    (11, 15),  # Proclamação da República
+    (11, 20),  # Consciência Negra
+    (12, 25),  # Natal
+}
+
+
+def _pascoa(ano: int) -> datetime.date:
+    """Domingo de Páscoa (algoritmo de Meeus, calendário gregoriano)."""
+    a = ano % 19
+    b, c = divmod(ano, 100)
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    m = (32 + 2 * e + 2 * i - h - k) % 7
+    n = (a + 11 * h + 22 * m) // 451
+    mes, dia = divmod(h + m - 7 * n + 114, 31)
+    return datetime.date(ano, mes, dia + 1)
+
+
+def _eh_feriado(dia: datetime.date) -> bool:
+    if (dia.month, dia.day) in _FERIADOS_FIXOS:
+        return True
+    pascoa = _pascoa(dia.year)
+    moveis = {
+        pascoa - datetime.timedelta(days=48),  # segunda de Carnaval
+        pascoa - datetime.timedelta(days=47),  # terça de Carnaval
+        pascoa - datetime.timedelta(days=2),   # Sexta-feira Santa
+        pascoa + datetime.timedelta(days=60),  # Corpus Christi
+    }
+    return dia in moveis
+
+
+def _fora_do_horario_followup(agora: datetime.datetime | None = None) -> bool:
+    """True se AGORA está fora da janela de follow-up (BRT)."""
+    agora = (agora or datetime.datetime.now(_TZ_BRT)).astimezone(_TZ_BRT)
+    if _eh_feriado(agora.date()):
+        return True
+    dia_semana, hora = agora.weekday(), agora.hour
+    if dia_semana == 6:          # domingo
+        return True
+    if dia_semana == 5:          # sábado: só 9h-12h
+        return not (9 <= hora < 12)
+    return not (8 <= hora < 20)  # seg-sex: 8h-20h
 
 
 async def _handle_oferecer_horarios(
@@ -3375,8 +3438,15 @@ async def run_followup_cycle(
     followup_1_apos_horas: int = 48,
     bot_user_id: str = "",
     mario_conversation_id: str = "",
+    agora: datetime.datetime | None = None,
 ) -> None:
     """Process all due leads in a single pass."""
+    # Janela de horário (regra Mario 24/ago): fora dela NADA sai — os leads
+    # vencidos ficam na fila e o próximo tick dentro da janela os processa.
+    # Resposta reativa (poll cycle) e lembretes de reunião NÃO passam por aqui.
+    if _fora_do_horario_followup(agora):
+        logger.info("followup: fora da janela de horário — fila aguardando")
+        return
     conn = get_db()
     vencidos = list_leads_vencidos(conn, fu1_apos_horas=followup_1_apos_horas)
     logger.info("scheduler tick: %d leads vencidos", len(vencidos))
