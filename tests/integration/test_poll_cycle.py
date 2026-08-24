@@ -3149,3 +3149,77 @@ async def test_terminal_path_limpa_horarios_oferecidos(db_conn, cenario):
     lead = get_lead_by_conversation(db_conn, "C-1")
     assert lead["estado"] == Estado.AGUARDANDO_HUMANO
     assert lead["horarios_oferecidos"] is None
+
+
+@pytest.mark.asyncio
+async def test_falha_de_billing_na_triagem_alerta_mario_uma_vez(db_conn):
+    """Crédito zerado (incidente ~09/jul): a triagem morria em silêncio.
+
+    Agora sai UM alerta de sistema — e apenas um, mesmo com a fila inteira
+    falhando no mesmo tick (o cooldown protege o canal)."""
+    class _ErroSaldo(Exception):
+        status_code = 400
+
+    transcript = "Lead: bom dia, preciso de ajuda"
+    _insert_lead_due_for_poll(
+        db_conn, jurichat_lead_id="L-1", conversation_id="C-1",
+        transcript_hash="stale",
+    )
+    _insert_lead_due_for_poll(
+        db_conn, jurichat_lead_id="L-2", conversation_id="C-2",
+        transcript_hash="stale",
+    )
+
+    jurichat = _make_jurichat(transcript)
+
+    async def _triagem_sem_credito(**kwargs):
+        raise _ErroSaldo(
+            "Your credit balance is too low to access the Anthropic API"
+        )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat,
+        triagem_fn=_triagem_sem_credito,
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    para_mario = [
+        c.args[1] for c in jurichat.send_message.call_args_list
+        if c.args[0] == "mario-conv"
+    ]
+    assert len(para_mario) == 1, "2 leads falhando = 1 alerta, não 2"
+    assert "triagem parada" in para_mario[0].lower()
+    assert "saldo" in para_mario[0].lower()
+
+    # Os dois leads seguem em_conversa (re-tenta) e carregam a causa no erro.
+    for conv in ("C-1", "C-2"):
+        lead = get_lead_by_conversation(db_conn, conv)
+        assert lead["estado"] == Estado.EM_CONVERSA
+        assert lead["erro_atual"] == "triagem_api_saldo"
+    # Hash NÃO atualizado → quando o crédito voltar, a mensagem é reprocessada.
+    assert get_lead_by_conversation(db_conn, "C-1")["ultimo_transcript_hash"] == "stale"
+
+
+@pytest.mark.asyncio
+async def test_erro_comum_na_triagem_nao_vira_alerta_de_api(db_conn):
+    """Bug nosso (TypeError) continua silencioso pro canal do Mario — o alerta
+    de sistema é só pra falha de infra, senão vira ruído e ninguém lê."""
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+    jurichat = _make_jurichat("Lead: oi")
+
+    async def _triagem_bug(**kwargs):
+        raise TypeError("'NoneType' object is not subscriptable")
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=_triagem_bug,
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    para_mario = [
+        c for c in jurichat.send_message.call_args_list
+        if c.args[0] == "mario-conv"
+    ]
+    assert para_mario == []
+    assert get_lead_by_conversation(db_conn, "C-1")["erro_atual"] == (
+        "triagem_unexpected_error"
+    )

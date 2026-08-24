@@ -777,6 +777,45 @@ def marcar_evento_manual_alertado(
     )
 
 
+def deve_alertar_global(
+    conn: sqlite3.Connection, chave: str, *, cooldown_min: int,
+) -> bool:
+    """True (e carimba) quando o alerta de SISTEMA ``chave`` pode sair agora.
+
+    Alerta de sistema (ex.: "a triagem parou por falta de crédito") vale por
+    ciclo, não por lead: sem cooldown, uma fila de 100 leads vira 100 avisos e
+    queima o canal (foi o que a enxurrada de 40 alertas F1 de 24/jul mostrou).
+
+    BEGIN IMMEDIATE porque web e scheduler são processos separados — o
+    check-then-write precisa ser atômico pra dois ticks não alertarem juntos.
+    """
+    limite = f"-{int(cooldown_min)} minutes"
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT 1 FROM alertas_globais "
+            "WHERE chave = ? AND ultimo_em > datetime('now', ?)",
+            (chave, limite),
+        ).fetchone()
+        if row is not None:
+            conn.execute("COMMIT")
+            return False
+        conn.execute(
+            "INSERT INTO alertas_globais (chave, ultimo_em) "
+            "VALUES (?, datetime('now')) "
+            "ON CONFLICT(chave) DO UPDATE SET ultimo_em = datetime('now')",
+            (chave,),
+        )
+        conn.execute("COMMIT")
+        return True
+    except sqlite3.OperationalError:
+        # Lock ou tabela indisponível: NÃO alerta (o alerta volta no próximo
+        # tick). Silenciar 1 aviso é melhor que derrubar o ciclo inteiro.
+        with contextlib.suppress(sqlite3.OperationalError):
+            conn.execute("ROLLBACK")
+        return False
+
+
 def marcar_ah_checado(conn: sqlite3.Connection, lead_id: int) -> None:
     """H2 (auditoria 24/jun): carimba ah_checado_em = now → rotaciona o lead pro
     fim da fila da sweep de re-engaje. NÃO toca atualizado_em (que é 'última

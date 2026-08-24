@@ -69,6 +69,14 @@ CREATE TABLE IF NOT EXISTS audio_transcricoes (
     criado_em   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Cooldown de alertas de SISTEMA (não são por lead). Ex.: a triagem parou
+-- por falha de API/billing — 100 leads na fila não podem virar 100 avisos.
+-- Uma linha por chave de alerta, com o carimbo do último envio.
+CREATE TABLE IF NOT EXISTS alertas_globais (
+    chave     TEXT PRIMARY KEY,
+    ultimo_em TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Processos com monitoringStatus=ERRO já vistos pelo job de saúde da
 -- carteira. Serve pra destacar 🆕 só os que entraram em erro desde a
 -- última execução (em vez de repetir a lista inteira toda semana).

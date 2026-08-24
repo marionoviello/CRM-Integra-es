@@ -71,6 +71,7 @@ from noviello_funil.state import (
     clear_horarios_oferecidos,
     clear_reuniao,
     create_lead_if_absent,
+    deve_alertar_global,
     event_ids_de_reunioes,
     evento_manual_ja_alertado,
     get_audio_transcricao,
@@ -1078,6 +1079,82 @@ async def _handoff_sem_calendar(
 # Mario sobre um lead preso em falha de API recorrente.
 _ALERTA_ERRO_CONSECUTIVO = 3
 
+# Falha de API na triagem: quanto tempo entre dois avisos da MESMA categoria.
+_COOLDOWN_ALERTA_API_MIN = 60
+
+_ROTULO_ERRO_API = {
+    "saldo": "SALDO DA ANTHROPIC ZERADO (ou billing bloqueado)",
+    "chave": "CHAVE DE API recusada (401/403)",
+    "rate_limit": "RATE LIMIT da API (429)",
+    "sobrecarga": "API da Anthropic indisponível (5xx)",
+    "conexao": "sem conexão com a API da Anthropic",
+}
+
+# Marcadores de crédito/billing na mensagem do 400 (o 400 genérico é bug nosso,
+# não incidente de conta — por isso a checagem é pelo texto, não só pelo status).
+_MARCADORES_SALDO = (
+    "credit balance", "billing", "insufficient", "quota", "payment",
+)
+
+
+def classificar_erro_api(exc: BaseException) -> str | None:
+    """Categoria do erro quando ele é falha de INFRA da API, senão ``None``.
+
+    Existe por causa do incidente de ~09/jul: o crédito da Anthropic zerou,
+    TODA a triagem passou a levantar BadRequestError, o catch genérico engoliu
+    e o Mario só descobriu porque a IA "ficou muda" em vários leads ao mesmo
+    tempo. Erro do nosso código (TypeError, KeyError, 400 comum) NÃO entra aqui
+    — alerta que grita por qualquer coisa é alerta que ninguém lê.
+    """
+    texto = str(exc).lower()
+    status = getattr(exc, "status_code", None)
+    if not isinstance(status, int):
+        status = None
+
+    if any(m in texto for m in _MARCADORES_SALDO):
+        return "saldo"
+    if status in (401, 403):
+        return "chave"
+    if status == 429:
+        return "rate_limit"
+    if status is not None and status >= 500:
+        return "sobrecarga"
+    nome = type(exc).__name__.lower()
+    if "connection" in nome or "timeout" in nome:
+        return "conexao"
+    return None
+
+
+async def _alertar_falha_api(
+    conn: Any,
+    jurichat: JurichatClient,
+    mario_conversation_id: str,
+    *,
+    categoria: str,
+    detalhe: str,
+) -> None:
+    """Avisa o Mario UMA vez por hora que a triagem está parada por falha de API.
+
+    Sem isto o bot fica mudo pra TODOS os leads em silêncio (nenhum alerta é
+    por lead: a causa é única e global). O cooldown por categoria evita a
+    enxurrada quando a fila inteira falha no mesmo tick.
+    """
+    if not deve_alertar_global(
+        conn, f"api:{categoria}", cooldown_min=_COOLDOWN_ALERTA_API_MIN,
+    ):
+        return
+    rotulo = _ROTULO_ERRO_API.get(categoria, categoria)
+    await notify_mario(
+        jurichat,
+        mario_conversation_id=mario_conversation_id,
+        mensagem=(
+            f"🚨 TRIAGEM PARADA — {rotulo}.\n"
+            "Os leads NÃO estão sendo respondidos enquanto isso durar "
+            "(o bot re-tenta a cada ciclo).\n"
+            f"Erro: {detalhe[:300]}"
+        ),
+    )
+
 
 async def _alertar_leads_presos(
     conn: Any,
@@ -2046,8 +2123,26 @@ async def run_poll_cycle(
             logger.exception(
                 "triagem unexpected error for lead=%s: %s", lead_id, exc,
             )
-            register_error(conn, lead_id, "triagem_unexpected_error")
+            categoria = classificar_erro_api(exc)
+            register_error(
+                conn, lead_id,
+                f"triagem_api_{categoria}" if categoria
+                else "triagem_unexpected_error",
+            )
             schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
+            # Falha de INFRA da API (crédito zerado, chave, rate limit): a causa
+            # é global, não do lead — avisa o Mario 1×/hora por categoria. Sem
+            # isto a triagem morre em silêncio (incidente de ~09/jul).
+            if categoria:
+                try:
+                    await _alertar_falha_api(
+                        conn, jurichat, mario_conversation_id,
+                        categoria=categoria, detalhe=str(exc),
+                    )
+                except Exception as exc2:
+                    logger.exception(
+                        "alerta de falha de API não saiu: %s", exc2,
+                    )
             continue
 
         # P0 (auditoria 24/jun): cada triagem bem-sucedida conta um turno. É o
