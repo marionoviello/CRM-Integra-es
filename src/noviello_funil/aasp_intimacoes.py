@@ -116,3 +116,49 @@ def normalizar_item(raw: dict) -> dict:
         "data": data,
         "jornal": jornal,
     }
+
+
+def buscar_intimacoes(
+    client: httpx.Client, chave_api: str, data: datetime.date,
+) -> list[dict]:
+    """GET /api/Associado/intimacao/json de UM dia. Levanta em erro.
+
+    `erro: true` com HTTP 200 é o jeito da AASP sinalizar falha (chave
+    inválida etc.) — vira exceção pra o run falhar visível no journal,
+    nunca "zero intimações" silencioso.
+    """
+    r = client.get(
+        "/api/Associado/intimacao/json",
+        params={"chave": chave_api, "data": data.isoformat()},
+    )
+    r.raise_for_status()
+    corpo = r.json()
+    if corpo.get("erro"):
+        raise RuntimeError(f"AASP retornou erro: {corpo.get('status')!r}")
+    return [i for i in (corpo.get("intimacoes") or []) if isinstance(i, dict)]
+
+
+def salvar_raw(conn, item: dict, data_consulta: str) -> None:
+    """Payload bruto → aasp_raw (dedup por hash do JSON canônico)."""
+    payload = json.dumps(item, ensure_ascii=False, sort_keys=True)
+    h = hashlib.sha256(payload.encode()).hexdigest()
+    conn.execute(
+        "INSERT OR IGNORE INTO aasp_raw (hash, payload, data_consulta) "
+        "VALUES (?, ?, ?)",
+        (h, payload, data_consulta),
+    )
+
+
+def ja_vista(conn, chave: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM aasp_intimacao_vista WHERE chave = ?", (chave,),
+    ).fetchone()
+    return row is not None
+
+
+def marcar_vista(conn, chave: str, processo: str, law_suit_id: str) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO aasp_intimacao_vista "
+        "(chave, processo, law_suit_id) VALUES (?, ?, ?)",
+        (chave, processo, law_suit_id),
+    )

@@ -107,6 +107,67 @@ def test_normalizar_item_sem_processo_nao_quebra():
     assert item["teor"] == "Edital genérico."
 
 
+# --- buscar_intimacoes / raw / vista -----------------------------------------
+
+def _aasp_client():
+    return httpx.Client(base_url="https://intimacaoapi.aasp.org.br")
+
+
+def test_buscar_intimacoes_ok(respx_mock):
+    from noviello_funil.aasp_intimacoes import buscar_intimacoes
+    respx_mock.get(
+        "https://intimacaoapi.aasp.org.br/api/Associado/intimacao/json",
+    ).mock(
+        return_value=httpx.Response(200, json={
+            "intimacoes": [{"numeroProcesso": "1"}, "lixo-nao-dict"],
+            "erro": False, "status": "Sucesso",
+        }),
+    )
+    c = _aasp_client()
+    try:
+        itens = buscar_intimacoes(c, "chave-teste", datetime.date(2026, 8, 20))
+    finally:
+        c.close()
+    assert itens == [{"numeroProcesso": "1"}]   # não-dict filtrado
+    req = respx_mock.calls.last.request
+    assert "chave=chave-teste" in str(req.url)
+    assert "data=2026-08-20" in str(req.url)
+
+
+def test_buscar_intimacoes_erro_da_api_levanta(respx_mock):
+    from noviello_funil.aasp_intimacoes import buscar_intimacoes
+    respx_mock.get(
+        "https://intimacaoapi.aasp.org.br/api/Associado/intimacao/json",
+    ).mock(
+        return_value=httpx.Response(200, json={
+            "intimacoes": [], "erro": True, "status": "Chave inválida",
+        }),
+    )
+    c = _aasp_client()
+    try:
+        with pytest.raises(RuntimeError, match="Chave inv"):
+            buscar_intimacoes(c, "chave-ruim", datetime.date(2026, 8, 20))
+    finally:
+        c.close()
+
+
+def test_salvar_raw_dedup(conn):
+    from noviello_funil.aasp_intimacoes import salvar_raw
+    item = {"numeroProcesso": "1", "conteudo": "X"}
+    salvar_raw(conn, item, "2026-08-20")
+    salvar_raw(conn, item, "2026-08-21")   # mesmo payload → não duplica
+    n = conn.execute("SELECT COUNT(*) FROM aasp_raw").fetchone()[0]
+    assert n == 1
+
+
+def test_vista_roundtrip(conn):
+    from noviello_funil.aasp_intimacoes import ja_vista, marcar_vista
+    assert not ja_vista(conn, "abc")
+    marcar_vista(conn, "abc", "1234567-08.2026.8.26.0100", "uuid-1")
+    assert ja_vista(conn, "abc")
+    marcar_vista(conn, "abc", "x", "y")   # idempotente, não levanta
+
+
 def test_chave_dedup_estavel_e_distinta():
     from noviello_funil.aasp_intimacoes import normalizar_item
     a = {"numeroProcesso": "1", "conteudo": "X",
