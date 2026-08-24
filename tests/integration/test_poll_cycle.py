@@ -2527,6 +2527,63 @@ async def test_aguardando_humano_ultima_linha_atendente_nao_reabre(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_lead_pede_encerrar_despedida_unica_e_estado_terminal(db_conn):
+    """Caso Janio (17/ago): lead disse 'Pode encerrar', a Julia se despediu e
+    depois VOLTOU 3x ('porta aberta', 'fico à disposição') a cada 👍 dele.
+    Agora existe a ação encerrar_atendimento: despedida ÚNICA + transição
+    TERMINAL (encerrado_a_pedido) — sem follow-up, sem reabertura."""
+    transcript = "Atendente: Posso encerrar por aqui?\nLead: Pode encerrar"
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = await _triagem_returning(Decisao(
+        acao="encerrar_atendimento",
+        mensagem="Combinado! Encerro por aqui. Quando precisar, é só chamar.",
+    ))
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.AGUARDANDO_HUMANO
+    from noviello_funil.state import ultimo_motivo_transicao
+    assert ultimo_motivo_transicao(db_conn, lead["id"]) == "encerrado_a_pedido"
+    despedidas = [c.args[1] for c in jurichat.send_message.await_args_list
+                  if c.args[0] == "C-1"]
+    assert len(despedidas) == 1
+    assert "Encerro por aqui" in despedidas[0]
+
+
+@pytest.mark.asyncio
+async def test_encerrado_a_pedido_e_terminal_emoji_nao_reabre(db_conn):
+    """Caso Janio, parte 2: depois do encerramento a pedido, o 👍 do lead NÃO
+    pode reabrir nem gerar nova despedida — motivo terminal fica MUDO."""
+    transcript = "Atendente: Combinado! Encerro por aqui.\nLead: 👍"
+    _insert_lead_estado(db_conn, Estado.AGUARDANDO_HUMANO, hash_="stale")
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    # Encerrado há 2h — FORA do cooldown 1.46: só a TERMINALIDADE segura o
+    # silêncio (sem isso o cooldown mascararia o teste).
+    ha_2h = (datetime.datetime.utcnow() - datetime.timedelta(hours=2)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    _insert_transicao_ah(db_conn, lead["id"], "encerrado_a_pedido", criado_em=ha_2h)
+
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = AsyncMock(side_effect=AssertionError("terminal não reabre"))
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["estado"] == Estado.AGUARDANDO_HUMANO   # segue encerrado
+    jurichat.send_message.assert_not_called()           # MUDO de verdade
+
+
+@pytest.mark.asyncio
 async def test_aguardando_humano_nao_reabre_logo_apos_handoff(db_conn):
     """Signal 1.46 (2026-07-06): o handoff (ex: claude_handoff) acabou de
     acontecer e o lead respondeu na hora (ex: "Ok obrigada") — o bot NÃO

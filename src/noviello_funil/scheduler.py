@@ -1443,6 +1443,9 @@ _MOTIVOS_AH_TERMINAIS = frozenset({
     "filtro_tem_responsavel",
     "filtro_tag_exclusao",
     "excluido_followup_etiqueta",
+    # Caso Janio (17/ago): lead pediu pra encerrar → despedida ÚNICA e mudo
+    # de verdade — 👍/reação/nova msg NÃO reabre nem gera outra "porta aberta".
+    "encerrado_a_pedido",
 })
 
 # H2 (auditoria 24/jun): máx. de leads AGUARDANDO_HUMANO checados por tick na
@@ -2540,6 +2543,31 @@ async def run_poll_cycle(
                 mario_conversation_id=mario_conversation_id,
                 poll_interval_seconds=poll_interval_seconds,
             )
+
+        elif decisao.acao == "encerrar_atendimento":
+            # Caso Janio (17/ago): lead pediu pra encerrar ("pode encerrar",
+            # "sem interesse"). Despedida ÚNICA + transição TERMINAL — antes
+            # não havia ação disso, o lead seguia em_conversa e cada 👍 dele
+            # rendia outra despedida ("porta aberta" 3x no mesmo dia).
+            clear_horarios_oferecidos(conn, lead_id)
+            msg_bye = _RE_PLACEHOLDER.sub("", (decisao.mensagem or "")).strip() or (
+                "Combinado! Encerro nosso atendimento por aqui. Quando "
+                "precisar, é só chamar. 🙏"
+            )
+            transicao(
+                conn, lead_id, Estado.AGUARDANDO_HUMANO,
+                motivo="encerrado_a_pedido",
+                proxima_acao_horas=CLEAR_PROXIMA_ACAO,
+            )
+            update_transcript_hash(conn, lead_id, new_hash)
+            try:
+                await jurichat.start_human_support(conv_id)
+                await jurichat.send_message(conv_id, msg_bye)
+            except Exception as exc:
+                logger.exception(
+                    "send_message(encerrar_atendimento) failed lead=%s: %s",
+                    lead_id, exc,
+                )
 
         elif decisao.acao == "handoff":
             clear_horarios_oferecidos(conn, lead_id)  # S6 (16/jun)
