@@ -99,6 +99,49 @@ def test_normalizar_item_variantes_e_case_insensitive():
     assert item["jornal"] == "DJE SP"
 
 
+def test_normalizar_item_schema_real_aasp():
+    """Estrutura REAL da API (mapeada 25/08/2026 com intimação de verdade):
+    numeroUnicoProcesso no topo, teor em textoPublicacao, jornal é um
+    OBJETO {nomeJornal, dataDisponibilizacao_Publicacao} e a data só
+    existe dentro dele."""
+    from noviello_funil.aasp_intimacoes import normalizar_item
+    item = normalizar_item({
+        "jornal": {
+            "nomeJornal": "DJENTJSP",
+            "dataTratamento": "2026-08-24T11:50:29.36",
+            "dataDisponibilizacao_Publicacao": "2026-08-25T00:00:00",
+            "termoReferenciaData": "Disponibilização",
+            "totalIntimacoes": 0,
+        },
+        "textoPublicacao": "\n\r Processo: 1234567-08.2026.8.26.0100\n\r "
+                           "Órgão: 1ª Vara Teste\r Vistos. Intime-se.",
+        "titulo": "TJSP Diário de Justiça Eletrônico Nacional",
+        "numeroPublicacao": 109487,
+        "numeroArquivo": 1,
+        "cabecalho": "Intimação\r\n",
+        "rodape": None,
+        "codigoRelacionamento": 12221722860,
+        "numeroUnicoProcesso": "1234567-08.2026.8.26.0100",
+    })
+    assert item["processo"] == "1234567-08.2026.8.26.0100"
+    assert item["processo_digitos"] == "12345670820268260100"
+    assert item["jornal"] == "DJENTJSP"
+    assert item["data"] == "2026-08-25"
+    assert "Vistos. Intime-se." in item["teor"]
+    assert "{" not in item["jornal"]     # objeto jornal nunca vira str(dict)
+
+
+def test_normalizar_item_jornal_dict_sem_nome_usa_titulo():
+    from noviello_funil.aasp_intimacoes import normalizar_item
+    item = normalizar_item({
+        "jornal": {"totalIntimacoes": 0},
+        "titulo": "TJSP DJEN",
+        "numeroUnicoProcesso": "1234567-08.2026.8.26.0100",
+        "textoPublicacao": "X",
+    })
+    assert item["jornal"] == "TJSP DJEN"
+
+
 def test_normalizar_item_sem_processo_nao_quebra():
     from noviello_funil.aasp_intimacoes import normalizar_item
     item = normalizar_item({"conteudo": "Edital genérico."})

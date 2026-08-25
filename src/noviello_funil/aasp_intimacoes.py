@@ -39,15 +39,23 @@ MAX_ITENS = 12                # cap de itens detalhados na mensagem
 _TEOR_ANDAMENTO_CHARS = 4000  # teor no andamento do Juridiq
 _RESUMO_CHARS = 90
 
-# Variantes de nome de campo (schema AASP desconhecido — ver docstring).
-_CAMPOS_PROCESSO = ("numeroProcesso", "numeroProcessoMascara", "processo",
-                    "numProcesso")
-_CAMPOS_TEOR = ("conteudo", "despacho", "texto", "teor", "textoPublicacao",
+# Nomes de campo do item da AASP. Schema REAL mapeado em 25/08/2026 com a
+# 1ª intimação de verdade: numeroUnicoProcesso (nº CNJ mascarado),
+# textoPublicacao (teor, texto plano), titulo, cabecalho,
+# codigoRelacionamento (id único AASP) e jornal como OBJETO
+# {nomeJornal, dataDisponibilizacao_Publicacao, ...} — a data da intimação
+# só existe dentro dele. As variantes extras ficam como defesa.
+_CAMPOS_PROCESSO = ("numeroUnicoProcesso", "numeroProcesso",
+                    "numeroProcessoMascara", "processo", "numProcesso")
+_CAMPOS_TEOR = ("textoPublicacao", "conteudo", "despacho", "texto", "teor",
                 "publicacao")
 _CAMPOS_DATA = ("dataDisponibilizacao", "dataPublicacao", "dataDivulgacao",
                 "data")
 _CAMPOS_JORNAL = ("jornal", "nomeJornal", "descricaoJornal", "diario",
-                  "caderno")
+                  "caderno", "titulo")
+_CAMPOS_JORNAL_DICT = ("nomeJornal", "descricaoJornal", "nome")
+_CAMPOS_DATA_JORNAL = ("dataDisponibilizacao_Publicacao",
+                       "dataDisponibilizacao", "dataPublicacao")
 
 
 def _so_digitos(s: object) -> str:
@@ -83,16 +91,42 @@ def _limpar_html(html: object) -> str:
 
 
 def _primeiro_campo(raw: dict, campos: tuple[str, ...]) -> str:
+    def _ok(v: object) -> bool:
+        # dict/list nunca viram valor — str({...}) no meio do andamento.
+        return bool(v) and not isinstance(v, (dict, list)) and str(v).strip()
+
     for c in campos:
         v = raw.get(c)
-        if v and str(v).strip():
+        if _ok(v):
             return str(v).strip()
     lower = {str(k).lower(): v for k, v in raw.items()}
     for c in campos:
         v = lower.get(c.lower())
-        if v and str(v).strip():
+        if _ok(v):
             return str(v).strip()
     return ""
+
+
+def _extrair_jornal_e_data(raw: dict) -> tuple[str, str]:
+    """Nome do jornal + data da intimação, cobrindo o `jornal` OBJETO.
+
+    Data preferida: a do objeto jornal (dataDisponibilizacao_Publicacao,
+    ISO → só YYYY-MM-DD). Fallback: campos de data no topo do item.
+    """
+    jdict = raw.get("jornal")
+    jdict = jdict if isinstance(jdict, dict) else {}
+    jornal = (
+        _primeiro_campo(jdict, _CAMPOS_JORNAL_DICT)
+        or _primeiro_campo(raw, _CAMPOS_JORNAL)
+    )
+    data = (
+        _primeiro_campo(jdict, _CAMPOS_DATA_JORNAL)
+        or _primeiro_campo(raw, _CAMPOS_DATA)
+    )
+    m = re.match(r"^(\d{4}-\d{2}-\d{2})", data)
+    if m:
+        data = m.group(1)
+    return jornal, data
 
 
 def normalizar_item(raw: dict) -> dict:
@@ -104,9 +138,11 @@ def normalizar_item(raw: dict) -> dict:
     processo_raw = _primeiro_campo(raw, _CAMPOS_PROCESSO)
     digits = _so_digitos(processo_raw)
     teor = _limpar_html(_primeiro_campo(raw, _CAMPOS_TEOR))
-    data = _primeiro_campo(raw, _CAMPOS_DATA)
-    jornal = _primeiro_campo(raw, _CAMPOS_JORNAL)
-    chave = hashlib.sha256(f"{digits}|{data}|{teor}".encode()).hexdigest()
+    jornal, data = _extrair_jornal_e_data(raw)
+    # codigoRelacionamento (id único da AASP) ancora a dedup quando existe;
+    # o hash de conteúdo continua no fallback e protege contra reemissão.
+    cod = _primeiro_campo(raw, ("codigoRelacionamento",))
+    chave = hashlib.sha256(f"{cod}|{digits}|{data}|{teor}".encode()).hexdigest()
     return {
         "chave": chave,
         "processo_raw": processo_raw,

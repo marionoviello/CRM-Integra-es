@@ -5,7 +5,12 @@ Description=Noviello Funil Saude - Intimacoes AASP (diario 07h45 BRT)
 # 10:45 UTC = 07:45 America/Sao_Paulo — antes do noviello-publicacoes
 # (08h30 BRT). Diario incluindo fds: publicacao e rara no sabado mas a
 # janela de 3 dias + dedup tornam o run barato e idempotente.
+# 2a rodada 17:00 UTC = 14:00 BRT: a AASP carrega as intimacoes DO DIA
+# "no decorrer do dia" (confirmado 25/08: as 07:45 a API ainda nao tinha
+# as intimacoes do proprio dia; ao meio-dia ja tinha). A dedup garante
+# que nada duplica entre as duas rodadas.
 OnCalendar=*-*-* 10:45:00
+OnCalendar=*-*-* 17:00:00
 Persistent=true
 Unit=noviello-aasp.service
 
