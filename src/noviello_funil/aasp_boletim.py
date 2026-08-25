@@ -127,6 +127,12 @@ def main() -> int:
 
     import asyncio
 
+    # Boletim vai pro(s) id(s) padrão + extras (ex.: Hilde) — notify_mario
+    # aceita CSV e deduplica; os extras NÃO recebem os demais alertas.
+    destinos = settings.mario_conversation_id
+    if settings.aasp_boletim_destinatarios_extra.strip():
+        destinos += f",{settings.aasp_boletim_destinatarios_extra}"
+
     async def _send() -> None:
         jurichat = JurichatClient(
             api_key=settings.jurichat_api_key,
@@ -136,7 +142,7 @@ def main() -> int:
         try:
             await notify_mario(
                 jurichat,
-                mario_conversation_id=settings.mario_conversation_id,
+                mario_conversation_id=destinos,
                 mensagem=texto,
             )
         finally:

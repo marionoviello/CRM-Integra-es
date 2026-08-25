@@ -179,6 +179,9 @@ class Settings(BaseSettings):
     # Boletim diário de andamento da integração (semana de estreia).
     # Data-limite inclusiva (ISO); vazio = boletim permanente.
     aasp_boletim_ate: str = "2026-08-30"
+    # Destinatários EXTRAS do boletim (CSV de conversation ids do Jurichat,
+    # ex.: o da Hilde) — recebem SÓ o boletim, não os demais alertas.
+    aasp_boletim_destinatarios_extra: str = ""
 
     # ZapSign — fechamento de contrato com assinatura eletrônica (3.x).
     # Fluxo 1-TOQUE: o bot monta a minuta e o Mario aprova UM contrato por
