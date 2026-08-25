@@ -169,6 +169,14 @@ class Settings(BaseSettings):
     aasp_dias_janela: int = Field(default=3, ge=1)
     aasp_criar_tarefa: bool = True
 
+    # Conferência dos E-MAILS de intimação (AASP + Recorte Digital OAB/SP)
+    # × integração (aasp_conferencia): fonte independente de verificação.
+    # Reusa o IMAP do detector_bounce (smtp_user/smtp_password).
+    aasp_conferencia_remetentes: str = (
+        "intimacoes@info.aasp.org.br,oabsp@recortedigital.adv.br"
+    )
+    aasp_conferencia_dias: int = Field(default=2, ge=1)
+
     # ZapSign — fechamento de contrato com assinatura eletrônica (3.x).
     # Fluxo 1-TOQUE: o bot monta a minuta e o Mario aprova UM contrato por
     # vez. O create-doc SÓ roda depois da aprovação humana — nunca 100%

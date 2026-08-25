@@ -1,0 +1,14 @@
+[Unit]
+Description=Noviello Funil Saude - Conferencia intimacoes (diario 15h15 BRT)
+
+[Timer]
+# 18:15 UTC = 15:15 America/Sao_Paulo — DEPOIS da 2a rodada da API AASP
+# (17:00 UTC): confere os e-mails do dia contra o que a integracao ja
+# processou. Dia com intimacao gera confirmacao positiva no WhatsApp
+# (silencio nunca e ambiguo); divergencia gera alerta.
+OnCalendar=*-*-* 18:15:00
+Persistent=true
+Unit=noviello-aasp-conferencia.service
+
+[Install]
+WantedBy=timers.target
