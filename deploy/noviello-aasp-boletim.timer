@@ -1,0 +1,13 @@
+[Unit]
+Description=Noviello Funil Saude - Boletim AASP (diario 18h BRT, ate 30/08)
+
+[Timer]
+# 21:00 UTC = 18:00 America/Sao_Paulo — fim do dia util, depois de todas
+# as rodadas (API 07h45/14h, conferencia 15h15). O proprio script para de
+# enviar apos AASP_BOLETIM_ATE (default 2026-08-30) — o timer pode ficar.
+OnCalendar=*-*-* 21:00:00
+Persistent=true
+Unit=noviello-aasp-boletim.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=Noviello Funil Saude - Boletim diario da integracao AASP
+After=network.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=300
+User=noviello
+Group=noviello
+WorkingDirectory=/opt/noviello-funil-saude
+EnvironmentFile=/opt/noviello-funil-saude/.env
+ExecStart=/opt/noviello-funil-saude/.venv/bin/noviello-aasp-boletim
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true

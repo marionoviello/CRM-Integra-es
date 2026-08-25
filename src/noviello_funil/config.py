@@ -176,6 +176,9 @@ class Settings(BaseSettings):
         "intimacoes@info.aasp.org.br,oabsp@recortedigital.adv.br"
     )
     aasp_conferencia_dias: int = Field(default=2, ge=1)
+    # Boletim diário de andamento da integração (semana de estreia).
+    # Data-limite inclusiva (ISO); vazio = boletim permanente.
+    aasp_boletim_ate: str = "2026-08-30"
 
     # ZapSign — fechamento de contrato com assinatura eletrônica (3.x).
     # Fluxo 1-TOQUE: o bot monta a minuta e o Mario aprova UM contrato por

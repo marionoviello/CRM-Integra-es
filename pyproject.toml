@@ -41,6 +41,7 @@ noviello-triagem-financeira = "noviello_funil.triagem_financeira:main"
 noviello-boletim = "noviello_funil.boletim_mensal:main"
 noviello-aasp = "noviello_funil.aasp_intimacoes:main"
 noviello-aasp-conferencia = "noviello_funil.aasp_conferencia:main"
+noviello-aasp-boletim = "noviello_funil.aasp_boletim:main"
 
 [build-system]
 requires = ["hatchling"]
