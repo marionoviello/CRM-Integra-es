@@ -1,4 +1,4 @@
-"""Conferência e-mails (AASP + Recorte Digital OAB) × integração AASP.
+"""Conferência tripla: e-mails (AASP + Recorte OAB) × integração × painel.
 
 O ``aasp_intimacoes`` grava as intimações da API AASP no Juridiq, mas
 "total segurança" pede fonte de verificação INDEPENDENTE: os e-mails que
@@ -6,16 +6,31 @@ a AASP (intimacoes@info.aasp.org.br) e o Recorte Digital da OAB/SP
 (oabsp@recortedigital.adv.br) mandam todo dia listam as mesmas
 publicações por outro canal. Este job lê esses e-mails via IMAP (mesma
 conta/senha de app do detector_bounce), extrai TODOS os números CNJ e
-cruza com o que a integração processou (``aasp_intimacao_vista``).
+cruza com DUAS referências:
+
+1. o que a nossa integração processou (``aasp_intimacao_vista``, SQLite);
+2. o que o painel do Juridiq REALMENTE tem (``GET /publication/?start&end``)
+   — 3ª fonte, que o item 1 não substitui: a tabela local registra o que
+   o NOSSO job achou que gravou, não o que o Juridiq recebeu.
+
+A comparação é assimétrica de propósito: só interessa o que chegou por
+e-mail e não chegou ao destino. AASP e Recorte OAB têm coberturas
+legitimamente diferentes (recorte AASP × DJE-SP pela OAB), então exigir
+que as três fontes coincidam produziria divergência todo santo dia.
 
 Resultado no WhatsApp:
 - dia COM intimação e tudo capturado → confirmação positiva curta
   ("N números conferidos ✓") — o silêncio nunca é ambíguo num dia com
   publicação;
-- número no e-mail que a integração NÃO processou → alerta 🚨 com fonte
-  e processo (pode ser atraso da API, falha do job, ou publicação que só
-  o Recorte OAB cobre — ex.: DJU/federal fora do recorte AASP);
+- número do e-mail fora da integração E fora do painel → alerta 🚨 (é o
+  caso que pode passar batido de verdade);
+- número fora da integração mas presente no painel → aviso ⚠️ (o
+  processo não sumiu, só não veio pelo nosso job);
 - nenhum e-mail com intimação na janela → silêncio (exit 0).
+
+Sem ``JURIDIQ_API_KEY``, ou com a API fora do ar, a 3ª fonte fica de
+fora e o job volta ao comportamento de 2 fontes — nunca o contrário
+(painel indisponível jamais vira "sumiu do Juridiq").
 
 Limite conhecido (v1): a conferência é por NÚMERO de processo, não por
 quantidade de atos — duas intimações do mesmo processo no mesmo dia com
@@ -81,10 +96,93 @@ def numeros_processados(conn, dias: int) -> set[str]:
     return nums
 
 
+def numeros_no_painel(
+    client, dias: int, hoje: object = None,
+) -> set[str] | None:
+    """Números (20 dígitos) que o painel do Juridiq REALMENTE tem na janela.
+
+    3ª fonte, independente do nosso SQLite: ``aasp_intimacao_vista`` só
+    registra o que a NOSSA integração achou que gravou; isto pergunta ao
+    Juridiq o que ele de fato tem, via ``GET /publication/?start&end``
+    (paginado). Quando o ``processNumber`` vem vazio ou "Não encontrado",
+    o número ainda está no teor — daí o fallback pelo regex CNJ.
+
+    Erro/indisponibilidade → ``None`` (≠ ``set()``): painel não
+    consultado nunca pode virar "sumiu do Juridiq".
+    """
+    import datetime
+
+    fim = hoje or datetime.datetime.now(datetime.UTC).date()
+    inicio = fim - datetime.timedelta(days=int(dias))
+    nums: set[str] = set()
+    page = 1
+    try:
+        while True:
+            resp = client.get(
+                "/publication/",
+                params={
+                    "page": page,
+                    "limit": 100,
+                    "start": inicio.isoformat(),
+                    "end": fim.isoformat(),
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            for pub in data.get("data", []):
+                digits = re.sub(r"\D", "", str(pub.get("processNumber") or ""))
+                if len(digits) == 20:
+                    nums.add(digits)
+                    continue
+                nums |= extrair_numeros_cnj(
+                    f"{pub.get('title') or ''} {pub.get('content') or ''}",
+                )
+            if page >= int(data.get("totalPages") or 1):
+                break
+            page += 1
+    except Exception as exc:
+        logger.warning(
+            "aasp_conferencia: painel Juridiq indisponível (%s) — 3ª fonte "
+            "fica de fora desta rodada", exc,
+        )
+        return None
+    return nums
+
+
+def fonte_painel(settings) -> set[str] | None:
+    """3ª fonte a partir das settings. ``None`` = painel não consultado
+    (sem ``JURIDIQ_API_KEY`` o job degrada pro modo 2 fontes de antes)."""
+    if not getattr(settings, "juridiq_api_key", ""):
+        logger.info(
+            "aasp_conferencia: JURIDIQ_API_KEY ausente — conferência sem a "
+            "3ª fonte (painel)",
+        )
+        return None
+    import httpx
+
+    client = httpx.Client(
+        base_url=settings.juridiq_base_url,
+        headers={"x-juridiq-api-key": settings.juridiq_api_key},
+        timeout=httpx.Timeout(30.0, connect=10.0),
+    )
+    try:
+        return numeros_no_painel(client, settings.aasp_conferencia_dias)
+    finally:
+        client.close()
+
+
 def conferir(
-    achados: dict[str, dict], processados: set[str],
+    achados: dict[str, dict],
+    processados: set[str],
+    no_painel: set[str] | None = None,
 ) -> list[dict]:
-    """Números dos e-mails que a integração NÃO processou (faltantes)."""
+    """Números dos e-mails que a integração NÃO processou (faltantes).
+
+    ``no_painel`` é a 3ª fonte (o que o Juridiq tem). Cada faltante sai
+    com a chave ``no_painel``: ``True`` (está no painel, só não veio pela
+    integração), ``False`` (não está em lugar nenhum) ou ``None`` (painel
+    não consultado).
+    """
     faltantes = []
     for digits, info in sorted(achados.items()):
         if digits in processados:
@@ -93,34 +191,67 @@ def conferir(
             "processo": _mascarar(digits),
             "fonte": info.get("fonte") or "?",
             "data": info.get("data") or "?",
+            "no_painel": None if no_painel is None else digits in no_painel,
         })
     return faltantes
 
 
+def _linhas_itens(itens: list[dict]) -> list[str]:
+    linhas = [
+        f"• {f['processo']} — {f['fonte']} ({f['data']})"
+        for f in itens[:MAX_ITENS]
+    ]
+    if len(itens) > MAX_ITENS:
+        linhas.append(f"… e mais {len(itens) - MAX_ITENS}.")
+    return linhas
+
+
 def montar_mensagem(faltantes: list[dict], total: int) -> str | None:
-    """Mensagem WhatsApp. None = nenhum e-mail com intimação (silêncio)."""
+    """Mensagem WhatsApp. None = nenhum e-mail com intimação (silêncio).
+
+    Dois baldes de severidade: o que não está NEM na integração NEM no
+    painel do Juridiq (🚨, publicação em risco de passar batida) e o que
+    está no painel mas fora da integração (⚠️, o processo não sumiu).
+    """
     if not total:
         return None
-    if not faltantes:
+    graves = [f for f in faltantes if not f.get("no_painel")]
+    brandos = [f for f in faltantes if f.get("no_painel")]
+
+    # Balde brando = só a contagem. O Juridiq já manda essas movimentações
+    # no WhatsApp por conta própria (ver publicacoes.py): repetir a lista
+    # aqui é o ruído duplicado que aquele job existe pra evitar. O detalhe
+    # item a item vai pro log, pra investigar quando interessar.
+    aviso = (
+        f"\n⚠️ Outro(s) {len(brandos)} número(s) não passaram pela integração "
+        "AASP→Juridiq, mas ESTÃO no painel (nada se perdeu — detalhe no log)."
+    ) if brandos else ""
+
+    if not graves:
+        estado = "presentes no Juridiq ✓" if brandos else "capturados pela integração ✓"
         return (
             f"🔎 *Conferência de intimações*: {total} número(s) nos e-mails "
-            "AASP/Recorte OAB — todos capturados pela integração ✓"
+            f"AASP/Recorte OAB — todos {estado}{aviso}"
         )
-    blocos = [
-        "🚨 *Conferência de intimações: DIVERGÊNCIA*",
-        f"Dos {total} número(s) nos e-mails, {len(faltantes)} NÃO passou(aram) "
-        "pela integração AASP→Juridiq:",
-        "",
-    ]
-    for f in faltantes[:MAX_ITENS]:
-        blocos.append(f"• {f['processo']} — {f['fonte']} ({f['data']})")
-    if len(faltantes) > MAX_ITENS:
-        blocos.append(f"… e mais {len(faltantes) - MAX_ITENS}.")
-    blocos.append(
-        "\nPossíveis causas: atraso da carga da AASP (a rodada das 14h pega), "
-        "publicação fora do recorte AASP (ex.: DJU/federal, só no Recorte "
-        "OAB) ou falha do job — conferir no painel do Juridiq."
-    )
+
+    blocos: list[str] = []
+    if graves:
+        confirmado = any(f.get("no_painel") is False for f in graves)
+        blocos.append("🚨 *Conferência de intimações: DIVERGÊNCIA*")
+        blocos.append(
+            f"Dos {total} número(s) nos e-mails, {len(graves)} NÃO passou(aram) "
+            "pela integração AASP→Juridiq"
+            + (" nem aparece(m) no painel do Juridiq:" if confirmado else ":")
+        )
+        blocos.append("")
+        blocos.extend(_linhas_itens(graves))
+        blocos.append(
+            "\nPossíveis causas: atraso da carga da AASP (a rodada das 14h pega), "
+            "publicação fora do recorte AASP (ex.: DJU/federal, só no Recorte "
+            "OAB) ou falha do job — conferir no painel do Juridiq."
+        )
+    if brandos:
+        blocos.append(aviso)
     return "\n".join(blocos)
 
 
@@ -267,7 +398,25 @@ def main() -> int:
     finally:
         conn.close()
 
-    faltantes = conferir(achados, processados)
+    no_painel = fonte_painel(settings)
+    if no_painel is not None:
+        logger.info(
+            "aasp_conferencia: %d publicação(ões) no painel do Juridiq na janela",
+            len(no_painel),
+        )
+
+    faltantes = conferir(achados, processados, no_painel)
+
+    # O WhatsApp só recebe a contagem dos que estão no painel; o detalhe
+    # fica aqui pra quando o Mario quiser ver a cobertura do recorte AASP.
+    for f in faltantes:
+        if f.get("no_painel"):
+            logger.info(
+                "aasp_conferencia: %s (%s, %s) está no painel do Juridiq mas "
+                "não passou pela integração AASP",
+                f["processo"], f["fonte"], f["data"],
+            )
+
     texto = montar_mensagem(faltantes, total=len(achados))
     if texto is None:
         return 0
