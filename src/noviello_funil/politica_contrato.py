@@ -47,3 +47,32 @@ def parse_politicas(raw: str) -> dict[str, str]:
 def politica_do_tipo(tipo_caso: str, politicas: dict[str, str]) -> str:
     """Política do tipo. Ausente → ``HUMANO``."""
     return politicas.get((tipo_caso or "").strip(), HUMANO)
+
+
+def decidir_liberacao(
+    *,
+    tipo_caso: str,
+    politicas: dict[str, str],
+    valor_honorarios: float,
+    teto_automatico: float,
+    tem_contra_assinante: bool,
+) -> tuple[bool, str]:
+    """Libera a assinatura sozinho? Devolve ``(libera, motivo)``.
+
+    Motivos possíveis: ``politica_automatica`` (libera), ``politica_humana``,
+    ``sem_contra_assinante``, ``acima_do_teto``.
+
+    Os freios DUROS do pipeline (conflito de interesse, escopo ausente, CPF
+    inválido, sem canal de contato) já barraram antes — nada chega aqui sem
+    ter passado por eles. Aqui só ficam os freios da LIBERAÇÃO.
+
+    Ordem importa: ``sem_contra_assinante`` é checado antes do teto porque é
+    o freio do fundamento ético, e é o que precisa aparecer no alerta.
+    """
+    if politica_do_tipo(tipo_caso, politicas) != AUTOMATICO:
+        return False, "politica_humana"
+    if not tem_contra_assinante:
+        return False, "sem_contra_assinante"
+    if teto_automatico > 0 and valor_honorarios > teto_automatico:
+        return False, "acima_do_teto"
+    return True, "politica_automatica"
