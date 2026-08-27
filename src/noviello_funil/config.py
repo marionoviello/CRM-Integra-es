@@ -210,9 +210,6 @@ class Settings(BaseSettings):
     # — order_group 2 na lista de signatários DO DOCUMENTO, não na config
     # (as duas podem divergir; o freio tem que proteger o fato). Default de
     # todo tipo de caso continua sendo o gate humano.
-    #
-    # ATENÇÃO: enquanto o orquestrador não consultar a política, estes dois
-    # campos NÃO têm efeito nenhum — nada libera sozinho, com ou sem eles.
     contratos_zapsign: bool = False
     zapsign_api_token: str = ""
     zapsign_base_url: str = "https://api.zapsign.com.br/api/v1"

@@ -32,6 +32,7 @@ from noviello_funil.orquestrador_contrato import (
     reconciliar_contratos_presos,
     reprovar_contrato,
 )
+from noviello_funil.politica_contrato import AUTOMATICO
 
 TIPO = "urbanistico_iptu_regularizacao"   # único escopo já cadastrado
 
@@ -1001,3 +1002,95 @@ def test_montar_signers_padrao_omite_sem_email():
     )
     signers = montar_signers_padrao(s)
     assert len(signers) == 1 and signers[0]["qualification"] == "Testemunha"
+
+
+# --- política de liberação por tipo de caso ----------------------------------
+
+@pytest.mark.asyncio
+async def test_tipo_sem_politica_continua_no_gate_humano():
+    """REGRESSÃO: sem config de política, tudo se comporta como antes."""
+    conn = _db()
+    asaas, zap = FakeAsaas(), FakeZapSign()
+
+    out = await _gerar(conn, asaas, zap)
+
+    assert out["status"] == "pendente_revisao"
+    assert zap.resend_calls == []
+
+
+@pytest.mark.asyncio
+async def test_politica_automatica_libera_e_chama_resend():
+    """SIGNERS_EXTRA já traz o escritório em order_group 2 — a contra-assinatura
+    existe, então o freio ético não dispara."""
+    conn = _db()
+    asaas, zap = FakeAsaas(), FakeZapSign()
+
+    out = await _gerar(conn, asaas, zap, politicas={TIPO: AUTOMATICO})
+
+    assert out["status"] == "liberado_automatico"
+    assert out["motivo_liberacao"] == "politica_automatica"
+    assert zap.resend_calls == [zap.doc_token]
+
+
+@pytest.mark.asyncio
+async def test_sem_escritorio_na_lista_nao_libera():
+    """FREIO ESTRUTURAL. Sem ninguém em order_group 2 no documento, não há
+    contra-assinatura — e é ela que sustenta o fundamento do modo automático.
+    O freio lê a lista REAL de signatários, não a config: config e documento
+    poderiam divergir, e aí o freio protegeria o fato errado."""
+    conn = _db()
+    asaas, zap = FakeAsaas(), FakeZapSign()
+    so_testemunha = [s for s in SIGNERS_EXTRA if s.get("order_group") != 2]
+
+    out = await _gerar(
+        conn, asaas, zap,
+        politicas={TIPO: AUTOMATICO},
+        signers_extra=so_testemunha,
+    )
+
+    assert out["status"] == "pendente_revisao"
+    assert out["motivo_liberacao"] == "sem_contra_assinante"
+    assert zap.resend_calls == []
+
+
+@pytest.mark.asyncio
+async def test_lista_de_signatarios_vazia_nao_libera():
+    conn = _db()
+    asaas, zap = FakeAsaas(), FakeZapSign()
+
+    out = await _gerar(
+        conn, asaas, zap, politicas={TIPO: AUTOMATICO}, signers_extra=[],
+    )
+
+    assert out["status"] == "pendente_revisao"
+    assert out["motivo_liberacao"] == "sem_contra_assinante"
+    assert zap.resend_calls == []
+
+
+@pytest.mark.asyncio
+async def test_politica_automatica_acima_do_teto_nao_libera():
+    conn = _db()
+    asaas, zap = FakeAsaas(), FakeZapSign()
+
+    out = await _gerar(
+        conn, asaas, zap,
+        politicas={TIPO: AUTOMATICO},
+        teto_automatico=100.0,
+    )
+
+    assert out["status"] == "pendente_revisao"
+    assert out["motivo_liberacao"] == "acima_do_teto"
+    assert zap.resend_calls == []
+
+
+@pytest.mark.asyncio
+async def test_send_automatic_email_continua_false_mesmo_no_automatico():
+    """INVARIANTE: o doc SEMPRE nasce em silêncio. Criar e liberar seguem
+    sendo duas chamadas — é o que permite mudar de política sem reescrever
+    o pipeline."""
+    conn = _db()
+    asaas, zap = FakeAsaas(), FakeZapSign()
+
+    await _gerar(conn, asaas, zap, politicas={TIPO: AUTOMATICO})
+
+    assert zap.create_calls[0]["send_automatic_email"] is False

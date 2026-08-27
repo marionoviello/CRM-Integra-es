@@ -51,6 +51,7 @@ from .contrato import (
     transicao_contrato,
 )
 from .escopos import resolver_escopo
+from .politica_contrato import decidir_liberacao
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,8 @@ async def gerar_contrato(
     base_url: str = "",
     person_id: str | None = None,
     lead_id: int | None = None,
+    politicas: dict[str, str] | None = None,
+    teto_automatico: float = 0.0,
 ) -> dict[str, Any]:
     """Executa [1]-[6]: conflito → escopo → contrato → Asaas → ZapSign silêncio.
 
@@ -164,6 +167,9 @@ async def gerar_contrato(
       - 'erro_asaas' → cobrança falhou; contrato fica em MONTAGEM (Mario retenta).
       - 'pendente_revisao' → doc criado em SILÊNCIO; devolve link de aprovação,
         sign_url (PDF real) e invoice_url.
+      - 'liberado_automatico' → a política do tipo de caso é automática e
+        nenhum freio disparou; a assinatura JÁ foi liberada ao cliente. O doc
+        nasceu em silêncio do mesmo jeito — criar e liberar seguem separados.
     """
     cliente_nome = cliente["nome_completo"]
 
@@ -223,6 +229,7 @@ async def gerar_contrato(
             valor_q=valor_q, valor_fmt=valor_fmt, valor_extenso=valor_extenso,
             template_id=template_id, signers_extra=signers_extra,
             due_date=due_date, base_url=base_url,
+            politicas=politicas, teto_automatico=teto_automatico,
         )
 
     # [3b] PERSISTE o contrato NOVO em MONTAGEM.
@@ -243,6 +250,7 @@ async def gerar_contrato(
         valor_q=valor_q, valor_fmt=valor_fmt, valor_extenso=valor_extenso,
         template_id=template_id, signers_extra=signers_extra,
         due_date=due_date, base_url=base_url,
+        politicas=politicas, teto_automatico=teto_automatico,
     )
 
 
@@ -262,6 +270,8 @@ async def continuar_contrato(
     signers_extra: list[dict[str, Any]],
     due_date: str,
     base_url: str = "",
+    politicas: dict[str, str] | None = None,
+    teto_automatico: float = 0.0,
 ) -> dict[str, Any]:
     """Retoma uma linha de contrato ABERTA (MONTAGEM/CRIANDO_DOC/PENDENTE_REVISAO)
     de onde parou, REUSANDO o mesmo external_ref=contrato-<id>.
@@ -341,8 +351,13 @@ async def continuar_contrato(
             return {"status": "erro_asaas", "contrato_id": contrato_id,
                     "detalhe": "persistencia_cobranca",
                     "cobranca_viva_sem_registro": True}
-        return await _finalizar_apos_cobranca(
-            conn, zapsign, contrato_id=contrato_id, cliente=cliente,
+        return await _finalizar_e_liberar(
+            conn, zapsign,
+            tipo_caso=tipo_caso,
+            valor_honorarios=valor_q,
+            politicas=politicas or {},
+            teto_automatico=teto_automatico,
+            contrato_id=contrato_id, cliente=cliente,
             escopo=escopo, valor_fmt=valor_fmt, valor_extenso=valor_extenso,
             invoice_url=invoice_url, template_id=template_id,
             signers_extra=signers_extra, base_url=base_url,
@@ -364,12 +379,86 @@ async def continuar_contrato(
         return {"status": "erro_asaas", "contrato_id": contrato_id,
                 "detalhe": "persistencia_cobranca"}
 
-    return await _finalizar_apos_cobranca(
-        conn, zapsign, contrato_id=contrato_id, cliente=cliente,
+    return await _finalizar_e_liberar(
+        conn, zapsign,
+        tipo_caso=tipo_caso,
+        valor_honorarios=valor_q,
+        politicas=politicas or {},
+        teto_automatico=teto_automatico,
+        contrato_id=contrato_id, cliente=cliente,
         escopo=escopo, valor_fmt=valor_fmt, valor_extenso=valor_extenso,
         invoice_url=invoice_url, template_id=template_id,
         signers_extra=signers_extra, base_url=base_url,
     )
+
+
+async def _finalizar_e_liberar(
+    conn: sqlite3.Connection,
+    zapsign: Any,
+    *,
+    tipo_caso: str,
+    valor_honorarios: float,
+    politicas: dict[str, str],
+    teto_automatico: float,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """[6]+[7]: cria o doc em silêncio e, se a política do tipo de caso mandar,
+    LIBERA a assinatura ao cliente sem gate humano.
+
+    Envelope único: ``gerar_contrato`` tem dois caminhos até a finalização
+    (cobrança nova e dedupe) e a regra de liberação não pode viver duplicada
+    nos dois. O doc SEMPRE nasce em silêncio — criar e liberar continuam
+    sendo duas chamadas, e é isso que permite trocar de política sem
+    reescrever o pipeline.
+
+    ``tem_contra_assinante`` é derivado da lista de signatários QUE VAI NO
+    DOCUMENTO, não da config. Ler do ``Settings`` seria ler um proxy: um
+    chamador que montasse ``signers_extra`` sem o escritório, com o e-mail
+    ainda no ``.env``, liberaria contrato sem contra-assinatura — e é
+    justamente a contra-assinatura que sustenta o fundamento do modo
+    automático (Prov. 205/2021). Derivando do fato, o freio deixa de ser
+    convenção e passa a ser garantia estrutural.
+
+    Falha ao liberar NÃO é falha do contrato: ele existe, está cobrado e
+    revisável. Fica em PENDENTE_REVISAO pro Mario liberar na mão. Esse caso
+    devolve um 5º motivo, ``falha_ao_liberar``, que NÃO vem do
+    ``decidir_liberacao`` — quem lê ``motivo_liberacao`` tem que contar com ele.
+    """
+    resultado = await _finalizar_apos_cobranca(conn, zapsign, **kwargs)
+    if resultado.get("status") != "pendente_revisao":
+        return resultado
+
+    # order_group 2 = o escritório contra-assinando depois do cliente. Só
+    # existe na lista se montar_signers_padrao encontrou o e-mail na config.
+    tem_contra_assinante = any(
+        s.get("order_group") == 2 for s in kwargs.get("signers_extra") or []
+    )
+    libera, motivo = decidir_liberacao(
+        tipo_caso=tipo_caso,
+        politicas=politicas,
+        valor_honorarios=valor_honorarios,
+        teto_automatico=teto_automatico,
+        tem_contra_assinante=tem_contra_assinante,
+    )
+    resultado["motivo_liberacao"] = motivo
+    if not libera:
+        return resultado
+
+    contrato = get_contrato(conn, kwargs["contrato_id"])
+    saida = await aprovar_e_liberar(
+        conn, zapsign,
+        token=contrato["aprovacao_token"],
+        ator="sistema",
+    )
+    if saida.get("status") != "liberado":
+        logger.warning(
+            "liberação automática falhou (contrato=%s): %r",
+            kwargs["contrato_id"], saida,
+        )
+        resultado["motivo_liberacao"] = "falha_ao_liberar"
+        return resultado
+    resultado["status"] = "liberado_automatico"
+    return resultado
 
 
 async def _finalizar_apos_cobranca(
