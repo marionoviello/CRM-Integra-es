@@ -632,7 +632,11 @@ cd C:/Users/mario/noviello-funil-saude && git add src/noviello_funil/config.py .
 
 **Files:**
 - Modify: `src/noviello_funil/orquestrador_contrato.py` (função `gerar_contrato`, final)
+- Modify: `src/noviello_funil/config.py` — retirar o aviso de "sem efeito"
+- Modify: `.env.example` — idem
 - Test: `tests/unit/test_orquestrador_contrato.py`
+
+A Task 4 deixou em `config.py` e `.env.example` um aviso dizendo que os dois campos **não têm efeito nenhum** enquanto o orquestrador não consultar a política. Esta tarefa é o wiring — no instante em que ela entra, aquele aviso vira falso. **Retirá-lo faz parte desta tarefa**, não da seguinte. Um comentário que mente sobre o estado do sistema é o defeito que a Task 4 existiu para remover; não vale reintroduzi-lo pelo outro lado.
 
 O `gerar_contrato` hoje termina devolvendo `{"status": "pendente_revisao", ...}`. Vai passar a consultar a política e, quando automática, chamar o `aprovar_e_liberar` que já existe no módulo.
 
