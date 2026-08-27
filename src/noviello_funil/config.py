@@ -195,11 +195,20 @@ class Settings(BaseSettings):
 
     # ZapSign — fechamento de contrato com assinatura eletrônica (3.x).
     # Fluxo 1-TOQUE: o bot monta a minuta e o Mario aprova UM contrato por
-    # vez. O create-doc SÓ roda depois da aprovação humana — nunca 100%
-    # automático (Prov. 205/2021, mandato personalíssimo). contratos_zapsign
-    # liga a feature (default OFF). Token e secret no .env (gitignored),
-    # nunca no código. Escopo inicial: SÓ contrato de honorários (procuração
-    # fica fora até confirmar aceitação no foro — decisão 15/jun).
+    # vez. contratos_zapsign liga a feature (default OFF). Token e secret no
+    # .env (gitignored), nunca no código. Escopo inicial: SÓ contrato de
+    # honorários (procuração fica fora até confirmar aceitação no foro —
+    # decisão 15/jun).
+    #
+    # INVARIANTE REVISTA em 26/ago/2026 (decisão Mario). Antes: "nunca 100%
+    # automático (Prov. 205/2021, mandato personalíssimo)". Agora a liberação
+    # é decidida POR TIPO DE CASO (ver politica_contrato.py), e o modo
+    # automático se sustenta na CONTRA-ASSINATURA: a minuta sai sem revisão
+    # prévia, mas o contrato só se perfaz com a assinatura do escritório no
+    # order_group 2 — ou seja, o mandato continua tendo ato de advogado.
+    # Por isso o orquestrador NÃO libera sem alguém em order_group 2 na
+    # lista de signatários do documento. Default de todo tipo de caso
+    # continua sendo o gate humano.
     contratos_zapsign: bool = False
     zapsign_api_token: str = ""
     zapsign_base_url: str = "https://api.zapsign.com.br/api/v1"
@@ -230,6 +239,15 @@ class Settings(BaseSettings):
     asaas_user_agent: str = "noviello-bot/1.0"
     # Vencimento default da cobrança quando o Mario não especifica (dias).
     asaas_payment_due_days: int = Field(default=7, ge=1)
+
+    # Política de liberação por tipo de caso, no formato
+    # "tipo:politica,tipo:politica" — ex.: "aereo_consumidor:automatico".
+    # Tipo ausente = gate humano (default seguro). Ver politica_contrato.py.
+    contrato_politica_por_tipo: str = ""
+    # Teto de honorários para liberação automática. 0 = sem teto. Existe pra
+    # que um valor fora da curva num tipo padronizado caia no gate humano em
+    # vez de ir ao cliente.
+    contrato_teto_automatico: float = Field(default=0.0, ge=0)
 
     # Signatários FIXOS do contrato (caminho A): o ESCRITÓRIO (Mario)
     # contra-assina depois do cliente (order_group 2), e 2 TESTEMUNHAS
