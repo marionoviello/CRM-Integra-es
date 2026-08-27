@@ -52,6 +52,14 @@ def test_politica_do_tipo_encontrada():
     assert politica_do_tipo("aereo_consumidor", mapa) == AUTOMATICO
 
 
+def test_politica_do_tipo_e_case_insensitive():
+    """Fase 2 terá o modelo emitindo tipo_caso — a caixa deixa de estar
+    sob nosso controle. Normalizar dos dois lados evita entrada morta."""
+    mapa = {"aereo_consumidor": AUTOMATICO}
+    assert politica_do_tipo("AEREO_CONSUMIDOR", mapa) == AUTOMATICO
+    assert politica_do_tipo("  Aereo_Consumidor  ", mapa) == AUTOMATICO
+
+
 def test_parse_politicas_valor_e_case_insensitive():
     """A config é editada à mão no .env — "AUTOMATICO" tem que valer."""
     assert parse_politicas("aereo_consumidor:AUTOMATICO") == {
@@ -130,3 +138,29 @@ def test_ordem_dos_freios_contra_assinante_antes_do_teto():
     )
     assert libera is False
     assert motivo == "sem_contra_assinante"
+
+
+def test_config_vazia_nao_libera_nada():
+    """Estado em que o sistema entra em produção: nenhuma política
+    configurada. É onde mora a promessa de zero-regressão."""
+    libera, motivo = decidir_liberacao(**_ctx(politicas={}))
+    assert libera is False
+    assert motivo == "politica_humana"
+
+
+def test_entrada_humana_explicita_nao_libera():
+    libera, motivo = decidir_liberacao(
+        **_ctx(politicas={"aereo_consumidor": HUMANO})
+    )
+    assert libera is False
+    assert motivo == "politica_humana"
+
+
+def test_politica_humana_tem_precedencia_sobre_contra_assinante():
+    """Os dois freios tripados: reporta o da política, que é o mais externo."""
+    libera, motivo = decidir_liberacao(
+        **_ctx(politicas={}, tem_contra_assinante=False)
+    )
+    assert libera is False
+    assert motivo == "politica_humana"
+

@@ -33,10 +33,11 @@ def parse_politicas(raw: str) -> dict[str, str]:
             continue
         tipo, _, valor = par.partition(":")
         # Config é editada à mão no .env — normaliza os DOIS lados (chave e
-        # valor). Sem isso, "AEREO_CONSUMIDOR:automatico" cria a chave
-        # "AEREO_CONSUMIDOR", que nunca bate com o lookup em minúsculo feito
-        # por politica_do_tipo: falha SILENCIOSA (cai em HUMANO sem avisar
-        # por quê), pior que uma falha ruidosa.
+        # valor). politica_do_tipo também normaliza (.strip().lower()) o
+        # tipo_caso recebido em runtime: os dois lados do lookup precisam
+        # concordar, senão "AEREO_CONSUMIDOR:automatico" vira uma chave que
+        # nunca bate — falha SILENCIOSA (cai em HUMANO sem avisar por quê),
+        # pior que uma falha ruidosa.
         tipo, valor = tipo.strip().lower(), valor.strip().lower()
         if not tipo or not valor:
             continue
@@ -45,8 +46,15 @@ def parse_politicas(raw: str) -> dict[str, str]:
 
 
 def politica_do_tipo(tipo_caso: str, politicas: dict[str, str]) -> str:
-    """Política do tipo. Ausente → ``HUMANO``."""
-    return politicas.get((tipo_caso or "").strip(), HUMANO)
+    """Política do tipo. Ausente → ``HUMANO``.
+
+    Normaliza (.strip().lower()) o mesmo jeito que parse_politicas normaliza
+    a chave — hoje tipo_caso vem de código nosso (sempre minúsculo), mas na
+    Fase 2 vem de um LLM, onde a caixa deixa de estar sob nosso controle. Sem
+    normalizar os dois lados, uma variação de caixa não bate no dict e cai em
+    HUMANO sem avisar por quê — falha fechada, mas silenciosa.
+    """
+    return politicas.get((tipo_caso or "").strip().lower(), HUMANO)
 
 
 def decidir_liberacao(
