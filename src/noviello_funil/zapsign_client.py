@@ -247,7 +247,8 @@ class ZapSignClient:
     ) -> dict[str, Any]:
         """POST /docs/{token}/resend-notifications-bulk/ — LIBERA a assinatura.
 
-        Depois da aprovação humana, dispara a notificação. Com
+        Depois da aprovação — humana por padrão, automática só nos tipos de
+        caso com política automática — dispara a notificação. Com
         ``signature_order_active`` notifica APENAS o order_group 1 (cliente);
         os demais entram quando o anterior assina. Tolera retry (efeito =
         notificar; no pior caso reenvia ao mesmo cliente).

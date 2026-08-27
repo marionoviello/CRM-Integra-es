@@ -291,8 +291,11 @@ CREATE INDEX IF NOT EXISTS idx_contrato_doc_token
     ON contrato(zapsign_doc_token) WHERE zapsign_doc_token IS NOT NULL;
 
 -- Trilha de auditoria de CADA transição do contrato (quem, quando, por quê).
--- É isto que torna o 1-toque defensável perante a OAB: prova que o envio só
--- aconteceu depois de uma aprovação humana registrada.
+-- ator + motivo registram COM BASE EM QUÊ o contrato foi liberado: aprovação
+-- humana (ator='mario') ou política automática do tipo de caso (ator=
+-- 'sistema', motivo explicando a liberação automática). É essa distinção —
+-- registrada com honestidade, não presumida como sempre-humana — que torna a
+-- trilha útil como prova perante a OAB.
 CREATE TABLE IF NOT EXISTS contrato_transicao (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     contrato_id     INTEGER NOT NULL REFERENCES contrato(id),
@@ -383,8 +386,10 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     # Tira o Claude do caminho crítico "lead escolhe horário → confirma".
     _ensure_column(conn, "leads", "horarios_oferecidos", "TEXT")
     # Pipeline de fechamento escopos→Asaas→ZapSign com gate humano sobre o
-    # PDF REAL (roadmap 3.x). tipo_caso seleciona o escopo curado; cpf é PII
-    # obrigatória pro Asaas; asaas_* guardam a cobrança (dedupe + cancelamento);
+    # PDF REAL por padrão — automático apenas nos tipos de caso marcados em
+    # CONTRATO_POLITICA_POR_TIPO (roadmap 3.x). tipo_caso seleciona o escopo
+    # curado; cpf é PII obrigatória pro Asaas; asaas_* guardam a cobrança
+    # (dedupe + cancelamento);
     # invoice_url vira o {{LINK_PAGAMENTO}} do contrato; cobranca_paga_em é
     # carimbado pelo webhook Asaas; reprovacao_token é o link 1-toque de REPROVAR
     # (distinto do aprovacao_token de aprovar).

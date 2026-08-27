@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import datetime
 import json
 import re
@@ -36,6 +37,28 @@ from noviello_funil.orquestrador_contrato import (
     montar_signers_padrao,
 )
 from noviello_funil.zapsign_client import ZapSignClient
+
+# Estados ABERTOS: o orquestrador RETOMA esses sozinho (dedupe por
+# external_reference — não cria 2ª cobrança nem 2º contrato). Bloquear aqui
+# seria uma regressão de comportamento pra TODO tipo de caso, não só os
+# automáticos: rodar o script de novo sobre um contrato aberto é exatamente
+# o caminho normal de retry, e é seguro.
+_ESTADOS_ABERTOS_RETOMAVEIS: tuple[str, ...] = (
+    "contrato_montagem", "contrato_criando_doc", "contrato_pendente_revisao",
+)
+
+# Estados VIVOS-FECHADOS: já existe um contrato de verdade em curso com o
+# cliente — liberado (ele já pode assinar) ou assinado. Rodar de novo AQUI é
+# o cenário perigoso: cria um 2º contrato e uma 2ª cobrança REAL no Asaas
+# (e, sob política automática, libera essa 2ª assinatura também). Só esses
+# estados bloqueiam e exigem --novo-caso.
+_ESTADOS_VIVOS_FECHADOS: tuple[str, ...] = (
+    "contrato_liberado", "contrato_assinado",
+)
+# Qualquer outro estado (contrato_reprovado, contrato_recusado,
+# contrato_expirado, e o que mais existir) não é nem retomável nem vivo: o
+# contrato anterior morreu sem chegar a nada com o cliente. Um contrato novo
+# aqui não é duplicata de coisa nenhuma — só um aviso informativo, sem freio.
 
 
 async def _run(settings: Settings, conn: Any, dados: dict) -> dict:
@@ -70,6 +93,14 @@ async def _run(settings: Settings, conn: Any, dados: dict) -> dict:
 
 
 def main() -> int:
+    # Console do Windows não é UTF-8 por padrão: sem isto, o aviso da guarda
+    # de duplicata (que o operador precisa ler sob pressão) vira mojibake
+    # ("j� existe(m)", "cobran�a"). suppress porque reconfigure não existe em
+    # todo stream (ex.: saída capturada em teste).
+    for _stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(AttributeError, ValueError):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+
     ap = argparse.ArgumentParser(
         description="Gera um contrato pelo pipeline (caminho A).",
     )
@@ -79,10 +110,12 @@ def main() -> int:
     ap.add_argument(
         "--novo-caso", action="store_true",
         help=(
-            "Confirma que este é um caso GENUINAMENTE DIFERENTE do mesmo "
-            "cliente (ex.: outro voo), mesmo já havendo contrato para este "
-            "CPF + tipo de caso. Sem esta flag, o script recusa criar um "
-            "2º contrato/2ª cobrança por engano."
+            "Confirma que este é OUTRO caso genuinamente diferente do mesmo "
+            "cliente (ex.: outro voo) — não uma retentativa do mesmo caso. "
+            "Só é exigida quando já existe um contrato VIVO (liberado ao "
+            "cliente ou assinado) para o mesmo CPF + tipo de caso; um "
+            "contrato aberto é retomado automaticamente, sem precisar desta "
+            "flag."
         ),
     )
     args = ap.parse_args()
@@ -103,14 +136,12 @@ def main() -> int:
     conn = connect(settings.database_path)
     run_migrations(conn)
     try:
-        # Guarda de duplicata: o índice único (uq_contrato_aberto) só cobre
-        # estados ABERTOS. Um contrato já LIBERADO/ASSINADO sai do campo de
-        # visão do dedupe — uma 2ª rodada deste script pro mesmo CPF+tipo_caso
-        # criaria um contrato novo, uma 2ª cobrança REAL no Asaas e, sob
-        # política automática, liberaria essa 2ª assinatura também. Qual é o
-        # critério que separa "mesmo caso" de "caso novo" (ex.: 2 voos do
-        # mesmo cliente) é decisão do Mario, não deste script — por isso o
-        # script recusa decidir sozinho e exige --novo-caso.
+        # Guarda de duplicata: separa contrato ABERTO (o orquestrador retoma
+        # sozinho, sem 2ª cobrança — deixar passar) de contrato VIVO-FECHADO
+        # (liberado/assinado — rodar de novo cria 2º contrato + 2ª cobrança
+        # REAL, aí sim bloqueia). Qual é o critério que separa "mesmo caso"
+        # de "caso novo" (ex.: 2 voos do mesmo cliente) é decisão do Mario,
+        # não deste script — por isso exige --novo-caso só no caso vivo.
         cpf_digitos = re.sub(r"\D", "", str(dados["cliente"].get("cpf", "")))
         tipo_caso = dados["tipo_caso"]
         existentes = conn.execute(
@@ -118,13 +149,37 @@ def main() -> int:
             "WHERE cpf = ? AND tipo_caso = ? ORDER BY id DESC",
             (cpf_digitos, tipo_caso),
         ).fetchall()
-        if existentes and not args.novo_caso:
+        abertos = [r for r in existentes if r["estado"] in _ESTADOS_ABERTOS_RETOMAVEIS]
+        vivos_fechados = [r for r in existentes if r["estado"] in _ESTADOS_VIVOS_FECHADOS]
+        outros = [
+            r for r in existentes
+            if r["estado"] not in _ESTADOS_ABERTOS_RETOMAVEIS
+            and r["estado"] not in _ESTADOS_VIVOS_FECHADOS
+        ]
+
+        for row in abertos:
             print(
-                f"ERRO: já existe(m) {len(existentes)} contrato(s) para "
-                f"CPF {cpf_digitos} + tipo_caso {tipo_caso}:",
+                f">>> contrato {row['id']} (estado={row['estado']}) já aberto "
+                f"para CPF {cpf_digitos} + tipo_caso {tipo_caso} — será "
+                "RETOMADO; nenhuma cobrança nova será criada.",
                 file=sys.stderr,
             )
-            for row in existentes:
+        for row in outros:
+            print(
+                f">>> contrato {row['id']} anterior (estado={row['estado']}, "
+                f"criado_em={row['criado_em']}) para CPF {cpf_digitos} + "
+                f"tipo_caso {tipo_caso} não seguiu adiante — não é "
+                "duplicata, prosseguindo.",
+                file=sys.stderr,
+            )
+
+        if vivos_fechados and not args.novo_caso:
+            print(
+                f"ERRO: já existe(m) {len(vivos_fechados)} contrato(s) VIVO(S) "
+                f"para CPF {cpf_digitos} + tipo_caso {tipo_caso}:",
+                file=sys.stderr,
+            )
+            for row in vivos_fechados:
                 print(
                     f"  - contrato {row['id']}: estado={row['estado']} "
                     f"criado_em={row['criado_em']}",
@@ -132,27 +187,35 @@ def main() -> int:
                 )
             print(
                 "Rodar de novo cria um SEGUNDO contrato e uma SEGUNDA "
-                "cobrança REAL no Asaas — e, se a política do tipo de caso "
-                "for automática, libera essa segunda assinatura ao cliente "
-                "também. Se este é de fato um caso novo do mesmo cliente "
-                "(ex.: outro voo), rode de novo com --novo-caso.",
+                "cobrança REAL no Asaas. Se este é de fato um caso novo do "
+                "mesmo cliente (ex.: outro voo), rode de novo com "
+                "--novo-caso.",
                 file=sys.stderr,
             )
             return 1
-        if existentes and args.novo_caso:
+        if vivos_fechados and args.novo_caso:
             print(
                 f">>> --novo-caso: criando mais um contrato para CPF "
-                f"{cpf_digitos} + tipo_caso {tipo_caso} (já existem "
-                f"{len(existentes)}) — nova cobrança real será gerada."
+                f"{cpf_digitos} + tipo_caso {tipo_caso} (já existe(m) "
+                f"{len(vivos_fechados)} vivo(s)) — nova cobrança real será "
+                "gerada."
             )
         resultado = asyncio.run(_run(settings, conn, dados))
     finally:
         conn.close()
 
     print(json.dumps(resultado, ensure_ascii=False, indent=2))
-    if resultado.get("status") in ("pendente_revisao", "ja_em_andamento"):
+    if resultado.get("status") in ("pendente_revisao", "em_andamento"):
         print()
         print(">>> Revise o PDF e APROVE aqui:", resultado.get("link_aprovacao"))
+        print(">>> Link de pagamento (cliente):", resultado.get("invoice_url"))
+    elif resultado.get("status") == "liberado_automatico":
+        print()
+        print(
+            ">>> LIBERADO AUTOMATICAMENTE — sem revisão humana (contrato "
+            f"{resultado.get('contrato_id')})."
+        )
+        print(">>> Link de assinatura (cliente):", resultado.get("sign_url"))
         print(">>> Link de pagamento (cliente):", resultado.get("invoice_url"))
     return 0
 

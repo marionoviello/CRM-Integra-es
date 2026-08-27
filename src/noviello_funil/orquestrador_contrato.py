@@ -1,7 +1,9 @@
 """Orquestrador do pipeline de fechamento de contrato (escopos→Asaas→ZapSign).
 
 Conecta as primitivas já prontas (contrato.py, asaas.py, escopos.py,
-zapsign_client.py) no fluxo com GATE HUMANO sobre o PDF REAL:
+zapsign_client.py) no fluxo de aprovação sobre o PDF REAL — GATE HUMANO por
+padrão, automático apenas nos tipos de caso marcados em
+CONTRATO_POLITICA_POR_TIPO (ver politica_contrato.py):
 
   [1] CONFLITO bloqueia ANTES de qualquer chamada externa (nenhuma cobrança
       nem doc se há suspeita de impedimento — decisão é humana).
@@ -11,7 +13,8 @@ zapsign_client.py) no fluxo com GATE HUMANO sobre o PDF REAL:
       create_payment — 2 POSTs = 2 cobranças, proibido). Falha → fica em
       MONTAGEM (Mario retenta), NADA no ZapSign.
   [5] ZAPSIGN em SILÊNCIO: send_automatic_email=False FORÇADO (INVARIANTE — o
-      cliente não recebe nada até a aprovação). CLAIM atômico MONTAGEM→
+      cliente não recebe nada até a aprovação — humana por padrão, automática
+      só nos tipos com política automática). CLAIM atômico MONTAGEM→
       CRIANDO_DOC; idempotente por zapsign_doc_token. → PENDENTE_REVISAO.
   [7a] aprovar_e_liberar: resend_notifications_bulk LIBERA a assinatura. → LIBERADO.
   [7b] reprovar_contrato: refuse no ZapSign + cancela a cobrança Asaas SÓ se
@@ -455,17 +458,13 @@ async def _finalizar_e_liberar(
     if resultado.get("status") != "pendente_revisao":
         return resultado
 
-    # A derivação abaixo só vale quando o doc foi criado NESTA chamada: aí a
-    # lista é a mesma que foi pro add_signer. Num doc que já existia, ela é a
-    # INTENÇÃO do chamador, não o roster do documento — e o caso real é o
-    # operador que esqueceu o e-mail do escritório, preencheu e re-rodou: o
-    # dedupe não acrescenta signatário ao doc existente, mas a lista nova traz
-    # order_group 2 e liberaríamos um documento sem contra-assinante.
-    # Falha fechada: quem retoma libera na mão.
-    if resultado.get("doc_preexistente"):
-        resultado["motivo_liberacao"] = "doc_preexistente"
-        return resultado
-
+    # A política é avaliada ANTES do freio de doc_preexistente: pra um tipo de
+    # caso de política HUMANA, o contrato nunca ia liberar sozinho — o motivo
+    # operativo é "politica_humana", não "doc_preexistente" (que só faz
+    # sentido quando a política DIRIA sim e é o freio de contra-assinante que
+    # está barrando). Reportar doc_preexistente aqui seria mentir a causa pro
+    # Mario num caso comum (retomar um contrato de tipo com gate humano).
+    #
     # order_group 2 = o escritório contra-assinando depois do cliente. Só
     # existe na lista se montar_signers_padrao encontrou o e-mail na config.
     tem_contra_assinante = any(
@@ -480,6 +479,18 @@ async def _finalizar_e_liberar(
     )
     resultado["motivo_liberacao"] = motivo
     if not libera:
+        return resultado
+
+    # A partir daqui a política DIRIA sim — só agora o freio de doc_preexistente
+    # importa. A derivação de tem_contra_assinante acima só vale quando o doc
+    # foi criado NESTA chamada: aí a lista é a mesma que foi pro add_signer. Num
+    # doc que já existia, ela é a INTENÇÃO do chamador, não o roster do
+    # documento — e o caso real é o operador que esqueceu o e-mail do
+    # escritório, preencheu e re-rodou: o dedupe não acrescenta signatário ao
+    # doc existente, mas a lista nova traz order_group 2 e liberaríamos um
+    # documento sem contra-assinante. Falha fechada: quem retoma libera na mão.
+    if resultado.get("doc_preexistente"):
+        resultado["motivo_liberacao"] = "doc_preexistente"
         return resultado
 
     contrato = get_contrato(conn, kwargs["contrato_id"])
@@ -549,7 +560,8 @@ async def _criar_doc_silencioso(
     """[5]/[6]: cria o doc em silêncio sob CLAIM atômico e devolve os links.
 
     INVARIANTE: send_automatic_email SEMPRE False em TODOS os signatários
-    (cliente não recebe nada até a aprovação) — a flag por-signer é forçada
+    (cliente não recebe nada até a aprovação — humana por padrão, automática
+    só nos tipos com política automática) — a flag por-signer é forçada
     aqui, defesa em profundidade que independe da precedência da ZapSign.
     Idempotência: se o contrato já tem zapsign_doc_token, NÃO re-cria
     (reconcilia o estado e devolve o que já existe).
@@ -620,7 +632,9 @@ async def _criar_doc_silencioso(
         "lang": "pt-br",
         "external_id": str(contrato_id),
         "signature_order_active": True,
-        # INVARIANTE: silêncio total até a aprovação humana. NUNCA True.
+        # INVARIANTE: o create-doc é SEMPRE silencioso (a liberação — humana
+        # por padrão, automática só nos tipos com política automática — vem
+        # depois, em passo separado). NUNCA True.
         "send_automatic_email": False,
         "signer_name": cliente["nome_completo"],
         "data": data,
@@ -725,6 +739,12 @@ async def aprovar_e_liberar(
     CAS PENDENTE_REVISAO→LIBERANDO, resend_notifications_bulk (libera ao
     order_group 1 = cliente) → LIBERADO. Em falha do resend, reverte
     LIBERANDO→PENDENTE_REVISAO (Mario retenta).
+
+    Serve os dois caminhos de liberação: o clique humano (``ator="mario"``,
+    ``motivo`` default) e a liberação automática por política do tipo de caso
+    (``ator="sistema"``, ``motivo`` explicando a base da decisão). ``motivo``
+    vai pra trilha de auditoria (contrato_transicao) — é o que registra qual
+    dos dois caminhos liberou este contrato.
     """
     contrato = conn.execute(
         "SELECT * FROM contrato WHERE aprovacao_token = ?", (token,),

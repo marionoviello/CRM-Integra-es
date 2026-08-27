@@ -1160,6 +1160,21 @@ async def test_doc_preexistente_nao_libera_sozinho():
 
 
 @pytest.mark.asyncio
+async def test_resume_de_contrato_humano_reporta_politica_humana():
+    """Retomar um contrato de tipo com gate humano não é um caso de
+    'doc_preexistente' — ele nunca ia liberar sozinho. O motivo registrado
+    tem que ser o operativo."""
+    conn = _db()
+    asaas, zap = FakeAsaas(), FakeZapSign()
+
+    await _gerar(conn, asaas, zap)
+    segunda = await _gerar(conn, asaas, zap)
+
+    assert segunda["status"] == "pendente_revisao"
+    assert segunda["motivo_liberacao"] == "politica_humana"
+
+
+@pytest.mark.asyncio
 async def test_doc_criado_nesta_chamada_ainda_libera():
     """REGRESSÃO do freio novo: o caminho normal não pode ter sido quebrado."""
     conn = _db()

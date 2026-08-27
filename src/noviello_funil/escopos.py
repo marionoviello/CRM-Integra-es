@@ -32,9 +32,11 @@ TIPOS_CASO: list[str] = [
 
 # Honorários INICIAIS (pro labore) de tabela, por tipo de caso:
 # ``tipo → (valor, valor_por_extenso)``. Curado pelo advogado, igual ao texto
-# do escopo — é o que permite fechar sem humano no circuito SEM violar a
-# invariante de que a IA nunca precifica. Tipo ausente daqui exige valor
-# informado na chamada (é o caso de todos os que passam por reunião).
+# do escopo — pensado para permitir fechar sem humano no circuito, SEM violar
+# a invariante de que a IA nunca precifica. NENHUM código de produção lê esta
+# constante ainda (só teste) — o pipeline de fechamento continua recebendo o
+# valor por parâmetro. Tipo ausente daqui exige valor informado na chamada (é
+# o caso de todos os que passam por reunião).
 # O êxito (ad exitum) NÃO entra aqui: é percentual, vive no texto do escopo.
 HONORARIOS_PADRAO: dict[str, tuple[float, str]] = {
     # Decisão Mario 27/ago/2026: R$ 500,00 + 35% de êxito. ATENÇÃO — o
