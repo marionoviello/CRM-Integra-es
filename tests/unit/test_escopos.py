@@ -91,3 +91,20 @@ def test_todo_tipo_com_honorario_padrao_tem_escopo_escrito():
     """Ter preço de tabela sem texto curado geraria contrato sem cláusula.
     Se um dia alguém acrescentar um preço, o escopo tem que vir junto."""
     assert set(HONORARIOS_PADRAO) <= set(tipos_disponiveis())
+
+
+def test_descricao_honorarios_aereo_preserva_a_base_de_calculo():
+    """A definição de proveito econômico é ABERTA no contrato do escritório.
+    Uma condensação acidental já estreitou essa base uma vez (corrigida em
+    27/ago/2026); este teste existe pra que não estreite de novo em silêncio.
+    Condensar texto jurídico curado é exatamente o que este módulo impede."""
+    texto = ESCOPOS["aereo_consumidor"]["descricao_honorarios"]
+    for trecho in (
+        "lucros cessantes",
+        "danos emergentes",
+        "ressarcimento de despesas",
+        "qualquer outra verba pecuniária",
+        "35% (trinta e cinco por cento)",
+        "notificações extrajudiciais",
+    ):
+        assert trecho in texto, f"trecho do contrato-fonte sumiu: {trecho}"
