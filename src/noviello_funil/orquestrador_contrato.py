@@ -51,7 +51,7 @@ from .contrato import (
     transicao_contrato,
 )
 from .escopos import resolver_escopo
-from .politica_contrato import decidir_liberacao
+from .politica_contrato import decidir_liberacao, parse_politicas
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +84,24 @@ def montar_signers_padrao(settings: Any) -> list[dict[str, Any]]:
                 qualification="Testemunha", order_group=3,
             ))
     return signers
+
+
+def args_politica(settings: Any) -> dict[str, Any]:
+    """Kwargs de política do ``gerar_contrato``, a partir do ``Settings``.
+
+    NÃO devolve ``tem_contra_assinante``: esse fato é derivado dentro do
+    ``_finalizar_e_liberar``, da lista de signatários que realmente vai no
+    documento. Ler da config seria ler um proxy — config e documento podem
+    divergir, e o freio precisa proteger o fato, não a intenção.
+    """
+    return {
+        "politicas": parse_politicas(
+            getattr(settings, "contrato_politica_por_tipo", "") or ""
+        ),
+        "teto_automatico": float(
+            getattr(settings, "contrato_teto_automatico", 0.0) or 0.0
+        ),
+    }
 
 
 def _payload_add_signer(signer: dict[str, Any]) -> dict[str, Any]:

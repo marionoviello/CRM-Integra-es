@@ -28,6 +28,7 @@ from noviello_funil.escopos import ESCOPOS
 from noviello_funil.orquestrador_contrato import (
     _criar_doc_silencioso,
     aprovar_e_liberar,
+    args_politica,
     gerar_contrato,
     reconciliar_contratos_presos,
     reprovar_contrato,
@@ -1168,3 +1169,29 @@ async def test_doc_criado_nesta_chamada_ainda_libera():
 
     assert out["status"] == "liberado_automatico"
     assert out["motivo_liberacao"] == "politica_automatica"
+
+
+class _FakeSettings:
+    def __init__(self, politica="", teto=0.0):
+        self.contrato_politica_por_tipo = politica
+        self.contrato_teto_automatico = teto
+
+
+def test_args_politica_default_e_gate_humano():
+    args = args_politica(_FakeSettings())
+    assert args == {"politicas": {}, "teto_automatico": 0.0}
+
+
+def test_args_politica_le_a_config():
+    s = _FakeSettings(politica="aereo_consumidor:automatico", teto=600.0)
+    args = args_politica(s)
+    assert args["politicas"] == {"aereo_consumidor": AUTOMATICO}
+    assert args["teto_automatico"] == 600.0
+
+
+def test_args_politica_nao_decide_contra_assinatura():
+    """A contra-assinatura NÃO sai da config: ela é derivada da lista de
+    signatários que vai no documento, dentro do orquestrador. Config e
+    documento poderiam divergir, e o freio precisa proteger o fato."""
+    args = args_politica(_FakeSettings(politica="aereo_consumidor:automatico"))
+    assert "tem_contra_assinante" not in args
