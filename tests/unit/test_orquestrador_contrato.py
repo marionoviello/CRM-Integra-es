@@ -1094,3 +1094,22 @@ async def test_send_automatic_email_continua_false_mesmo_no_automatico():
     await _gerar(conn, asaas, zap, politicas={TIPO: AUTOMATICO})
 
     assert zap.create_calls[0]["send_automatic_email"] is False
+
+
+@pytest.mark.asyncio
+async def test_auditoria_registra_que_nao_houve_aprovacao_humana():
+    """A trilha de auditoria existe pra responder QUEM liberou. Um contrato
+    liberado por política não foi aprovado por ninguém, e a linha de
+    transição não pode dizer que foi."""
+    conn = _db()
+    asaas, zap = FakeAsaas(), FakeZapSign()
+
+    out = await _gerar(conn, asaas, zap, politicas={TIPO: AUTOMATICO})
+
+    linhas = conn.execute(
+        "SELECT ator, motivo FROM contrato_transicao WHERE contrato_id = ?",
+        (out["contrato_id"],),
+    ).fetchall()
+    liberacao = [r for r in linhas if r["ator"] == "sistema"]
+    assert liberacao, f"nenhuma transição do sistema em {[dict(r) for r in linhas]}"
+    assert all("humana" not in (r["motivo"] or "") for r in liberacao)

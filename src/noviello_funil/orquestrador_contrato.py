@@ -449,6 +449,7 @@ async def _finalizar_e_liberar(
         conn, zapsign,
         token=contrato["aprovacao_token"],
         ator="sistema",
+        motivo="liberação automática por política do tipo de caso",
     )
     if saida.get("status") != "liberado":
         logger.warning(
@@ -669,6 +670,7 @@ async def aprovar_e_liberar(
     *,
     token: str,
     ator: str = "mario",
+    motivo: str = "aprovação humana (1-toque)",
 ) -> dict[str, Any]:
     """[7a] APROVA o PDF real e LIBERA a assinatura ao cliente. Idempotente.
 
@@ -709,7 +711,7 @@ async def aprovar_e_liberar(
         )
         _inserir_transicao(
             conn, contrato_id, EstadoContrato.PENDENTE_REVISAO,
-            EstadoContrato.LIBERANDO, motivo="aprovação humana (1-toque)",
+            EstadoContrato.LIBERANDO, motivo=motivo,
             ator=ator,
         )
         conn.execute("COMMIT")
