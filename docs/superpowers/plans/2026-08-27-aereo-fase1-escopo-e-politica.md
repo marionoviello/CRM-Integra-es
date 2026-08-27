@@ -526,6 +526,9 @@ cd C:/Users/mario/noviello-funil-saude && git add src/noviello_funil/escopos.py 
 
 **Files:**
 - Modify: `src/noviello_funil/config.py:187-193`
+- Modify: `.env.example`
+
+O `CLAUDE.md` do projeto é explícito: variável nova entra no `config.py` **e** no `.env.example`, sempre com placeholder, nunca com valor real. As duas coisas na mesma tarefa.
 
 - [ ] **Step 1: Substitua o bloco de comentário e acrescente os campos**
 
@@ -583,7 +586,25 @@ Acrescente imediatamente abaixo:
     contrato_teto_automatico: float = Field(default=0.0, ge=0)
 ```
 
-- [ ] **Step 3: Verifique que o Settings ainda carrega**
+- [ ] **Step 3: Espelhe no `.env.example`**
+
+Em `.env.example`, logo após o bloco `CONTRATO_TESTEMUNHA_2_CPF=`, acrescente:
+
+```
+# Liberação da assinatura POR TIPO DE CASO: "tipo:politica,tipo:politica".
+# Só "automatico" libera sem revisão humana; qualquer outro valor, e qualquer
+# tipo ausente daqui, cai no gate humano (default seguro). O modo automático
+# ainda exige o escritório contra-assinando (order_group 2) — sem
+# CONTRATO_ESCRITORIO_EMAIL preenchido, não libera. Ex.:
+# CONTRATO_POLITICA_POR_TIPO=aereo_consumidor:automatico
+CONTRATO_POLITICA_POR_TIPO=
+# Teto de honorários da liberação automática. 0 = sem teto. Ligue junto com a
+# política: é o que faz um valor fora da curva cair no gate humano em vez de
+# ir ao cliente. Ex.: 600
+CONTRATO_TETO_AUTOMATICO=0
+```
+
+- [ ] **Step 4: Verifique que o Settings ainda carrega**
 
 ```bash
 cd C:/Users/mario/noviello-funil-saude && uv run python -c "from noviello_funil.config import Settings; print([c for c in Settings.model_fields if 'politica' in c or 'teto' in c])"
@@ -591,7 +612,7 @@ cd C:/Users/mario/noviello-funil-saude && uv run python -c "from noviello_funil.
 
 Esperado: `['contrato_politica_por_tipo', 'contrato_teto_automatico']`
 
-- [ ] **Step 4: Rode a suíte inteira para garantir zero regressão**
+- [ ] **Step 5: Rode a suíte inteira para garantir zero regressão**
 
 ```bash
 cd C:/Users/mario/noviello-funil-saude && uv run pytest -q
@@ -599,10 +620,10 @@ cd C:/Users/mario/noviello-funil-saude && uv run pytest -q
 
 Esperado: tudo que passava antes continua passando.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-cd C:/Users/mario/noviello-funil-saude && git add src/noviello_funil/config.py && git commit -m "feat(config): politica de liberacao por tipo + teto; invariante revista com fundamento da contra-assinatura"
+cd C:/Users/mario/noviello-funil-saude && git add src/noviello_funil/config.py .env.example && git commit -m "feat(config): politica de liberacao por tipo + teto; invariante revista com fundamento da contra-assinatura"
 ```
 
 ---
