@@ -206,9 +206,13 @@ class Settings(BaseSettings):
     # automático se sustenta na CONTRA-ASSINATURA: a minuta sai sem revisão
     # prévia, mas o contrato só se perfaz com a assinatura do escritório no
     # order_group 2 — ou seja, o mandato continua tendo ato de advogado.
-    # Por isso o orquestrador NÃO libera sem alguém em order_group 2 na
-    # lista de signatários do documento. Default de todo tipo de caso
-    # continua sendo o gate humano.
+    # REGRA do modo automático: só libera com o escritório contra-assinando
+    # — order_group 2 na lista de signatários DO DOCUMENTO, não na config
+    # (as duas podem divergir; o freio tem que proteger o fato). Default de
+    # todo tipo de caso continua sendo o gate humano.
+    #
+    # ATENÇÃO: enquanto o orquestrador não consultar a política, estes dois
+    # campos NÃO têm efeito nenhum — nada libera sozinho, com ou sem eles.
     contratos_zapsign: bool = False
     zapsign_api_token: str = ""
     zapsign_base_url: str = "https://api.zapsign.com.br/api/v1"
