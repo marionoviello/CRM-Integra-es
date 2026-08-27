@@ -16,6 +16,24 @@ Por isso a Task 5 **trava em teste** que o modo automático só libera quando h�
 
 ---
 
+> ## ⚠ Estado deste documento: EXECUTADO (27/ago/2026)
+>
+> As Tasks 1 a 6 estão implementadas, revisadas e commitadas na branch `feat/aereo-fase1`. **A Task 7 é a única pendente, e é do Mario.**
+>
+> Os blocos de código das Tasks 1 a 6 abaixo são a especificação **original**. Em vários pontos o que foi construído é diferente — e melhor — porque a revisão adversarial encontrou falhas na especificação. **Não reexecute os blocos de código deste documento: eles reconstruiriam versões vulneráveis.** O código real está nos commits.
+>
+> | Correção que a revisão impôs | Commit |
+> |---|---|
+> | Freio de contra-assinatura lê a lista do documento, não a config | `af13d2e` (plano), `1b6ccfa` (código) |
+> | Texto jurídico condensado por engano — base de honorários restaurada | `32eec00` |
+> | Trilha de auditoria não afirma mais aprovação humana no automático | `87c322f` |
+> | **Não liberar documento que a chamada não criou** (buraco na contra-assinatura) | `a5d7842` |
+> | Guarda de duplicata só bloqueia contrato vivo; comentários deixam de afirmar gate incondicional | `d932437` |
+>
+> O que a revisão adversarial pegou e as três revisões do plano não pegaram está registrado em "Lições" no fim do documento.
+
+---
+
 ## Estrutura de arquivos
 
 | Arquivo | Responsabilidade |
@@ -750,6 +768,8 @@ Esperado: FAIL — `gerar_contrato() got an unexpected keyword argument 'politic
 
 - [ ] **Step 3: Implemente**
 
+> **SUPERADO.** O código abaixo não tem a guarda `doc_preexistente` nem o `motivo=` da auditoria, e chama a política na ordem errada. Ver `a5d7842`, `87c322f` e `d932437` para o que realmente foi construído.
+
 `gerar_contrato` tem **dois** `return await _finalizar_apos_cobranca(...)` — o do caminho da cobrança nova e o do caminho do dedupe. Colocar a política nos dois seria duplicar a regra. Em vez disso, criamos um envelope só, e os dois passam a chamá-lo.
 
 Em `src/noviello_funil/orquestrador_contrato.py`, acrescente o import junto dos outros imports locais:
@@ -891,6 +911,8 @@ cd C:/Users/mario/noviello-funil-saude && git add src/noviello_funil/orquestrado
 
 ### Task 6: O script de disparo passa a política adiante
 
+> **INCOMPLETO.** Os passos abaixo cobrem só o `args_politica` e a ligação no script. A guarda `--novo-caso` foi acrescentada depois (`95b2d76`) e corrigida em seguida (`d932437`), porque na primeira versão ela bloqueava retentativa de contrato aberto — regressão para todos os tipos de caso.
+
 > **Acrescentado em 27/ago após a revisão da Task 5.** O índice `uq_contrato_aberto` cobre só estados ABERTOS. Assim que um contrato é liberado, ele sai do campo de visão do dedupe — e uma segunda execução para o mesmo CPF e tipo cria **contrato novo, cobrança nova e liberação nova**, medido em teste pelo executor da Task 5. No gate humano isso era improvável (a janela durava até você aprovar); no modo automático a janela é permanente.
 >
 > A raiz é uma pergunta que só o Mario responde — **o que identifica um caso aéreo distinto?** O mesmo cliente pode ter dois voos e dois contratos legítimos, então nem deduplicar para sempre nem deduplicar só enquanto aberto está certo. Enquanto não houver resposta, o script **não pode** disparar em silêncio sobre um CPF que já tem contrato do mesmo tipo. Isso não decide a pergunta: só impede que ela seja respondida por acidente.
@@ -1021,23 +1043,41 @@ cd C:/Users/mario/noviello-funil-saude && git add src/noviello_funil/orquestrado
 
 ### Task 7: Ensaio a seco antes de ligar em produção
 
-**Files:** nenhum — é verificação.
+**Files:** nenhum — é verificação. **Executada pelo Mario, não por agente.**
+
+> ### Leia isto antes de rodar qualquer coisa
+>
+> **A ZapSign não tem sandbox.** Só o Asaas tem. O `zapsign_base_url` aponta para produção sempre. Cada passo abaixo cria um **documento ZapSign real**, consome cota real, e o Step 4 dispara um **e-mail de assinatura real**. O "comece no SANDBOX" da docstring do script cobre só o lado do dinheiro.
+>
+> **Use um CPF de teste diferente em cada etapa.** A guarda de duplicata bloqueia um segundo contrato vivo para o mesmo CPF + tipo de caso. Reaproveitar o CPF do Step 1 no Step 4 não produz o resultado esperado — produz `doc_preexistente`.
+>
+> **Nunca use `--novo-caso` para destravar.** Ele existe para "é outro voo, outro caso". Num contrato já liberado, ele cria um **segundo contrato e uma segunda cobrança real** — e, com a política ligada, libera a segunda assinatura ao cliente.
+>
+> **Confira que `CONTRATO_ESCRITORIO_EMAIL` é o e-mail de um advogado.** O freio só verifica que *alguém* ocupa o `order_group 2`. Essa variável estar correta é o fundamento regulatório inteiro da feature, e nenhum código consegue verificar isso por você.
 
 - [ ] **Step 1: Gere um contrato aéreo com a política DESLIGADA**
 
-Monte um `caso_aereo.json` com dados de teste (CPF válido de teste, e-mail seu) e `"tipo_caso": "aereo_consumidor"`, `"valor_honorarios": 500.0`. Com `CONTRATO_POLITICA_POR_TIPO` vazio no `.env`:
+Monte `caso_aereo.json` com dados de teste (**CPF de teste nº 1**, e-mail seu), `"tipo_caso": "aereo_consumidor"`, `"valor_honorarios": 500.0`, `"valor_extenso": "quinhentos reais"`. Com `CONTRATO_POLITICA_POR_TIPO` vazio no `.env` e `ASAAS_BASE_URL` apontando ao sandbox:
 
 ```bash
 cd C:/Users/mario/noviello-funil-saude && uv run python scripts/gerar_contrato.py caso_aereo.json
 ```
 
-Esperado: `status: pendente_revisao`. Abra o PDF e **leia o contrato inteiro** — é a última vez que um humano vai ler antes de o modo automático entrar.
+Esperado: `status: pendente_revisao`.
 
-- [ ] **Step 2: Confira o PDF contra o docx original**
+- [ ] **Step 2: Leia o PDF inteiro**
 
-Confira que as Cláusulas 1ª e 4ª saíram com o texto certo, que `R$ 500,00` e `quinhentos reais` apareceram nos lugares certos, e que **nenhum `{{...}}` sobrou** no documento.
+Abra o `sign_url`. **Leia o contrato do começo ao fim.** Com a política ligada não haverá PDF para revisar antes de o cliente ver — esta é literalmente a última leitura humana da minuta aérea.
 
-- [ ] **Step 3: Ligue a política e repita**
+Confira contra `Ações 2026\_Geral\Contrato - Aereo.docx`: as Cláusulas 1ª e 4ª saíram com o texto certo, `R$ 500,00` e `quinhentos reais` nos lugares certos, e **nenhum `{{...}}` sobrou** no documento.
+
+Confira também que o escritório aparece como signatário. Se não aparecer, pare: `CONTRATO_ESCRITORIO_EMAIL` está vazio, e o modo automático não vai liberar (corretamente).
+
+- [ ] **Step 3: Reprove este contrato**
+
+Use o link de aprovação para **reprovar**. Isso libera o CPF de teste nº 1 e mantém o sandbox limpo. Confira que a cobrança Asaas foi cancelada.
+
+- [ ] **Step 4: Ligue a política e gere um contrato NOVO**
 
 No `.env`:
 
@@ -1046,17 +1086,32 @@ CONTRATO_POLITICA_POR_TIPO=aereo_consumidor:automatico
 CONTRATO_TETO_AUTOMATICO=600
 ```
 
+Monte `caso_aereo_2.json` com **CPF de teste nº 2** — diferente do Step 1. Não reutilize o arquivo anterior.
+
 ```bash
-cd C:/Users/mario/noviello-funil-saude && uv run python scripts/gerar_contrato.py caso_aereo.json
+cd C:/Users/mario/noviello-funil-saude && uv run python scripts/gerar_contrato.py caso_aereo_2.json
 ```
 
-Esperado: `status: liberado_automatico`, e-mail de assinatura chega na caixa do e-mail de teste, aviso no WhatsApp do Mario.
+Esperado: `status: liberado_automatico`, `motivo_liberacao: politica_automatica`, e o e-mail de assinatura chegando na caixa de teste **sem você ter aprovado nada**.
 
-- [ ] **Step 4: Confirme que os outros tipos não mudaram**
+Se vier `pendente_revisao` com `motivo_liberacao: doc_preexistente`, você reutilizou o CPF — recomece com um terceiro.
+Se vier `sem_contra_assinante`, o `CONTRATO_ESCRITORIO_EMAIL` está vazio.
 
-Rode o mesmo script com um caso `urbanistico_iptu_regularizacao`.
+- [ ] **Step 5: Confirme que o teto morde**
 
-Esperado: `status: pendente_revisao`, nenhum e-mail ao cliente.
+Gere um terceiro caso, **CPF de teste nº 3**, com `"valor_honorarios": 5000.0` (o erro de digitação que o teto existe para pegar).
+
+Esperado: `status: pendente_revisao`, `motivo_liberacao: acima_do_teto`, nenhum e-mail ao cliente.
+
+- [ ] **Step 6: Confirme que os outros tipos não mudaram**
+
+Rode um caso `urbanistico_iptu_regularizacao`, com a política aérea ainda ligada.
+
+Esperado: `status: pendente_revisao`, `motivo_liberacao: politica_humana`, nenhum e-mail ao cliente. É a prova de que ligar o aéreo não mexeu em mais nada.
+
+- [ ] **Step 7: Decida sobre o docx desatualizado**
+
+`Ações 2026\_Geral\Contrato - Aereo.docx` ainda diz **R$ 1.000,00** na Cláusula 4ª §1. O sistema emite **R$ 500,00**. Enquanto os dois existirem, quem abrir o arquivo procurando o valor vigente acha o errado.
 
 ---
 
@@ -1068,3 +1123,30 @@ Um contrato aéreo é gerado, cobrado e **liberado ao cliente sem intervenção*
 
 - **Fase 2 — Coleta:** o modelo classifica `tipo_caso` (enum vindo de `TIPOS_CASO`), e um módulo novo conduz a coleta conversacional dos 16 campos que o template exige (`nome_completo`, `nacionalidade`, `estado_civil`, `profissao`, `rg`, `orgao_emissor`, `cpf`, `logradouro`, `numero`, `complemento`, `bairro`, `cidade`, `uf`, `cep`, `celular`, `email`), com validação de dígito verificador de CPF e eco de confirmação.
 - **Fase 3 — Gatilho:** ao confirmar os dados, a conversa chama o `gerar_contrato` com o valor fixo do tipo de caso (R$ 500,00 no aéreo, vindo de `HONORARIOS_PADRAO` — a IA nunca precifica, invariante I7). Inclui o gate de viabilidade aérea (prescrição — 5 anos no CDC contra 2 anos na Convenção de Montreal para voo internacional, calculado no código a partir da data do voo, nunca pelo modelo) e o **aviso ao Mario no WhatsApp** a cada liberação automática, que é onde ele passa a fazer sentido: na Fase 1 quem dispara é você no terminal e já vê o resultado na tela.
+
+---
+
+## Lições — o que a revisão adversarial pegou e o plano não
+
+Cinco defeitos chegaram ao código. **Nenhum foi erro de execução:** os agentes transcreveram fielmente o que a especificação mandava. Os cinco estavam na especificação, escrita e revisada três vezes antes de qualquer código.
+
+1. **Ler o proxy em vez do fato.** `tem_contra_assinante` vinha de `contrato_escritorio_email` na config. Quem assina de verdade é a lista `signers_extra` do documento. As duas podem divergir, e o freio protegeria a intenção.
+2. **O mesmo erro, um nível mais fundo.** Corrigido para ler a lista, ainda estava errado: a lista só *é* o documento quando o documento é criado naquela chamada. Num documento que já existia, ela volta a ser intenção. O caminho real — operador esquece o e-mail, preenche, roda de novo — liberaria contrato sem contra-assinatura.
+3. **Condensar texto jurídico.** A extração do docx virou a definição aberta de proveito econômico numa lista fechada de quatro itens, estreitando a base de honorários do escritório. Ninguém decidiu isso.
+4. **Afirmar no presente o que só vale depois.** Duas vezes: um comentário dizendo que o orquestrador já lia a política, e outro dizendo que a trilha de auditoria prova aprovação humana.
+5. **Guarda larga demais.** A trava de duplicata bloqueava retentativa de contrato aberto, para todos os tipos de caso — regressão criada ao corrigir outro problema.
+
+O padrão: **os quatro primeiros são a mesma classe de erro.** Uma afirmação sobre o mundo que era verdadeira no caso que eu tinha em mente e falsa no caso que eu não tinha. Só apareceram porque alguém leu o código sem confiar na descrição dele.
+
+Duas coisas que funcionaram e valem repetir:
+
+- **Fazer o revisor conferir contra a fonte, não contra a minha descrição.** O erro no texto jurídico só apareceu porque o revisor abriu o docx.
+- **Executor que se recusa a fazer teste passar.** Um teste meu assumia que a segunda chamada cairia num curto-circuito. Não caía — criava segundo contrato e segunda cobrança. Forçar o teste a passar teria certificado esse caminho como seguro.
+
+Uma coisa que não funcionou: **rodar git enquanto um subagente trabalha no mesmo repositório.** Um commit meu engoliu o stage de um agente.
+
+## Pendente de decisão do Mario
+
+**O que identifica um caso aéreo distinto?** A chave de negócio é CPF + tipo de caso, mas o mesmo cliente pode ter dois voos e dois contratos legítimos. Depois que um contrato é liberado ele sai do índice `uq_contrato_aberto`, e uma segunda execução cria contrato novo e **cobrança nova** — medido, não suposto.
+
+Na Fase 1 isso é contido pela guarda `--novo-caso` no script, porque quem dispara é humano. **Na Fase 3, com o bot disparando, vira obrigatório ter resposta.** Decidir antes de ligar o gatilho conversacional, não depois.
