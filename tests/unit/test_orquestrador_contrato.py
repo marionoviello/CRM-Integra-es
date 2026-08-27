@@ -1113,3 +1113,58 @@ async def test_auditoria_registra_que_nao_houve_aprovacao_humana():
     liberacao = [r for r in linhas if r["ator"] == "sistema"]
     assert liberacao, f"nenhuma transição do sistema em {[dict(r) for r in linhas]}"
     assert all("humana" not in (r["motivo"] or "") for r in liberacao)
+
+
+@pytest.mark.asyncio
+async def test_doc_preexistente_nao_libera_sozinho():
+    """O dedupe NÃO acrescenta signatário a um doc que já existe. Liberar com
+    base na lista da chamada nova seria proteger a intenção, não o fato: o
+    operador que esqueceu o e-mail do escritório, preencheu e re-rodou teria
+    um contrato liberado sem contra-assinante no documento.
+
+    Reproduz esse fluxo REAL (é o que alcança o short-circuit do dedupe): a 1ª
+    run cria o doc sem o escritório e para em ``sem_contra_assinante``,
+    deixando o contrato em PENDENTE_REVISAO — estado ABERTO, então a 2ª run o
+    RETOMA. Partir de um contrato já liberado não serviria: LIBERADO não é
+    estado aberto, a 2ª run não acharia nada e criaria contrato novo.
+    """
+    conn = _db()
+    asaas, zap = FakeAsaas(), FakeZapSign()
+    so_testemunha = [s for s in SIGNERS_EXTRA if s.get("order_group") != 2]
+
+    primeira = await _gerar(
+        conn, asaas, zap,
+        politicas={TIPO: AUTOMATICO}, signers_extra=so_testemunha,
+    )
+    assert primeira["status"] == "pendente_revisao"
+    assert primeira["motivo_liberacao"] == "sem_contra_assinante"
+
+    # Operador preenche CONTRATO_ESCRITORIO_EMAIL e re-roda o mesmo caso.
+    zap.resend_calls.clear()
+    segunda = await _gerar(
+        conn, asaas, zap,
+        politicas={TIPO: AUTOMATICO}, signers_extra=SIGNERS_EXTRA,
+    )
+
+    assert segunda["contrato_id"] == primeira["contrato_id"]   # retomou, não criou
+    assert segunda["motivo_liberacao"] == "doc_preexistente"
+    assert zap.resend_calls == []
+    # o doc NÃO foi recriado nem ganhou o escritório — é o fato que o freio
+    # protege. Checa pelo NOME: _payload_add_signer não manda order_group (a
+    # API não o expõe), então filtrar por order_group passaria à toa.
+    assert len(zap.create_calls) == 1
+    nomes_no_doc = [c[1]["name"] for c in zap.add_signer_calls]
+    assert "Escritório Teste" not in nomes_no_doc, nomes_no_doc
+    conn.close()
+
+
+@pytest.mark.asyncio
+async def test_doc_criado_nesta_chamada_ainda_libera():
+    """REGRESSÃO do freio novo: o caminho normal não pode ter sido quebrado."""
+    conn = _db()
+    asaas, zap = FakeAsaas(), FakeZapSign()
+
+    out = await _gerar(conn, asaas, zap, politicas={TIPO: AUTOMATICO})
+
+    assert out["status"] == "liberado_automatico"
+    assert out["motivo_liberacao"] == "politica_automatica"

@@ -419,6 +419,15 @@ async def _finalizar_e_liberar(
     automático (Prov. 205/2021). Derivando do fato, o freio deixa de ser
     convenção e passa a ser garantia estrutural.
 
+    O LIMITE dessa garantia: ela só se sustenta em doc criado NESTA chamada,
+    porque só aí a lista derivada é a MESMA que foi pro ``add_signer``. Doc
+    pré-existente (dedupe/retomada) NÃO é liberado sozinho — a lista da
+    chamada seria intenção, não roster, e o dedupe não acrescenta signatário
+    a documento já criado. Custo assumido: contrato que falhou ao liberar não
+    se completa sozinho no retry, fica pra liberação manual. Liberação manual
+    de contrato preso é chateação; contrato sem contra-assinante no cliente é
+    problema regulatório.
+
     Falha ao liberar NÃO é falha do contrato: ele existe, está cobrado e
     revisável. Fica em PENDENTE_REVISAO pro Mario liberar na mão. Esse caso
     devolve um 5º motivo, ``falha_ao_liberar``, que NÃO vem do
@@ -426,6 +435,17 @@ async def _finalizar_e_liberar(
     """
     resultado = await _finalizar_apos_cobranca(conn, zapsign, **kwargs)
     if resultado.get("status") != "pendente_revisao":
+        return resultado
+
+    # A derivação abaixo só vale quando o doc foi criado NESTA chamada: aí a
+    # lista é a mesma que foi pro add_signer. Num doc que já existia, ela é a
+    # INTENÇÃO do chamador, não o roster do documento — e o caso real é o
+    # operador que esqueceu o e-mail do escritório, preencheu e re-rodou: o
+    # dedupe não acrescenta signatário ao doc existente, mas a lista nova traz
+    # order_group 2 e liberaríamos um documento sem contra-assinante.
+    # Falha fechada: quem retoma libera na mão.
+    if resultado.get("doc_preexistente"):
+        resultado["motivo_liberacao"] = "doc_preexistente"
         return resultado
 
     # order_group 2 = o escritório contra-assinando depois do cliente. Só
@@ -518,8 +538,10 @@ async def _criar_doc_silencioso(
     """
     contrato_id = contrato["id"]
 
-    def _resultado(c: sqlite3.Row) -> dict[str, Any]:
-        return {
+    def _resultado(
+        c: sqlite3.Row, *, doc_preexistente: bool = False,
+    ) -> dict[str, Any]:
+        out: dict[str, Any] = {
             "status": "pendente_revisao",
             "contrato_id": contrato_id,
             "link_aprovacao": (
@@ -528,6 +550,12 @@ async def _criar_doc_silencioso(
             "sign_url": c["sign_url"],
             "invoice_url": c["invoice_url"],
         }
+        if doc_preexistente:
+            # O doc veio de uma chamada ANTERIOR: os signatários desta chamada
+            # NÃO foram (nem serão) aplicados a ele. Quem lê este retorno não
+            # pode tratar signers_extra como o roster do documento.
+            out["doc_preexistente"] = True
+        return out
 
     # Idempotência: doc já criado → reconcilia e sai (sem re-chamar a ZapSign).
     if contrato["zapsign_doc_token"]:
@@ -538,12 +566,12 @@ async def _criar_doc_silencioso(
                 conn, contrato_id, EstadoContrato.PENDENTE_REVISAO,
                 motivo="reconciliação: doc já existia", ator="sistema",
             )
-        return _resultado(get_contrato(conn, contrato_id))
+        return _resultado(get_contrato(conn, contrato_id), doc_preexistente=True)
 
     # Se o contrato já está em PENDENTE_REVISAO (retomada de duplo-comando com
     # o doc já criado num passo anterior), devolve os links sem re-criar.
     if contrato["estado"] == EstadoContrato.PENDENTE_REVISAO:
-        return _resultado(contrato)
+        return _resultado(contrato, doc_preexistente=True)
 
     data = montar_data_contrato(
         cliente, escopo,
