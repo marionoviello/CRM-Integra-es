@@ -8,7 +8,9 @@
 
 **Tech Stack:** Python 3.11, pydantic-settings, SQLite, pytest + pytest-asyncio, ruff.
 
-**Fundamento da mudança de invariante (decisão Mario, 26/ago/2026):** o comentário em `config.py` registrava "nunca 100% automático (Prov. 205/2021, mandato personalíssimo)". A invariante foi revista **apenas para o modo automático com contra-assinatura**: a minuta sai sem revisão prévia, mas o contrato só se perfaz com a assinatura do escritório no `order_group 2`, que já existe no fluxo. Por isso a Task 4 **trava em teste** que o modo automático exige `contrato_escritorio_email` configurado — sem contra-assinante, não libera.
+**Fundamento da mudança de invariante (decisão Mario, 26/ago/2026):** o comentário em `config.py` registrava "nunca 100% automático (Prov. 205/2021, mandato personalíssimo)". A invariante foi revista **apenas para o modo automático com contra-assinatura**: a minuta sai sem revisão prévia, mas o contrato só se perfaz com a assinatura do escritório no `order_group 2`, que já existe no fluxo.
+
+Por isso a Task 5 **trava em teste** que o modo automático só libera quando há alguém em `order_group 2` na lista de signatários **do documento**. Esse freio lê o fato, não a config: derivá-lo de `contrato_escritorio_email` seria uma segunda fonte de verdade sobre a mesma coisa, e um chamador que montasse `signers_extra` sem o escritório — com o e-mail ainda no `.env` — liberaria contrato sem contra-assinatura. Lendo a lista real, o fundamento ético deixa de ser convenção e vira garantia estrutural.
 
 **Fora do escopo desta fase (vêm nas Fases 2 e 3):** classificação de `tipo_caso` pelo modelo, coleta conversacional de dados cadastrais, e o gatilho que liga a conversa ao `gerar_contrato`. Ao fim desta fase o contrato aéreo ainda é disparado pelo `scripts/gerar_contrato.py` — mas já nasce e se libera sozinho.
 
@@ -637,14 +639,12 @@ async def test_tipo_sem_politica_continua_no_gate_humano():
 
 @pytest.mark.asyncio
 async def test_politica_automatica_libera_e_chama_resend():
+    """SIGNERS_EXTRA já traz o escritório em order_group 2 — a contra-assinatura
+    existe, então o freio ético não dispara."""
     conn = _db()
     asaas, zap = FakeAsaas(), FakeZapSign()
 
-    out = await _gerar(
-        conn, asaas, zap,
-        politicas={TIPO: AUTOMATICO},
-        tem_contra_assinante=True,
-    )
+    out = await _gerar(conn, asaas, zap, politicas={TIPO: AUTOMATICO})
 
     assert out["status"] == "liberado_automatico"
     assert out["motivo_liberacao"] == "politica_automatica"
@@ -652,14 +652,33 @@ async def test_politica_automatica_libera_e_chama_resend():
 
 
 @pytest.mark.asyncio
-async def test_politica_automatica_sem_contra_assinante_nao_libera():
+async def test_sem_escritorio_na_lista_nao_libera():
+    """FREIO ESTRUTURAL. Sem ninguém em order_group 2 no documento, não há
+    contra-assinatura — e é ela que sustenta o fundamento do modo automático.
+    O freio lê a lista REAL de signatários, não a config: config e documento
+    poderiam divergir, e aí o freio protegeria o fato errado."""
     conn = _db()
     asaas, zap = FakeAsaas(), FakeZapSign()
+    so_testemunha = [s for s in SIGNERS_EXTRA if s.get("order_group") != 2]
 
     out = await _gerar(
         conn, asaas, zap,
         politicas={TIPO: AUTOMATICO},
-        tem_contra_assinante=False,
+        signers_extra=so_testemunha,
+    )
+
+    assert out["status"] == "pendente_revisao"
+    assert out["motivo_liberacao"] == "sem_contra_assinante"
+    assert zap.resend_calls == []
+
+
+@pytest.mark.asyncio
+async def test_lista_de_signatarios_vazia_nao_libera():
+    conn = _db()
+    asaas, zap = FakeAsaas(), FakeZapSign()
+
+    out = await _gerar(
+        conn, asaas, zap, politicas={TIPO: AUTOMATICO}, signers_extra=[],
     )
 
     assert out["status"] == "pendente_revisao"
@@ -675,7 +694,6 @@ async def test_politica_automatica_acima_do_teto_nao_libera():
     out = await _gerar(
         conn, asaas, zap,
         politicas={TIPO: AUTOMATICO},
-        tem_contra_assinante=True,
         teto_automatico=100.0,
     )
 
@@ -692,11 +710,7 @@ async def test_send_automatic_email_continua_false_mesmo_no_automatico():
     conn = _db()
     asaas, zap = FakeAsaas(), FakeZapSign()
 
-    await _gerar(
-        conn, asaas, zap,
-        politicas={TIPO: AUTOMATICO},
-        tem_contra_assinante=True,
-    )
+    await _gerar(conn, asaas, zap, politicas={TIPO: AUTOMATICO})
 
     assert zap.create_calls[0]["send_automatic_email"] is False
 ```
@@ -719,13 +733,14 @@ Em `src/noviello_funil/orquestrador_contrato.py`, acrescente o import junto dos 
 from .politica_contrato import decidir_liberacao, parse_politicas
 ```
 
-Na assinatura de `gerar_contrato`, acrescente os três parâmetros keyword-only ao final (depois de `lead_id: int | None = None`):
+Na assinatura de `gerar_contrato`, acrescente os dois parâmetros keyword-only ao final (depois de `lead_id: int | None = None`):
 
 ```python
     politicas: dict[str, str] | None = None,
     teto_automatico: float = 0.0,
-    tem_contra_assinante: bool = False,
 ```
+
+Repare que **não** existe parâmetro `tem_contra_assinante`. Ele é derivado dentro do envelope, a partir da lista de signatários real. Um parâmetro seria uma segunda fonte de verdade sobre o mesmo fato, e as duas poderiam divergir.
 
 Na docstring de `gerar_contrato`, acrescente à lista de status:
 
@@ -746,7 +761,6 @@ async def _finalizar_e_liberar(
     valor_honorarios: float,
     politicas: dict[str, str],
     teto_automatico: float,
-    tem_contra_assinante: bool,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """[6]+[7]: cria o doc em silêncio e, se a política do tipo de caso mandar,
@@ -758,13 +772,28 @@ async def _finalizar_e_liberar(
     sendo duas chamadas, e é isso que permite trocar de política sem
     reescrever o pipeline.
 
+    ``tem_contra_assinante`` é derivado da lista de signatários QUE VAI NO
+    DOCUMENTO, não da config. Ler do ``Settings`` seria ler um proxy: um
+    chamador que montasse ``signers_extra`` sem o escritório, com o e-mail
+    ainda no ``.env``, liberaria contrato sem contra-assinatura — e é
+    justamente a contra-assinatura que sustenta o fundamento do modo
+    automático (Prov. 205/2021). Derivando do fato, o freio deixa de ser
+    convenção e passa a ser garantia estrutural.
+
     Falha ao liberar NÃO é falha do contrato: ele existe, está cobrado e
-    revisável. Fica em PENDENTE_REVISAO pro Mario liberar na mão.
+    revisável. Fica em PENDENTE_REVISAO pro Mario liberar na mão. Esse caso
+    devolve um 5º motivo, ``falha_ao_liberar``, que NÃO vem do
+    ``decidir_liberacao`` — quem lê ``motivo_liberacao`` tem que contar com ele.
     """
     resultado = await _finalizar_apos_cobranca(conn, zapsign, **kwargs)
     if resultado.get("status") != "pendente_revisao":
         return resultado
 
+    # order_group 2 = o escritório contra-assinando depois do cliente. Só
+    # existe na lista se montar_signers_padrao encontrou o e-mail na config.
+    tem_contra_assinante = any(
+        s.get("order_group") == 2 for s in kwargs.get("signers_extra") or []
+    )
     libera, motivo = decidir_liberacao(
         tipo_caso=tipo_caso,
         politicas=politicas,
@@ -802,7 +831,6 @@ Agora troque os **dois** `return await _finalizar_apos_cobranca(...)` dentro de 
             valor_honorarios=valor_honorarios,
             politicas=politicas or {},
             teto_automatico=teto_automatico,
-            tem_contra_assinante=tem_contra_assinante,
             contrato_id=contrato_id, cliente=cliente,
             escopo=escopo, valor_fmt=valor_fmt, valor_extenso=valor_extenso,
             invoice_url=invoice_url, template_id=template_id,
@@ -854,40 +882,29 @@ from noviello_funil.orquestrador_contrato import args_politica
 
 
 class _FakeSettings:
-    def __init__(self, politica="", teto=0.0, escritorio_email=""):
+    def __init__(self, politica="", teto=0.0):
         self.contrato_politica_por_tipo = politica
         self.contrato_teto_automatico = teto
-        self.contrato_escritorio_email = escritorio_email
 
 
 def test_args_politica_default_e_gate_humano():
     args = args_politica(_FakeSettings())
-    assert args == {
-        "politicas": {},
-        "teto_automatico": 0.0,
-        "tem_contra_assinante": False,
-    }
+    assert args == {"politicas": {}, "teto_automatico": 0.0}
 
 
 def test_args_politica_le_a_config():
-    s = _FakeSettings(
-        politica="aereo_consumidor:automatico",
-        teto=1500.0,
-        escritorio_email="mario@noviello.adv.br",
-    )
+    s = _FakeSettings(politica="aereo_consumidor:automatico", teto=600.0)
     args = args_politica(s)
     assert args["politicas"] == {"aereo_consumidor": AUTOMATICO}
-    assert args["teto_automatico"] == 1500.0
-    assert args["tem_contra_assinante"] is True
+    assert args["teto_automatico"] == 600.0
 
 
-def test_contra_assinante_e_o_email_do_escritorio():
-    """É o mesmo campo que montar_signers_padrao usa pra incluir o escritório
-    no order_group 2. Se ele não inclui, não há contra-assinatura."""
-    s = _FakeSettings(
-        politica="aereo_consumidor:automatico", escritorio_email="   ",
-    )
-    assert args_politica(s)["tem_contra_assinante"] is False
+def test_args_politica_nao_decide_contra_assinatura():
+    """A contra-assinatura NÃO sai da config: ela é derivada da lista de
+    signatários que vai no documento, dentro do orquestrador. Config e
+    documento poderiam divergir, e o freio precisa proteger o fato."""
+    args = args_politica(_FakeSettings(politica="aereo_consumidor:automatico"))
+    assert "tem_contra_assinante" not in args
 ```
 
 - [ ] **Step 2: Rode para ver falhar**
@@ -906,10 +923,10 @@ Em `src/noviello_funil/orquestrador_contrato.py`, acrescente logo após `montar_
 def args_politica(settings: Any) -> dict[str, Any]:
     """Kwargs de política do ``gerar_contrato``, a partir do ``Settings``.
 
-    ``tem_contra_assinante`` é derivado do MESMO campo que
-    ``montar_signers_padrao`` usa pra incluir o escritório no order_group 2 —
-    se aquele signatário não entra, não existe contra-assinatura, e é ela que
-    sustenta a liberação automática (decisão Mario 26/ago/2026).
+    NÃO devolve ``tem_contra_assinante``: esse fato é derivado dentro do
+    ``_finalizar_e_liberar``, da lista de signatários que realmente vai no
+    documento. Ler da config seria ler um proxy — config e documento podem
+    divergir, e o freio precisa proteger o fato, não a intenção.
     """
     return {
         "politicas": parse_politicas(
@@ -917,9 +934,6 @@ def args_politica(settings: Any) -> dict[str, Any]:
         ),
         "teto_automatico": float(
             getattr(settings, "contrato_teto_automatico", 0.0) or 0.0
-        ),
-        "tem_contra_assinante": bool(
-            (getattr(settings, "contrato_escritorio_email", "") or "").strip()
         ),
     }
 ```
