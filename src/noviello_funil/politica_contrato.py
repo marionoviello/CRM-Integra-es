@@ -32,7 +32,12 @@ def parse_politicas(raw: str) -> dict[str, str]:
         if ":" not in par:
             continue
         tipo, _, valor = par.partition(":")
-        tipo, valor = tipo.strip(), valor.strip().lower()
+        # Config é editada à mão no .env — normaliza os DOIS lados (chave e
+        # valor). Sem isso, "AEREO_CONSUMIDOR:automatico" cria a chave
+        # "AEREO_CONSUMIDOR", que nunca bate com o lookup em minúsculo feito
+        # por politica_do_tipo: falha SILENCIOSA (cai em HUMANO sem avisar
+        # por quê), pior que uma falha ruidosa.
+        tipo, valor = tipo.strip().lower(), valor.strip().lower()
         if not tipo or not valor:
             continue
         mapa[tipo] = AUTOMATICO if valor == AUTOMATICO else HUMANO

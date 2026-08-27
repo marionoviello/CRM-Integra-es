@@ -49,3 +49,17 @@ def test_politica_do_tipo_default_e_humano():
 def test_politica_do_tipo_encontrada():
     mapa = {"aereo_consumidor": AUTOMATICO}
     assert politica_do_tipo("aereo_consumidor", mapa) == AUTOMATICO
+
+
+def test_parse_politicas_valor_e_case_insensitive():
+    """A config é editada à mão no .env — "AUTOMATICO" tem que valer."""
+    assert parse_politicas("aereo_consumidor:AUTOMATICO") == {
+        "aereo_consumidor": AUTOMATICO,
+    }
+
+
+def test_parse_politicas_chave_e_case_insensitive():
+    """Chave em caixa alta no .env não pode virar entrada morta."""
+    assert parse_politicas("AEREO_CONSUMIDOR:automatico") == {
+        "aereo_consumidor": AUTOMATICO,
+    }
