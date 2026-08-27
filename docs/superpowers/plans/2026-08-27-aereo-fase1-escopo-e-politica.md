@@ -891,6 +891,10 @@ cd C:/Users/mario/noviello-funil-saude && git add src/noviello_funil/orquestrado
 
 ### Task 6: O script de disparo passa a política adiante
 
+> **Acrescentado em 27/ago após a revisão da Task 5.** O índice `uq_contrato_aberto` cobre só estados ABERTOS. Assim que um contrato é liberado, ele sai do campo de visão do dedupe — e uma segunda execução para o mesmo CPF e tipo cria **contrato novo, cobrança nova e liberação nova**, medido em teste pelo executor da Task 5. No gate humano isso era improvável (a janela durava até você aprovar); no modo automático a janela é permanente.
+>
+> A raiz é uma pergunta que só o Mario responde — **o que identifica um caso aéreo distinto?** O mesmo cliente pode ter dois voos e dois contratos legítimos, então nem deduplicar para sempre nem deduplicar só enquanto aberto está certo. Enquanto não houver resposta, o script **não pode** disparar em silêncio sobre um CPF que já tem contrato do mesmo tipo. Isso não decide a pergunta: só impede que ela seja respondida por acidente.
+
 **Files:**
 - Modify: `src/noviello_funil/orquestrador_contrato.py` (helper novo)
 - Modify: `scripts/gerar_contrato.py`
