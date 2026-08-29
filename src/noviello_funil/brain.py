@@ -112,6 +112,30 @@ def load_skill(name: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+# Travessão/meia-risca com espaços opcionais em volta (sem cruzar linha).
+_RE_TRAVESSAO = re.compile(r"[ \t]*[—–][ \t]*")
+
+
+def remover_travessoes(texto: str) -> str:
+    """Rede de segurança de estilo (pedido Mario 29/ago): o modelo adora
+    travessão no meio da frase e a instrução na skill sozinha vaza. Meio de
+    frase vira vírgula (ou nada, se já há pontuação antes); travessão de
+    início de linha (bullet) fica; travessão solto no fim da linha some.
+    """
+    def _sub(m: re.Match) -> str:
+        antes = texto[: m.start()]
+        if not antes.strip() or antes.rstrip(" \t").endswith("\n"):
+            return m.group(0)
+        depois = texto[m.end():]
+        if not depois or depois.startswith("\n"):
+            return ""
+        if antes.rstrip()[-1] in ",;:.!?…(":
+            return " "
+        return ", "
+
+    return _RE_TRAVESSAO.sub(_sub, texto)
+
+
 def parse_decisao(raw: str) -> Decisao:
     """Parse Claude's text response into a Decisao.
 
@@ -155,7 +179,7 @@ def parse_decisao(raw: str) -> Decisao:
 
     return Decisao(
         acao=acao,
-        mensagem=mensagem,
+        mensagem=remover_travessoes(mensagem),
         resumo_caso=data.get("resumo_caso"),
         motivo_handoff=data.get("motivo_handoff"),
         horario_escolhido_iso=data.get("horario_escolhido_iso"),
@@ -305,4 +329,4 @@ async def gerar_followup_msg(
     texto = _primeiro_texto(resp)
     if texto is None:
         raise DecisaoInvalida("follow-up: resposta sem bloco de texto (refusal?)")
-    return texto.strip()
+    return remover_travessoes(texto.strip())
