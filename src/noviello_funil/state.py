@@ -829,6 +829,20 @@ def event_ids_de_reunioes(conn: sqlite3.Connection) -> set[str]:
     return {r["reuniao_event_id"] for r in rows}
 
 
+def lead_por_reuniao_event_id(
+    conn: sqlite3.Connection, event_id: str,
+) -> sqlite3.Row | None:
+    """D4b (30/ago): lead dono do evento do Calendar (reunião rastreada).
+
+    Usado pra detectar reunião do bot MOVIDA na mão — o event_id não muda
+    no arrasto, só o horário."""
+    if not event_id:
+        return None
+    return conn.execute(
+        "SELECT * FROM leads WHERE reuniao_event_id = ?", (event_id,),
+    ).fetchone()
+
+
 def evento_manual_ja_alertado(
     conn: sqlite3.Connection, event_id: str,
 ) -> bool:

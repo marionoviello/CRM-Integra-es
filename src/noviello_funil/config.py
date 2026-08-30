@@ -79,6 +79,9 @@ class Settings(BaseSettings):
     calendar_business_hours_end: int = Field(default=19, ge=1, le=23)
     calendar_slot_min: int = Field(default=30, ge=15, le=180)
     calendar_buffer_min: int = Field(default=0, ge=0, le=60)
+    # Folga mínima entre a reunião do bot e qualquer compromisso já existente
+    # (D6, caso Kayan 30/ago): vale na oferta E na confirmação de horário.
+    calendar_folga_min: int = Field(default=30, ge=0, le=120)
     calendar_lookahead_days: int = Field(default=5, ge=1, le=30)
     # Teto de slots oferecidos. Estratégia "escassez" (2 do primeiro dia
     # + 1 do seguinte + 1 do próximo) produz até 4.

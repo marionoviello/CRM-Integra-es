@@ -11,6 +11,7 @@ from noviello_funil.calendar_client import (
     Slot,
     _nome_exibicao,
     _overlaps_any,
+    _subtrair_intervalo,
 )
 
 TZ = ZoneInfo("America/Sao_Paulo")
@@ -188,6 +189,117 @@ async def test_find_slots_escassez_dia1_com_um_slot_so(respx_mock):
     assert slots[0].start == _dt(2026, 6, 9, 18, 30)
     assert slots[1].start == _dt(2026, 6, 10, 14, 0)
     assert slots[2].start == _dt(2026, 6, 11, 14, 0)
+
+
+@pytest.mark.asyncio
+async def test_find_slots_folga_barra_slot_colado(respx_mock):
+    """D6 (caso Kayan×RPT 30/ago): compromisso 14h-15h com folga de 30min →
+    o slot das 15h (colado no fim) NÃO sai; o primeiro do dia vira 15h30."""
+    respx_mock.post("https://oauth2.googleapis.com/token").mock(
+        return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600}),
+    )
+    respx_mock.post(
+        "https://www.googleapis.com/calendar/v3/freeBusy",
+    ).mock(return_value=httpx.Response(
+        200, json={"calendars": {"primary": {"busy": [
+            {"start": "2026-06-09T14:00:00-03:00",
+             "end":   "2026-06-09T15:00:00-03:00"},
+        ]}}},
+    ))
+
+    now = _dt(2026, 6, 9, 10, 0)  # terça 10h
+    client = GoogleCalendarClient(client_id="c", client_secret="s", refresh_token="r")
+    try:
+        slots = await client.find_available_slots(
+            business_hours_start=14, business_hours_end=19,
+            slot_min=30, buffer_min=0, folga_min=30,
+            lookahead_days=5, num_slots=4, now=now,
+        )
+    finally:
+        await client.aclose()
+
+    inicios = [s.start for s in slots]
+    assert _dt(2026, 6, 9, 15, 0) not in inicios   # colado: barrado
+    assert slots[0].start == _dt(2026, 6, 9, 15, 30)  # 1º livre com folga
+
+
+@pytest.mark.asyncio
+async def test_is_slot_free_conflito_direto_e_colado(respx_mock):
+    """Caso Kayan (30/ago): compromisso 9h30-10h30. 10h em cima → ocupado;
+    10h30 colado (folga 30) → ocupado; 11h → livre."""
+    respx_mock.post("https://oauth2.googleapis.com/token").mock(
+        return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600}),
+    )
+    respx_mock.post(
+        "https://www.googleapis.com/calendar/v3/freeBusy",
+    ).mock(return_value=httpx.Response(
+        200, json={"calendars": {"primary": {"busy": [
+            {"start": "2026-06-09T09:30:00-03:00",
+             "end":   "2026-06-09T10:30:00-03:00"},
+        ]}}},
+    ))
+
+    client = GoogleCalendarClient(client_id="c", client_secret="s", refresh_token="r")
+    try:
+        em_cima = await client.is_slot_free(
+            start=_dt(2026, 6, 9, 10, 0), duration_min=30,
+        )
+        colado = await client.is_slot_free(
+            start=_dt(2026, 6, 9, 10, 30), duration_min=30, folga_min=30,
+        )
+        livre = await client.is_slot_free(
+            start=_dt(2026, 6, 9, 11, 0), duration_min=30, folga_min=30,
+        )
+    finally:
+        await client.aclose()
+
+    assert em_cima is False
+    assert colado is False
+    assert livre is True
+
+
+@pytest.mark.asyncio
+async def test_is_slot_free_desconta_reuniao_do_proprio_lead(respx_mock):
+    """Remarcação: o único busy é a reunião ATUAL do lead — descontada via
+    ignorar_intervalo, o novo horário (mesmo colado) fica livre."""
+    respx_mock.post("https://oauth2.googleapis.com/token").mock(
+        return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600}),
+    )
+    respx_mock.post(
+        "https://www.googleapis.com/calendar/v3/freeBusy",
+    ).mock(return_value=httpx.Response(
+        200, json={"calendars": {"primary": {"busy": [
+            {"start": "2026-06-09T14:00:00-03:00",
+             "end":   "2026-06-09T14:30:00-03:00"},
+        ]}}},
+    ))
+
+    antigo = (_dt(2026, 6, 9, 14, 0), _dt(2026, 6, 9, 14, 30))
+    client = GoogleCalendarClient(client_id="c", client_secret="s", refresh_token="r")
+    try:
+        sem_descontar = await client.is_slot_free(
+            start=_dt(2026, 6, 9, 14, 30), duration_min=30, folga_min=30,
+        )
+        descontando = await client.is_slot_free(
+            start=_dt(2026, 6, 9, 14, 30), duration_min=30, folga_min=30,
+            ignorar_intervalo=antigo,
+        )
+    finally:
+        await client.aclose()
+
+    assert sem_descontar is False
+    assert descontando is True
+
+
+def test_subtrair_intervalo_divide_bloco_fundido():
+    """freeBusy funde eventos contíguos num bloco só — a subtração recorta
+    o miolo e preserva as pontas."""
+    busy = [(_dt(2026, 6, 9, 9, 30), _dt(2026, 6, 9, 11, 0))]
+    resto = _subtrair_intervalo(busy, _dt(2026, 6, 9, 10, 0), _dt(2026, 6, 9, 10, 30))
+    assert resto == [
+        (_dt(2026, 6, 9, 9, 30), _dt(2026, 6, 9, 10, 0)),
+        (_dt(2026, 6, 9, 10, 30), _dt(2026, 6, 9, 11, 0)),
+    ]
 
 
 @pytest.mark.asyncio

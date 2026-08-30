@@ -84,6 +84,7 @@ from noviello_funil.state import (
     get_resumo_caso,
     lead_com_reuniao_no_horario,
     lead_por_email,
+    lead_por_reuniao_event_id,
     list_contratos_pos_pendentes,
     list_leads_aguardando_humano,
     list_leads_com_reuniao_futura,
@@ -180,6 +181,9 @@ class CalendarConfig:
     # oferece manhã + tarde. Default 0 mantém os fallbacks (sem Google) intactos.
     morning_start: int = 0
     morning_end: int = 0
+    # Folga mínima (min) entre a reunião do bot e qualquer compromisso já
+    # existente (D6, caso Kayan×RPT 30/ago): vale na OFERTA e na CONFIRMAÇÃO.
+    folga_min: int = 30
     # Timezone dos horários da agenda (e dos ISO vindos do Claude sem
     # offset). Auditoria 2026-06-10: naive astimezone() assumia UTC do
     # VPS — evento criado 3h errado.
@@ -552,6 +556,7 @@ async def _handle_oferecer_horarios(
             business_hours_end=calendar.business_hours_end,
             slot_min=calendar.slot_min,
             buffer_min=calendar.buffer_min,
+            folga_min=calendar.folga_min,
             lookahead_days=calendar.lookahead_days,
             num_slots=calendar.num_slots,
             morning_start=calendar.morning_start,
@@ -762,6 +767,59 @@ async def _handle_confirmar_horario(
         schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
         return
 
+    # D6 (30/ago, caso Kayan×RPT): o events.insert do Google NÃO rejeita
+    # conflito (a nota antiga assumia que sim) — e o lead pode propor um
+    # horário FORA da lista oferecida, que nunca passou pelo freeBusy.
+    # Recheca a agenda real AGORA, com a folga configurada; a reunião atual
+    # do próprio lead (remarcação) é descontada. Erro do Google → fail-open
+    # (segue o fluxo, com log alto) pra pane transitória não travar o funil.
+    try:
+        ignorar = None
+        if lead["reuniao_event_id"] and lead["reuniao_em"]:
+            antigo_start, _erro = _parse_horario_confirmado(
+                lead["reuniao_em"], calendar.timezone,
+            )
+            if antigo_start is not None:
+                ignorar = (
+                    antigo_start,
+                    antigo_start + datetime.timedelta(minutes=calendar.slot_min),
+                )
+        livre = await calendar.client.is_slot_free(
+            start=start,
+            duration_min=calendar.slot_min,
+            folga_min=calendar.folga_min,
+            ignorar_intervalo=ignorar,
+        )
+    except Exception as exc:
+        logger.error(
+            "is_slot_free falhou (lead=%s): %s — seguindo sem recheck",
+            lead_id, exc,
+        )
+        livre = True
+    if not livre:
+        logger.warning(
+            "conflito de agenda barrado: %s cruza ou cola em compromisso "
+            "existente (lead=%s) — reoferecendo", iso_normalizado, lead_id,
+        )
+        register_error(conn, lead_id, "conflito_agenda_barrado")
+        clear_horarios_oferecidos(conn, lead_id)
+        msg = (
+            "Esse horário conflita com um compromisso da nossa equipe. Vou "
+            "te mostrar a agenda atualizada com os próximos horários "
+            "disponíveis."
+        )
+        try:
+            await jurichat.start_human_support(conv_id)
+            await jurichat.send_message(conv_id, msg)
+        except Exception as exc:
+            logger.exception(
+                "send_message(conflito_agenda) failed lead=%s: %s",
+                lead_id, exc,
+            )
+        update_transcript_hash(conn, lead_id, new_hash)
+        schedule_next_action_seconds(conn, lead_id, poll_interval_seconds)
+        return
+
     # Lead JÁ TINHA reunião marcada e confirmou outra (remarcação que
     # o Claude rotulou de confirmar em vez de remarcar): cancela o
     # evento antigo antes de criar o novo — senão Mario fica com
@@ -791,9 +849,8 @@ async def _handle_confirmar_horario(
     clear_horarios_oferecidos(conn, lead_id)
     update_transcript_hash(conn, lead_id, new_hash)
 
-    # Criar o evento (a API do Google rejeita conflito hard se houver,
-    # mas como freeBusy é eventualmente consistente, não validamos
-    # antes — confiamos no create. Se der erro 409/4xx, log e degradar.)
+    # Criar o evento. O create do Google NÃO rejeita conflito (empilha) —
+    # a validação de agenda é o D6 acima. Se der erro 4xx, log e degradar.
     meet_link = ""
     event_id = ""
     try:
@@ -2942,6 +2999,64 @@ async def _alertar_evento_manual(
         marcar_evento_manual_alertado(conn, event_id)
 
 
+async def _sync_remarcacao_externa(
+    conn: Any,
+    jurichat: JurichatClient,
+    mario_conversation_id: str,
+    ev: dict[str, Any],
+) -> None:
+    """D4b (30/ago, caso Kayan): evento do bot MOVIDO na mão no Calendar.
+
+    O event_id não muda quando o Mario arrasta o evento, então o sync pulava
+    e o DB ficava com o horário velho — o lembrete de WhatsApp sairia com a
+    hora errada. Compara o start do Calendar com o ``reuniao_em`` do lead e,
+    se divergirem, re-grava via ``set_reuniao`` (que reseta os flags de
+    lembrete pro novo horário) e avisa o Mario. Idempotente: horários iguais
+    = no-op, então não spamma a cada tick.
+    """
+    if not ev["start_iso"]:
+        return  # virou all-day? sem horário não há o que sincronizar
+    lead = lead_por_reuniao_event_id(conn, ev["id"])
+    if lead is None or not lead["reuniao_em"]:
+        return
+    try:
+        novo = datetime.datetime.fromisoformat(ev["start_iso"])
+        atual = datetime.datetime.fromisoformat(lead["reuniao_em"])
+    except ValueError:
+        return
+    if novo == atual:
+        return
+    horario_antigo = lead["reuniao_em"]
+    try:
+        set_reuniao(
+            conn, lead["id"],
+            reuniao_em_iso=ev["start_iso"],
+            event_id=ev["id"],
+            meet_link=ev["meet_link"] or lead["reuniao_meet_link"] or "",
+        )
+    except ValueError as exc:
+        logger.warning(
+            "D4b: set_reuniao ISO inválido %r (lead=%s): %s",
+            ev["start_iso"], lead["id"], exc,
+        )
+        return
+    logger.info(
+        "D4b: reunião do lead=%s remarcada por fora: %s -> %s",
+        lead["id"], horario_antigo, ev["start_iso"],
+    )
+    await notify_mario(
+        jurichat,
+        mario_conversation_id=mario_conversation_id,
+        mensagem=(
+            "🔁 Reunião remarcada por fora no Calendar — lembretes ajustados:\n\n"
+            f"Lead: {lead['contato_nome']}\n"
+            f"De: {horario_antigo}\n"
+            f"Para: {ev['start_iso']}\n"
+            f"({ev['summary'] or 'sem título'})"
+        ),
+    )
+
+
 async def sync_reunioes_manuais(
     *,
     get_db: Callable[[], Any],
@@ -2972,8 +3087,17 @@ async def sync_reunioes_manuais(
     tracked = event_ids_de_reunioes(conn)
     for ev in eventos:
         event_id = ev["id"]
-        if not event_id or event_id in tracked:
-            continue  # já rastreado pelo bot (ou sem id)
+        if not event_id:
+            continue
+        if event_id in tracked:
+            # D4b (30/ago, caso Kayan): evento do BOT arrastado na mão no
+            # Calendar mantém o event_id — antes era pulado aqui e o DB
+            # ficava com o horário VELHO (lembrete de WhatsApp sairia com
+            # a hora errada). Detecta a divergência e re-sincroniza.
+            await _sync_remarcacao_externa(
+                conn, jurichat, mario_conversation_id, ev,
+            )
+            continue
         if not ev["start_iso"]:
             continue  # all-day (audiência sem horário) → ignora
         externos = _convidados_externos(ev)
@@ -3694,6 +3818,7 @@ def main() -> int:
             num_slots=settings.calendar_num_slots,
             morning_start=settings.calendar_morning_start,
             morning_end=settings.calendar_morning_end,
+            folga_min=settings.calendar_folga_min,
             timezone=settings.calendar_timezone,
         )
     else:

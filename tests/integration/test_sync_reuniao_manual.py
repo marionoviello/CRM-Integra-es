@@ -107,6 +107,45 @@ async def test_sync_ignora_evento_ja_rastreado(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_sync_remarcacao_externa_atualiza_lembretes(db_conn):
+    """D4b (30/ago, caso Kayan): Mario arrastou a reunião do BOT no Calendar
+    (mesmo event_id, horário novo). Antes o sync pulava e o lembrete de
+    WhatsApp sairia com a hora VELHA. Agora re-sincroniza e avisa 1×."""
+    lead = create_lead_if_absent(db_conn, "L-1", "C-1", "5511...", "João")
+    set_lead_email(db_conn, lead["id"], "joao@exemplo.com")
+    set_reuniao(
+        db_conn, lead["id"], reuniao_em_iso="2027-06-21T10:00:00-03:00",
+        event_id="evt-bot", meet_link="https://meet.google.com/x",
+    )
+    jurichat = _jurichat()
+    # Mesmo evento, meia hora depois (10h → 10h30).
+    cal = _calendar([_ev(
+        "evt-bot", start_iso="2027-06-21T10:30:00-03:00",
+        email_externo="joao@exemplo.com", meet="https://meet.google.com/x",
+    )])
+
+    await sync_reunioes_manuais(
+        get_db=lambda: db_conn, calendar=cal, jurichat=jurichat,
+        mario_conversation_id="MARIO",
+    )
+
+    row = get_lead_by_conversation(db_conn, "C-1")
+    assert row["reuniao_em"] == "2027-06-21T10:30:00-03:00"
+    assert row["reuniao_event_id"] == "evt-bot"
+    assert row["lembrete_24h_enviado_em"] is None  # flags resetados
+    para = _para_mario(jurichat)
+    assert len(para) == 1
+    assert "remarcada" in para[0].args[1].lower()
+
+    # Segundo tick com o mesmo horário: idempotente, sem novo aviso.
+    await sync_reunioes_manuais(
+        get_db=lambda: db_conn, calendar=cal, jurichat=jurichat,
+        mario_conversation_id="MARIO",
+    )
+    assert len(_para_mario(jurichat)) == 1
+
+
+@pytest.mark.asyncio
 async def test_sync_conflito_nao_sobrescreve(db_conn):
     lead = create_lead_if_absent(db_conn, "L-1", "C-1", "5511...", "João")
     set_lead_email(db_conn, lead["id"], "joao@exemplo.com")

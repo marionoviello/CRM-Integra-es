@@ -208,6 +208,7 @@ class GoogleCalendarClient:
         business_hours_end: int,
         slot_min: int,
         buffer_min: int,
+        folga_min: int = 0,
         lookahead_days: int,
         num_slots: int,
         morning_start: int = 0,
@@ -249,6 +250,11 @@ class GoogleCalendarClient:
         end_window = now + datetime.timedelta(days=lookahead_days * 2)
 
         busy = await self._fetch_busy_intervals(start=now, end=end_window)
+        # Folga (D6, caso Kayan×RPT 30/ago): infla cada compromisso existente
+        # pros dois lados — nunca oferecer slot colado em reunião já marcada.
+        if folga_min:
+            folga = datetime.timedelta(minutes=folga_min)
+            busy = [(b_start - folga, b_end + folga) for b_start, b_end in busy]
 
         exclude = exclude_isos or set()
         # Janelas do dia: manhã (se ligada e válida) + tarde. Em ordem
@@ -329,6 +335,32 @@ class GoogleCalendarClient:
             slots.append(dias_com_vagas[2][0])
 
         return slots[:num_slots]
+
+    async def is_slot_free(
+        self,
+        *,
+        start: datetime.datetime,
+        duration_min: int,
+        folga_min: int = 0,
+        ignorar_intervalo: tuple[datetime.datetime, datetime.datetime] | None = None,
+    ) -> bool:
+        """D6 (30/ago, caso Kayan×RPT): recheck de agenda na CONFIRMAÇÃO.
+
+        O ``events.insert`` do Google NÃO rejeita conflito (empilha), e o
+        lead pode propor horário fora da lista oferecida — que nunca passou
+        pelo freeBusy. Este método consulta o freeBusy na hora de confirmar:
+        True = [start, start+duration) livre, respeitando ``folga_min`` de
+        distância de qualquer compromisso existente. ``ignorar_intervalo``
+        desconta a reunião atual do próprio lead (remarcação não pode
+        conflitar consigo mesma).
+        """
+        folga = datetime.timedelta(minutes=folga_min)
+        check_start = start - folga
+        check_end = start + datetime.timedelta(minutes=duration_min) + folga
+        busy = await self._fetch_busy_intervals(start=check_start, end=check_end)
+        if ignorar_intervalo is not None:
+            busy = _subtrair_intervalo(busy, *ignorar_intervalo)
+        return not _overlaps_any(check_start, check_end, busy)
 
     async def _fetch_busy_intervals(
         self,
@@ -552,6 +584,29 @@ class GoogleCalendarClient:
                 resp.status_code, resp.text[:300],
             )
             resp.raise_for_status()
+
+
+def _subtrair_intervalo(
+    busy: list[tuple[datetime.datetime, datetime.datetime]],
+    rm_start: datetime.datetime,
+    rm_end: datetime.datetime,
+) -> list[tuple[datetime.datetime, datetime.datetime]]:
+    """Remove [rm_start, rm_end) dos intervalos busy (recorta/divide).
+
+    O freeBusy pode devolver a reunião do lead FUNDIDA com um compromisso
+    vizinho num bloco só — por isso a subtração é aritmética de intervalos,
+    não um filtro por igualdade.
+    """
+    out: list[tuple[datetime.datetime, datetime.datetime]] = []
+    for b_start, b_end in busy:
+        if b_end <= rm_start or rm_end <= b_start:
+            out.append((b_start, b_end))
+            continue
+        if b_start < rm_start:
+            out.append((b_start, rm_start))
+        if rm_end < b_end:
+            out.append((rm_end, b_end))
+    return out
 
 
 def _overlaps_any(

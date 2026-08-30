@@ -855,6 +855,8 @@ def _make_calendar(slots: list[Slot] | None = None, *, with_meet: bool = True):
     """Fake calendar client com find_available_slots + create_event."""
     fake = MagicMock()
     fake.find_available_slots = AsyncMock(return_value=slots or [])
+    # D6 (30/ago): recheck de agenda na confirmação — default livre.
+    fake.is_slot_free = AsyncMock(return_value=True)
     event_response: dict = {"id": "evt-1"}
     if with_meet:
         event_response["hangoutLink"] = "https://meet.google.com/xyz-test"
@@ -1212,6 +1214,54 @@ async def test_confirmar_horario_double_booking_reoferece(db_conn):
     # Lead A permanece intacto.
     lead_a = get_lead_by_conversation(db_conn, "C-A")
     assert lead_a["reuniao_em"] == slot_iso
+
+
+@pytest.mark.asyncio
+async def test_confirmar_horario_conflito_google_reoferece(db_conn):
+    """D6 (30/ago, caso Kayan×RPT): lead propôs horário em cima de um
+    compromisso EXTERNO (não é reunião do bot, o D2 não vê). O create do
+    Google NÃO rejeita conflito — o confirmar recheca o freeBusy e barra,
+    reoferecendo a agenda em vez de encavalar."""
+    transcript = (
+        "Lead: jose@exemplo.com\n"
+        "Atendente: Tenho ter 14h\n"
+        "Lead: Consegue às 10h de segunda?"
+    )
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+
+    jurichat = _make_jurichat(transcript)
+    calendar_client = _make_calendar()
+    calendar_client.is_slot_free = AsyncMock(return_value=False)
+    triagem_fn = await _triagem_returning(
+        Decisao(
+            acao="confirmar_horario",
+            mensagem="Agendado pra {{HORARIO_CONFIRMADO}}.",
+            horario_escolhido_iso="2027-06-07T10:00:00-03:00",
+            lead_email="jose@exemplo.com",
+            resumo_caso="Inventário SP",
+        )
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn,
+        jurichat=jurichat,
+        triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv",
+        max_turnos=20,
+        calendar=_calendar_config(client=calendar_client),
+    )
+
+    # Rechecou com a folga default da config e NÃO criou o evento.
+    kwargs = calendar_client.is_slot_free.await_args.kwargs
+    assert kwargs["folga_min"] == 30
+    assert kwargs["ignorar_intervalo"] is None  # lead sem reunião anterior
+    calendar_client.create_event.assert_not_awaited()
+    lead = get_lead_by_conversation(db_conn, "C-1")
+    assert lead["reuniao_em"] is None
+    assert lead["estado"] == Estado.EM_CONVERSA
+    # Reofereceu a agenda em vez de confirmar.
+    sent_text = jurichat.send_message.call_args_list[0][0][1]
+    assert "agenda" in sent_text.lower()
 
 
 @pytest.mark.asyncio
