@@ -114,6 +114,13 @@ class Settings(BaseSettings):
     imap_host: str = "imap.gmail.com"
     imap_port: int = 993
 
+    # Radar de leads (30/ago, caso Paulo): relatório 9h/15h BRT nos canais
+    # de alerta + 🚨 quando lead mandou documento e ninguém respondeu em 2h.
+    # Varredura a cada N minutos; horas do relatório em CSV.
+    radar_varredura_min: int = Field(default=15, ge=1, le=120)
+    radar_doc_alerta_horas: float = Field(default=2.0, ge=0.5)
+    radar_relatorio_horas: str = "9,15"
+
     # Dead-man's switch (healthchecks.io ou similar). Se preenchido, o
     # scheduler faz GET nesse URL ao fim de cada ciclo BEM-SUCEDIDO.
     # Se o serviço parar de pingar (timer travado, API key expirada,

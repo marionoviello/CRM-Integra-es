@@ -87,6 +87,14 @@ CREATE TABLE IF NOT EXISTS alertas_globais (
     ultimo_em TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Radar de leads (30/ago, caso Paulo): documentos do lead já alertados —
+-- o 🚨 de "documento sem resposta há 2h+" sai UMA vez por mensagem.
+CREATE TABLE IF NOT EXISTS radar_docs_alertados (
+    message_id  TEXT PRIMARY KEY,
+    lead_id     INTEGER,
+    alertado_em TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Processos com monitoringStatus=ERRO já vistos pelo job de saúde da
 -- carteira. Serve pra destacar 🆕 só os que entraram em erro desde a
 -- última execução (em vez de repetir a lista inteira toda semana).

@@ -65,6 +65,7 @@ from noviello_funil.outbound import (
 )
 from noviello_funil.person_index import resolver_telefone
 from noviello_funil.pos_assinatura import processar_pos_assinatura
+from noviello_funil.radar_leads import run_radar_leads
 from noviello_funil.redacao import contem_promessa_resultado
 from noviello_funil.state import (
     CLEAR_PROXIMA_ACAO,
@@ -3928,6 +3929,20 @@ def main() -> int:
             followup_1_apos_horas=settings.followup_1_apos_horas,
             bot_user_id=settings.jurichat_bot_user_id,
             mario_conversation_id=settings.mario_conversation_id,
+        )
+        # 5. Radar de leads (30/ago, caso Paulo): relatório 9h/15h pra
+        #    Mario+Hilde e 🚨 de documento sem resposta há 2h+. Best-effort
+        #    (engole os próprios erros; nunca derruba o ciclo).
+        await run_radar_leads(
+            get_db=lambda: conn,
+            jurichat=jurichat,
+            mario_conversation_id=settings.mario_conversation_id,
+            varredura_min=settings.radar_varredura_min,
+            doc_alerta_horas=settings.radar_doc_alerta_horas,
+            relatorio_horas=tuple(
+                int(h) for h in settings.radar_relatorio_horas.split(",")
+                if h.strip()
+            ),
         )
 
     async def _full_cycle_with_cleanup() -> int:
