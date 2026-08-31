@@ -100,7 +100,7 @@ async def test_documento_recente_nao_alerta(db_conn):
 @pytest.mark.asyncio
 async def test_relatorio_no_slot_9h_e_sem_duplicata(db_conn):
     """Às 9h05 sai o relatório com o lead mais parado; 2ª chamada não duplica."""
-    _lead_aguardando_humano(db_conn, "Paulo Teste", "C-PAULO")
+    lead = _lead_aguardando_humano(db_conn, "Paulo Teste", "C-PAULO")
     agora = AGORA.replace(hour=9, minute=5)
     conversas = {"MARIO": [], "C-PAULO": [
         {"direction": "OUTBOUND", "messageAt": _iso(agora - datetime.timedelta(days=12)),
@@ -117,6 +117,8 @@ async def test_relatorio_no_slot_9h_e_sem_duplicata(db_conn):
     assert "Paulo Teste" in avisos[0]
     assert "11d" in avisos[0]
     assert "com humano" in avisos[0]
+    assert f"nº {lead['id']}" in avisos[0]   # nº em toda linha (pedido 31/ago)
+    assert "ok <nº>" in avisos[0]            # legenda do comando
 
     await _rodar(db_conn, jurichat, agora=agora.replace(minute=35))
     assert len(_msgs_para_mario(jurichat)) == 1  # cooldown de 12h do slot

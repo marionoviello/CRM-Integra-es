@@ -290,21 +290,21 @@ def _montar_relatorio(
         linhas.append(f"⏳ *Esperando resposta nossa ({len(esperando)}):*")
         for idade, lead, info in esperando[:_MAX_LINHAS_RELATORIO]:
             nome = lead["contato_nome"] or lead["contato_telefone"]
-            doc = (
-                f" 📎 responda *ok {lead['id']}*"
-                if info["doc_desde"] is not None else ""
-            )
+            doc = " 📎" if info["doc_desde"] is not None else ""
             rotulo = _rotulo_estado(lead["estado"], lead["motivo_ah"] or "")
-            linhas.append(f"• {nome} — {_fmt_espera(idade)} ({rotulo}){doc}")
+            linhas.append(
+                f"• nº {lead['id']} · {nome} — {_fmt_espera(idade)} "
+                f"({rotulo}){doc}"
+            )
         if len(esperando) > _MAX_LINHAS_RELATORIO:
             linhas.append(f"… e mais {len(esperando) - _MAX_LINHAS_RELATORIO}.")
+        linhas.append(
+            "\nDeu andamento em algum? Responda *ok <nº>* que eu tiro do radar."
+        )
     else:
         linhas.append("✅ Ninguém esperando resposta há mais de 30 min.")
     if docs_pendentes:
-        linhas.append(
-            f"\n📎 Com documento sem resposta: {docs_pendentes} "
-            "(após dar andamento, responda *ok <id>* aqui)"
-        )
+        linhas.append(f"\n📎 Com documento sem resposta: {docs_pendentes}")
     panorama = " · ".join(f"{rot}: {n}" for rot, n in sorted(rotulos.items()))
     linhas.append(f"\nPanorama: {panorama or 'nenhum lead ativo'}")
     return "\n".join(linhas)
@@ -367,7 +367,8 @@ async def run_radar_leads(
                     mario_conversation_id=mario_conversation_id,
                     mensagem=(
                         "🚨🚨 *URGENTE — documento sem resposta*\n\n"
-                        f"Lead: {nome} ({lead['contato_telefone']})\n"
+                        f"Lead nº {lead['id']}: {nome} "
+                        f"({lead['contato_telefone']})\n"
                         f"Enviou arquivo ({info['doc_tipo']}) há "
                         f"{_fmt_espera(idade_doc)} e ninguém respondeu.\n"
                         f"https://app.jurichat.com/messages?id={conv_id}\n\n"
