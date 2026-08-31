@@ -21,6 +21,7 @@ conversa normal, transcrita e respondida pelo bot).
 
 import datetime
 import logging
+import re
 import zoneinfo
 from typing import Any
 
@@ -46,6 +47,9 @@ _TIPOS_CONVERSA = frozenset({"text", "audio"})
 # de minutos (anti-rajada/espera-humano); só interessa o que envelheceu.
 _ESPERA_MINIMA = datetime.timedelta(minutes=30)
 _MAX_LINHAS_RELATORIO = 15
+# Comando de andamento (31/ago): Mario/Hilde respondem "ok <lead_id>" no
+# canal de alerta e o lead sai do radar até mandar algo novo.
+_RE_COMANDO_OK = re.compile(r"^\s*ok\s*#?\s*(\d+)\s*[.!]*\s*$", re.IGNORECASE)
 
 
 def _parse_at(bruto: Any) -> datetime.datetime | None:
@@ -79,27 +83,33 @@ def analisar_mensagens(messages: list[dict[str, Any]]) -> dict[str, Any]:
         m for m in messages[ultima_saida + 1:] if m.get("direction") == "INBOUND"
     ]
 
-    espera_desde = None
-    doc_desde = None
-    doc_id = ""
-    doc_tipo = ""
+    ats: list[datetime.datetime] = []
+    docs: list[dict[str, Any]] = []
     for m in sem_resposta:
         at = _parse_at(m.get("messageAt"))
         if at is None:
             continue
-        if espera_desde is None or at < espera_desde:
-            espera_desde = at
+        ats.append(at)
         tipo = (m.get("type") or "text").lower()
-        if tipo not in _TIPOS_CONVERSA and (doc_desde is None or at < doc_desde):
-            doc_desde = at
-            doc_id = m.get("id") or ""
-            doc_tipo = tipo
+        if tipo not in _TIPOS_CONVERSA:
+            docs.append({"at": at, "id": m.get("id") or "", "tipo": tipo})
+    return _montar_info(ats, docs, len(sem_resposta))
+
+
+def _montar_info(
+    ats: list[datetime.datetime],
+    docs: list[dict[str, Any]],
+    n_sem_resposta: int,
+) -> dict[str, Any]:
+    primeiro_doc = min(docs, key=lambda d: d["at"], default=None)
     return {
-        "espera_desde": espera_desde,
-        "n_sem_resposta": len(sem_resposta),
-        "doc_desde": doc_desde,
-        "doc_id": doc_id,
-        "doc_tipo": doc_tipo,
+        "espera_desde": min(ats, default=None),
+        "n_sem_resposta": n_sem_resposta,
+        "doc_desde": primeiro_doc["at"] if primeiro_doc else None,
+        "doc_id": primeiro_doc["id"] if primeiro_doc else "",
+        "doc_tipo": primeiro_doc["tipo"] if primeiro_doc else "",
+        "_ats": ats,
+        "_docs": docs,
     }
 
 
@@ -153,6 +163,92 @@ def _listar_leads_radar(conn: Any) -> list[Any]:
     ]
 
 
+def _tratado_em(conn: Any, lead_id: int) -> datetime.datetime | None:
+    row = conn.execute(
+        "SELECT tratado_em FROM radar_tratados WHERE lead_id = ?", (lead_id,),
+    ).fetchone()
+    return _parse_at(row["tratado_em"]) if row else None
+
+
+def _marcar_tratado(conn: Any, lead_id: int, quando: datetime.datetime) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO radar_tratados (lead_id, tratado_em) VALUES (?, ?)",
+        (lead_id, quando.astimezone(datetime.UTC).isoformat()),
+    )
+    conn.commit()
+
+
+def _novo_comando(conn: Any, message_id: str) -> bool:
+    """True se esta mensagem de comando ainda não foi processada (e carimba)."""
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO radar_comandos_vistos (message_id) VALUES (?)",
+        (message_id,),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+async def _processar_comandos(
+    conn: Any, jurichat: JurichatClient, canais: set[str],
+) -> None:
+    """Lê os canais de alerta atrás de respostas "ok <id>" e carimba."""
+    for canal in sorted(canais):
+        try:
+            conv = await jurichat.get_conversation(canal)
+        except Exception as exc:
+            logger.warning("radar: leitura do canal %s falhou: %s", canal, exc)
+            continue
+        for msg in conv.get("messages_raw") or []:
+            if msg.get("direction") != "INBOUND":
+                continue
+            m = _RE_COMANDO_OK.match(msg.get("content") or "")
+            if not m:
+                continue
+            mid = msg.get("id") or ""
+            if not mid or not _novo_comando(conn, mid):
+                continue
+            lead_id = int(m.group(1))
+            row = conn.execute(
+                "SELECT * FROM leads WHERE id = ?", (lead_id,),
+            ).fetchone()
+            if row is None:
+                resposta = f"Não encontrei lead com id {lead_id}."
+            else:
+                quando = _parse_at(msg.get("messageAt")) or datetime.datetime.now(
+                    datetime.UTC,
+                )
+                _marcar_tratado(conn, lead_id, quando)
+                nome = row["contato_nome"] or row["contato_telefone"]
+                resposta = (
+                    f"✅ {nome} (id {lead_id}) marcado como tratado. "
+                    "Sai do radar até mandar algo novo."
+                )
+            try:
+                await jurichat.start_human_support(canal)
+                await jurichat.send_message(canal, resposta)
+            except Exception as exc:
+                logger.warning(
+                    "radar: confirmação do comando falhou no canal %s: %s",
+                    canal, exc,
+                )
+
+
+def _aplicar_tratado(
+    conn: Any, lead: Any, info: dict[str, Any],
+) -> dict[str, Any]:
+    """Descarta espera/documentos anteriores ao carimbo "ok" do canal.
+
+    Só o que veio DEPOIS do carimbo continua contando — um documento novo
+    do lead volta a alertar mesmo com o anterior tratado.
+    """
+    tratado = _tratado_em(conn, lead["id"])
+    if tratado is None:
+        return info
+    ats = [a for a in info["_ats"] if a > tratado]
+    docs = [d for d in info["_docs"] if d["at"] > tratado]
+    return _montar_info(ats, docs, len(ats))
+
+
 def _marcar_doc_alertado(conn: Any, message_id: str, lead_id: int) -> bool:
     """True se este documento AINDA não tinha sido alertado (e carimba)."""
     cur = conn.execute(
@@ -194,7 +290,10 @@ def _montar_relatorio(
         linhas.append(f"⏳ *Esperando resposta nossa ({len(esperando)}):*")
         for idade, lead, info in esperando[:_MAX_LINHAS_RELATORIO]:
             nome = lead["contato_nome"] or lead["contato_telefone"]
-            doc = " 📎" if info["doc_desde"] is not None else ""
+            doc = (
+                f" 📎 responda *ok {lead['id']}*"
+                if info["doc_desde"] is not None else ""
+            )
             rotulo = _rotulo_estado(lead["estado"], lead["motivo_ah"] or "")
             linhas.append(f"• {nome} — {_fmt_espera(idade)} ({rotulo}){doc}")
         if len(esperando) > _MAX_LINHAS_RELATORIO:
@@ -202,7 +301,10 @@ def _montar_relatorio(
     else:
         linhas.append("✅ Ninguém esperando resposta há mais de 30 min.")
     if docs_pendentes:
-        linhas.append(f"\n📎 Com documento sem resposta: {docs_pendentes}")
+        linhas.append(
+            f"\n📎 Com documento sem resposta: {docs_pendentes} "
+            "(após dar andamento, responda *ok <id>* aqui)"
+        )
     panorama = " · ".join(f"{rot}: {n}" for rot, n in sorted(rotulos.items()))
     linhas.append(f"\nPanorama: {panorama or 'nenhum lead ativo'}")
     return "\n".join(linhas)
@@ -216,7 +318,7 @@ async def run_radar_leads(
     agora: datetime.datetime | None = None,
     varredura_min: int = 15,
     doc_alerta_horas: float = 2.0,
-    relatorio_horas: tuple[int, ...] = (9, 15),
+    relatorio_horas: tuple[int, ...] = (9, 13, 16, 19),
 ) -> None:
     """Uma varredura do radar (chamada a cada tick; o cooldown segura o ritmo).
 
@@ -233,6 +335,9 @@ async def run_radar_leads(
         canais = set(split_conversation_ids(mario_conversation_id))
         limite_doc = datetime.timedelta(hours=doc_alerta_horas)
 
+        # Comandos "ok <id>" primeiro: o carimbo já vale nesta varredura.
+        await _processar_comandos(conn, jurichat, canais)
+
         entradas: list[tuple[Any, dict[str, Any]]] = []
         for lead in _listar_leads_radar(conn):
             conv_id = lead["jurichat_conversation_id"]
@@ -245,7 +350,9 @@ async def run_radar_leads(
                     "radar: get_conversation falhou lead=%s: %s", lead["id"], exc,
                 )
                 continue
-            info = analisar_mensagens(conv.get("messages_raw") or [])
+            info = _aplicar_tratado(
+                conn, lead, analisar_mensagens(conv.get("messages_raw") or []),
+            )
             entradas.append((lead, info))
 
             if info["doc_desde"] is None or not info["doc_id"]:
@@ -263,7 +370,9 @@ async def run_radar_leads(
                         f"Lead: {nome} ({lead['contato_telefone']})\n"
                         f"Enviou arquivo ({info['doc_tipo']}) há "
                         f"{_fmt_espera(idade_doc)} e ninguém respondeu.\n"
-                        f"https://app.jurichat.com/messages?id={conv_id}"
+                        f"https://app.jurichat.com/messages?id={conv_id}\n\n"
+                        f"Deu andamento? Responda *ok {lead['id']}* que eu "
+                        "tiro do radar."
                     ),
                 )
 

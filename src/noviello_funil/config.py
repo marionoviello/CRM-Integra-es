@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     # Varredura a cada N minutos; horas do relatório em CSV.
     radar_varredura_min: int = Field(default=15, ge=1, le=120)
     radar_doc_alerta_horas: float = Field(default=2.0, ge=0.5)
-    radar_relatorio_horas: str = "9,15"
+    radar_relatorio_horas: str = "9,13,16,19"
 
     # Dead-man's switch (healthchecks.io ou similar). Se preenchido, o
     # scheduler faz GET nesse URL ao fim de cada ciclo BEM-SUCEDIDO.

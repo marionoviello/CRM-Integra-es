@@ -95,6 +95,21 @@ CREATE TABLE IF NOT EXISTS radar_docs_alertados (
     alertado_em TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Radar: "ok <lead_id>" respondido por Mario/Hilde no canal de alerta.
+-- Espera e documentos ANTERIORES ao carimbo saem do radar; contato novo
+-- do lead depois disso volta a contar.
+CREATE TABLE IF NOT EXISTS radar_tratados (
+    lead_id    INTEGER PRIMARY KEY,
+    tratado_em TEXT NOT NULL
+);
+
+-- Mensagens de comando já processadas nos canais de alerta (cada "ok N"
+-- vale uma vez; sem isso, toda varredura reprocessaria o histórico).
+CREATE TABLE IF NOT EXISTS radar_comandos_vistos (
+    message_id TEXT PRIMARY KEY,
+    visto_em   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Processos com monitoringStatus=ERRO já vistos pelo job de saúde da
 -- carteira. Serve pra destacar 🆕 só os que entraram em erro desde a
 -- última execução (em vez de repetir a lista inteira toda semana).
