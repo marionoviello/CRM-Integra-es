@@ -1,10 +1,12 @@
-"""Sonda a API do Jurichat atrás do vínculo de ÁREA da conversa (30/ago).
+"""Sonda a API do Jurichat atrás do vínculo de ÁREA da conversa (31/ago).
 
-v3: a v2 revelou que /funnel e /tag EXISTEM (400 "inboxId Required") — a
-"Área" do painel (bolinha colorida + "Alterar vínculo") deve ser o FUNIL
-do CRM. Agora: lista os funis e tags da inbox, tenta rotas derivadas do
-funil e cruza os ids/nomes descobertos com o payload das 3 conversas
-marcadas, pra apontar exatamente onde o vínculo aparece. 100% leitura.
+v4: o DevTools do Mario revelou (a) a ESCRITA — ``PATCH /conversation/{id}``
+(falta o nome do campo no body) — e (b) os parâmetros REAIS da listagem do
+painel: ``/conversation?page=1&limit=100&inboxId=...&integrationId=...``.
+A listagem da página 1 tem 153 kB pra ~100 conversas, então o item deve vir
+completo — muito provavelmente com o vínculo de área dentro. Esta sonda usa
+esses parâmetros, acha as 3 conversas-gabarito e imprime o item inteiro.
+100% leitura.
 
 Uso (VPS):
     cd /opt/noviello-funil-saude && git pull && .venv/bin/python scripts/sondar_area_jurichat.py
@@ -19,24 +21,12 @@ from noviello_funil.config import Settings
 
 # Conversas marcadas na mão por Mario em 30/ago (gabarito).
 CONVERSAS = {
-    "Lia (Saude)": "cmtgml91305spqr075cosiy7i",
-    "Kayan (Trib-Imob)": "cmtd5tdin18ozpa06grf6bcfq",
-    "Maria (Sucessoes)": "cmtd7o14h1k68pa06o5bfiuhr",
+    "cmtgml91305spqr075cosiy7i": "Lia (Saude)",
+    "cmtd5tdin18ozpa06grf6bcfq": "Kayan (Trib-Imob)",
+    "cmtd7o14h1k68pa06o5bfiuhr": "Maria (Sucessoes)",
 }
-
-
-def _ids_e_nomes(obj) -> set[str]:
-    """Coleta valores de id/name em qualquer nível do JSON."""
-    achados: set[str] = set()
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if k in ("id", "name") and isinstance(v, str) and len(v) > 3:
-                achados.add(v)
-            achados |= _ids_e_nomes(v)
-    elif isinstance(obj, list):
-        for v in obj:
-            achados |= _ids_e_nomes(v)
-    return achados
+# Integração "Noviello Fixo" — o painel manda integrationId na listagem.
+INTEGRATION_ID = "cmryywd6o00mrql0ibhvz90ma"
 
 
 async def main() -> None:
@@ -44,46 +34,49 @@ async def main() -> None:
     async with httpx.AsyncClient(
         base_url=s.jurichat_base_url,
         headers={"x-jurichat-api-key": s.jurichat_api_key},
-        timeout=20,
+        timeout=30,
     ) as c:
-        params = {"inboxId": s.jurichat_inbox_id}
+        variantes = [
+            {"page": "1", "limit": "100", "inboxId": s.jurichat_inbox_id,
+             "integrationId": INTEGRATION_ID},
+            {"page": "1", "limit": "100", "inboxId": s.jurichat_inbox_id,
+             "integrationId": INTEGRATION_ID, "unread": "false"},
+            {"page": "1", "limit": "100", "inboxId": s.jurichat_inbox_id},
+        ]
+        itens: list = []
+        for params in variantes:
+            r = await c.get("/conversation", params=params)
+            corpo = r.json() if r.status_code == 200 else {}
+            data = corpo.get("data") if isinstance(corpo, dict) else corpo
+            data = data if isinstance(data, list) else []
+            print(f"GET /conversation {sorted(params)} -> {r.status_code}, "
+                  f"{len(data)} itens")
+            if data:
+                itens = data
+                break
 
-        r = await c.get("/funnel", params=params)
-        print(f"=== GET /funnel?inboxId=... -> {r.status_code}")
-        print(r.text[:2500])
-        funis = r.json() if r.status_code == 200 else {}
-        marcadores = _ids_e_nomes(funis)
+        if not itens:
+            print("Nenhuma variante devolveu itens — colar o Payload do PATCH "
+                  "no DevTools continua sendo o caminho.")
+            return
 
-        r = await c.get("/tag", params=params)
-        print(f"\n=== GET /tag?inboxId=... -> {r.status_code}")
-        print(r.text[:800])
+        exemplo = itens[0]
+        print("\nchaves de um item da listagem:", sorted(exemplo.keys()))
 
-        # Rotas derivadas do funil (sem id e, se houver funil, com o 1º id).
-        derivadas = ["/funnel/card", "/funnel/cards", "/funnel/step"]
-        ids_funil = [m for m in marcadores if not m.startswith("Direito")]
-        if ids_funil:
-            fid = sorted(ids_funil)[0]
-            derivadas += [f"/funnel/{fid}", f"/funnel/{fid}/card",
-                          f"/funnel/{fid}/cards", f"/funnel/{fid}/steps"]
-        print("\n=== rotas derivadas — tentativas de GET")
-        for rota in derivadas:
-            r = await c.get(rota, params=params)
-            corpo = "" if r.status_code == 404 else " " + r.text[:200].replace("\n", " ")
-            print(f"{rota:28} -> {r.status_code}{corpo}")
-
-        # Cruzamento: os ids/nomes dos funis aparecem no detalhe da conversa?
-        print("\n=== cruzamento funil × conversas marcadas")
-        for nome, cid in CONVERSAS.items():
-            r = await c.get(f"/conversation/{cid}")
-            if r.status_code != 200:
-                print(f"{nome}: GET detalhe -> {r.status_code}")
+        achou = 0
+        for item in itens:
+            rotulo = CONVERSAS.get(item.get("id") or "")
+            if not rotulo:
                 continue
-            d = r.json().get("data") or {}
-            d.pop("messages", None)
-            bruto = json.dumps(d, ensure_ascii=False, default=str)
-            batidas = sorted(m for m in marcadores if m in bruto)
-            print(f"{nome}: chaves={sorted(d.keys())}")
-            print(f"  marcadores do funil presentes no payload: {batidas or 'NENHUM'}")
+            achou += 1
+            enxuto = {
+                k: v for k, v in item.items()
+                if k not in ("messages", "participants")
+            }
+            print(f"\n=== {rotulo} — item completo (sem messages):")
+            print(json.dumps(enxuto, ensure_ascii=False, indent=1)[:2200])
+        if not achou:
+            print("\nGabaritos não estavam na página 1 — aumentar limit/page.")
 
 
 if __name__ == "__main__":
