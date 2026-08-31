@@ -47,10 +47,9 @@ async def main() -> None:
         print(f"sonda do enum de modules -> {r.status_code} {r.text[:500]}")
 
         tag_id = ""
-        for modules in (
-            ["CONVERSATION"], ["conversation"], ["CHAT"], ["chat"],
-            ["MESSAGES"], ["message"], ["ALL"], ["CRM"],
-        ):
+        # Enum revelado pela sonda: crm | conversas | pessoas |
+        # fast-messages | tickets.
+        for modules in (["conversas"], ["conversas", "crm"]):
             body = {**base, "modules": modules}
             r = await c.post("/tag", json=body)
             print(f"POST /tag modules={modules} -> {r.status_code} "
