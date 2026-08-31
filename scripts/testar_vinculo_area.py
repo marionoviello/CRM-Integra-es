@@ -1,20 +1,15 @@
-"""Teste SEGURO da escrita do vínculo de área via API (31/ago).
+"""Teste da escrita do vínculo de área via API (31/ago) — v2: sub-rotas.
 
-O DevTools do Mario revelou a escrita do painel::
-
-    PATCH /conversation/{id}
-    body {"legalAreaId": "cmptwamgp0023wly34mr437kv"}   # Direito da Saúde
-
-Este script aplica esse mesmo PATCH na conversa "Mario eu" (canal de
-alerta — sem cliente envolvido, reversível pelo painel em "Desvincular
-área"). ATENÇÃO: este endpoint já devolveu 200 SEM EFEITO no passado
-(caso do archive em 10/jul), então o 200 aqui não prova nada sozinho —
-a prova é abrir o painel e ver se a Área "Direito da Saúde" apareceu na
-conversa "Mario eu".
+O PATCH direto (``/conversation/{id}`` body ``{"legalAreaId": ...}``, o
+mesmo do painel) devolveu 200 'ok' mas NÃO aplicou — o painel seguiu
+"Nenhuma área vinculada" (200 falso, igual ao caso do archive em 10/jul,
+que se resolveu com a sub-rota /archive). Agora que o DevTools nos deu o
+nome exato do recurso (legalArea), esta v2 varre as sub-rotas candidatas
+na conversa "Mario eu" (reversível). 404 = rota não existe; 2xx = SUSPEITO
+de ter funcionado (conferir no painel).
 """
 
 import asyncio
-import json
 
 import httpx
 
@@ -22,6 +17,18 @@ from noviello_funil.config import Settings
 
 AREA_DIREITO_DA_SAUDE = "cmptwamgp0023wly34mr437kv"
 CONVERSA_MARIO_EU = "cmryyxpwx00vlql0ixlyneefl"
+
+_BODY = {"legalAreaId": AREA_DIREITO_DA_SAUDE}
+_TENTATIVAS = (
+    ("GET", "legalArea", None),
+    ("GET", "legal-area", None),
+    ("PATCH", "legalArea", _BODY),
+    ("PATCH", "legal-area", _BODY),
+    ("PATCH", "legalarea", _BODY),
+    ("PATCH", "area", _BODY),
+    ("PUT", "legalArea", _BODY),
+    ("POST", "legalArea", _BODY),
+)
 
 
 async def main() -> None:
@@ -31,21 +38,20 @@ async def main() -> None:
         headers={"x-jurichat-api-key": s.jurichat_api_key},
         timeout=20,
     ) as c:
-        r = await c.patch(
-            f"/conversation/{CONVERSA_MARIO_EU}",
-            json={"legalAreaId": AREA_DIREITO_DA_SAUDE},
-        )
-        print(f"PATCH -> {r.status_code} {r.text[:200]!r}")
-
-        r = await c.get(f"/conversation/{CONVERSA_MARIO_EU}")
-        d = r.json().get("data") or {}
-        d.pop("messages", None)
-        legais = {k: v for k, v in d.items() if "legal" in k.lower()}
-        print("chaves com 'legal' no detalhe:", json.dumps(
-            legais, ensure_ascii=False, default=str) or "{}")
-        print("group:", json.dumps(d.get("group"), ensure_ascii=False))
-        print("\nAgora abra o painel na conversa 'Mario eu' e confira se a "
-              "Área 'Direito da Saúde' apareceu — isso é o que decide.")
+        suspeitas = []
+        for metodo, sufixo, body in _TENTATIVAS:
+            rota = f"/conversation/{CONVERSA_MARIO_EU}/{sufixo}"
+            r = await c.request(metodo, rota, json=body)
+            corpo = r.text[:120].replace("\n", " ")
+            print(f"{metodo:5} .../{sufixo:12} -> {r.status_code} {corpo}")
+            if metodo != "GET" and r.status_code < 400:
+                suspeitas.append(f"{metodo} {rota}")
+        if suspeitas:
+            print("\n2xx de escrita em:", "; ".join(suspeitas))
+            print("Confira no painel se a Área apareceu em 'Mario eu'.")
+        else:
+            print("\nNenhuma sub-rota de escrita existe — a chave de API não "
+                  "tem como vincular área. Vou propor o plano B.")
 
 
 if __name__ == "__main__":
