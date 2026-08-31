@@ -1,16 +1,15 @@
-"""Plano B da área (31/ago): a chave de API consegue usar ETIQUETAS?
+"""Plano B da área (31/ago) — v4: aplicar etiqueta EXISTENTE via API.
 
-A Área oficial só é gravável pela sessão do painel (comprovado: PATCH
-200-falso + todas as sub-rotas 404). Etiquetas são a alternativa: GET
-/tag?inboxId responde à nossa chave e o detalhe da conversa traz ``tags``
-— escrita VERIFICÁVEL por código, sem depender do painel.
+Descobertas até aqui: POST /tag valida (name, inboxId, color,
+modules∈{crm,conversas,pessoas,fast-messages,tickets}) mas devolve 500 com
+a nossa chave — criação fica no painel (ação única do Mario). O que o bot
+precisa é APLICAR etiqueta já existente à conversa, e é isso que este
+teste verifica, com leitura de confirmação após cada tentativa.
 
-Este teste, na conversa "Mario eu" (reversível):
-1. cria a etiqueta "Teste Julia" (várias formas de body; o 400 do
-   Fastify lista os campos obrigatórios e nos guia);
-2. tenta aplicá-la à conversa (PATCH direto e sub-rotas), conferindo o
-   ``tags`` do detalhe após CADA tentativa — para no primeiro sucesso;
-3. tenta a limpeza (tirar da conversa e apagar a etiqueta) e reporta.
+Pré-requisito: Mario cria a etiqueta "Teste Julia" no painel (Gerenciar
+etiquetas). Depois:
+
+    cd /opt/noviello-funil-saude && git pull && .venv/bin/python scripts/testar_etiqueta_area.py
 """
 
 import asyncio
@@ -30,6 +29,15 @@ async def _tags_da_conversa(c: httpx.AsyncClient) -> list:
     return d.get("tags") or []
 
 
+def _tem_tag(tags: list, tag_id: str) -> bool:
+    for t in tags:
+        if t == tag_id:
+            return True
+        if isinstance(t, dict) and tag_id in (t.get("id"), t.get("tagId")):
+            return True
+    return False
+
+
 async def main() -> None:
     s = Settings()
     async with httpx.AsyncClient(
@@ -37,40 +45,22 @@ async def main() -> None:
         headers={"x-jurichat-api-key": s.jurichat_api_key},
         timeout=20,
     ) as c:
-        # 1. Criar a etiqueta. O 400 anterior revelou os obrigatórios:
-        # name, inboxId, color e modules. Primeiro um `modules` inválido
-        # de propósito (o validador costuma listar o enum permitido no
-        # erro); depois os candidatos prováveis.
-        base = {"name": NOME_ETIQUETA, "inboxId": s.jurichat_inbox_id,
-                "color": "#1faf54"}
-        r = await c.post("/tag", json={**base, "modules": ["xx-invalido"]})
-        print(f"sonda do enum de modules -> {r.status_code} {r.text[:500]}")
-
+        r = await c.get("/tag", params={"inboxId": s.jurichat_inbox_id})
+        catalogo = r.json() if r.status_code == 200 else []
+        if isinstance(catalogo, dict):
+            catalogo = catalogo.get("data") or []
+        print(f"GET /tag -> {r.status_code}, {len(catalogo)} etiqueta(s): "
+              f"{json.dumps(catalogo, ensure_ascii=False)[:400]}")
         tag_id = ""
-        # Enum revelado pela sonda: crm | conversas | pessoas |
-        # fast-messages | tickets.
-        for modules in (["conversas"], ["conversas", "crm"]):
-            body = {**base, "modules": modules}
-            r = await c.post("/tag", json=body)
-            print(f"POST /tag modules={modules} -> {r.status_code} "
-                  f"{r.text[:160]}")
-            if r.status_code < 300:
-                corpo = r.json()
-                dado = corpo.get("data") if isinstance(corpo, dict) else corpo
-                if isinstance(dado, dict):
-                    tag_id = dado.get("id") or ""
-                break
+        for t in catalogo:
+            if isinstance(t, dict) and t.get("name") == NOME_ETIQUETA:
+                tag_id = t.get("id") or ""
         if not tag_id:
-            # Pode já existir de uma rodada anterior — procura no catálogo.
-            r = await c.get("/tag", params={"inboxId": s.jurichat_inbox_id})
-            for t in (r.json() if r.status_code == 200 else []) or []:
-                if isinstance(t, dict) and t.get("name") == NOME_ETIQUETA:
-                    tag_id = t.get("id") or ""
-        print(f"tag_id: {tag_id or 'NAO CONSEGUI CRIAR/ACHAR'}")
-        if not tag_id:
+            print(f"\nEtiqueta '{NOME_ETIQUETA}' não existe ainda — crie no "
+                  "painel (Gerenciar etiquetas) e rode de novo.")
             return
+        print(f"tag_id: {tag_id}")
 
-        # 2. Aplicar à conversa — para na primeira forma que "pega".
         tentativas = (
             ("PATCH", f"/conversation/{CONVERSA_MARIO_EU}",
              {"tagIds": [tag_id]}),
@@ -80,48 +70,44 @@ async def main() -> None:
              {"tagId": tag_id}),
             ("POST", f"/conversation/{CONVERSA_MARIO_EU}/tags",
              {"tagId": tag_id}),
+            ("POST", f"/conversation/{CONVERSA_MARIO_EU}/tag",
+             {"id": tag_id}),
             ("PATCH", f"/conversation/{CONVERSA_MARIO_EU}/tag",
              {"tagId": tag_id}),
             ("PUT", f"/conversation/{CONVERSA_MARIO_EU}/tag",
              {"tagId": tag_id}),
+            ("POST", f"/tag/{tag_id}/conversation",
+             {"conversationId": CONVERSA_MARIO_EU}),
         )
         aplicou = ""
         for metodo, rota, body in tentativas:
             r = await c.request(metodo, rota, json=body)
             tags = await _tags_da_conversa(c)
-            pegou = any(
-                (t.get("id") if isinstance(t, dict) else t) == tag_id
-                or (isinstance(t, dict) and t.get("tagId") == tag_id)
-                for t in tags
-            )
-            print(f"{metodo} {rota.split('/')[-1]:4} {sorted(body)} -> "
-                  f"{r.status_code}; tags depois: {json.dumps(tags)[:120]} "
-                  f"{'<<< PEGOU' if pegou else ''}")
+            pegou = _tem_tag(tags, tag_id)
+            print(f"{metodo:5} {rota:44} -> {r.status_code}; "
+                  f"tags: {json.dumps(tags)[:100]} {'<<< PEGOU' if pegou else ''}")
             if pegou:
                 aplicou = f"{metodo} {rota} {json.dumps(body)}"
                 break
 
-        if aplicou:
-            print(f"\nFUNCIONA: {aplicou}")
-        else:
-            print("\nNenhuma forma de aplicar etiqueta pegou.")
+        if not aplicou:
+            print("\nNenhuma forma de aplicar pegou — reporto e pensamos "
+                  "no próximo passo.")
+            return
+        print(f"\nFUNCIONA: {aplicou}")
 
-        # 3. Limpeza best-effort (tira da conversa e apaga a etiqueta).
-        if aplicou:
-            for metodo, rota, body in (
-                ("PATCH", f"/conversation/{CONVERSA_MARIO_EU}",
-                 {"tagIds": []}),
-                ("DELETE", f"/conversation/{CONVERSA_MARIO_EU}/tag/{tag_id}",
-                 None),
-            ):
-                r = await c.request(metodo, rota, json=body)
-                tags = await _tags_da_conversa(c)
-                print(f"limpeza {metodo} -> {r.status_code}; tags: "
-                      f"{json.dumps(tags)[:80]}")
-                if not tags:
-                    break
-        r = await c.delete(f"/tag/{tag_id}")
-        print(f"DELETE /tag/{{id}} -> {r.status_code} {r.text[:120]}")
+        # Limpeza: tira a etiqueta da conversa de teste (a etiqueta fica).
+        for metodo, rota, body in (
+            ("PATCH", f"/conversation/{CONVERSA_MARIO_EU}", {"tagIds": []}),
+            ("DELETE", f"/conversation/{CONVERSA_MARIO_EU}/tag/{tag_id}", None),
+        ):
+            r = await c.request(metodo, rota, json=body)
+            tags = await _tags_da_conversa(c)
+            print(f"limpeza {metodo} -> {r.status_code}; tags: "
+                  f"{json.dumps(tags)[:80]}")
+            if not _tem_tag(tags, tag_id):
+                print("Conversa de teste limpa.")
+                break
 
 
 if __name__ == "__main__":
