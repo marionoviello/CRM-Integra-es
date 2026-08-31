@@ -37,16 +37,24 @@ async def main() -> None:
         headers={"x-jurichat-api-key": s.jurichat_api_key},
         timeout=20,
     ) as c:
-        # 1. Criar a etiqueta.
+        # 1. Criar a etiqueta. O 400 anterior revelou os obrigatórios:
+        # name, inboxId, color e modules. Primeiro um `modules` inválido
+        # de propósito (o validador costuma listar o enum permitido no
+        # erro); depois os candidatos prováveis.
+        base = {"name": NOME_ETIQUETA, "inboxId": s.jurichat_inbox_id,
+                "color": "#1faf54"}
+        r = await c.post("/tag", json={**base, "modules": ["xx-invalido"]})
+        print(f"sonda do enum de modules -> {r.status_code} {r.text[:500]}")
+
         tag_id = ""
-        for body in (
-            {"name": NOME_ETIQUETA, "inboxId": s.jurichat_inbox_id},
-            {"name": NOME_ETIQUETA, "inboxId": s.jurichat_inbox_id,
-             "color": "#1faf54"},
-            {"name": NOME_ETIQUETA},
+        for modules in (
+            ["CONVERSATION"], ["conversation"], ["CHAT"], ["chat"],
+            ["MESSAGES"], ["message"], ["ALL"], ["CRM"],
         ):
+            body = {**base, "modules": modules}
             r = await c.post("/tag", json=body)
-            print(f"POST /tag {sorted(body)} -> {r.status_code} {r.text[:200]}")
+            print(f"POST /tag modules={modules} -> {r.status_code} "
+                  f"{r.text[:160]}")
             if r.status_code < 300:
                 corpo = r.json()
                 dado = corpo.get("data") if isinstance(corpo, dict) else corpo
