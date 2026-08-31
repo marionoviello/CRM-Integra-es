@@ -1,13 +1,14 @@
 """Sonda a API do Jurichat atrás do vínculo de ÁREA da conversa (30/ago).
 
-Mario marcou 3 conversas na mão pelo painel (Direito da Saúde, Direito
-Tributário - Imobiliário, Direito das Sucessões / Inventário) pra servirem
-de gabarito. Este script NÃO escreve nada: lê o detalhe das 3 conversas e
-procura (a) onde o vínculo de área aparece no payload e (b) qual endpoint
-lista o catálogo de áreas.
+v2: a v1 mostrou que o detalhe vem embrulhado em ``data`` (top-level =
+['data','hasMore']) e que nenhum nome óbvio de área existe no payload nem
+no catálogo (só /departments respondeu, mas é o "Setores responsáveis").
+Agora desembrulha o ``data``, lista TODAS as chaves com amostra do valor
+(pra achar o campo seja qual for o nome) e tenta mais rotas de catálogo,
+inclusive as escopadas na conversa. Continua 100% leitura.
 
 Uso (VPS):
-    cd /opt/noviello-funil-saude && git pull && uv run python scripts/sondar_area_jurichat.py
+    cd /opt/noviello-funil-saude && git pull && .venv/bin/python scripts/sondar_area_jurichat.py
 """
 
 import asyncio
@@ -24,31 +25,26 @@ CONVERSAS = {
     "Maria (Sucessoes)": "cmtd7o14h1k68pa06o5bfiuhr",
 }
 
-_SUSPEITOS = (
-    "area", "law", "setor", "sector", "vinculo", "specialt", "practice",
-    "categ", "depart",
-)
-
 _ROTAS_CATALOGO = (
-    "/area", "/areas", "/lawArea", "/lawAreas", "/law-area", "/law-areas",
-    "/crm/area", "/crm/areas", "/setor", "/setores", "/sector", "/sectors",
-    "/department", "/departments", "/category", "/categories",
+    "/crm", "/crms", "/board", "/boards", "/funnel", "/funnels",
+    "/pipeline", "/pipelines", "/vinculo", "/vinculos", "/link", "/links",
+    "/tag", "/tags", "/field", "/fields", "/customField", "/customFields",
+    "/areaOfLaw", "/areasOfLaw", "/legalArea", "/legalAreas",
+    "/especialidade", "/especialidades", "/subject", "/subjects",
+    "/topic", "/topics", "/service", "/services", "/product", "/products",
+)
+
+_ROTAS_DA_CONVERSA = (
+    "/conversation/{cid}/area", "/conversation/{cid}/areas",
+    "/conversation/{cid}/link", "/conversation/{cid}/links",
+    "/conversation/{cid}/crm", "/conversation/{cid}/vinculo",
+    "/conversation/{cid}/tags", "/conversation/{cid}/fields",
 )
 
 
-def _achar_suspeitos(obj, caminho=""):
-    """Percorre o JSON e coleta (caminho, valor) de chaves suspeitas."""
-    achados = []
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            p = f"{caminho}.{k}" if caminho else k
-            if any(s in k.lower() for s in _SUSPEITOS):
-                achados.append((p, v))
-            achados.extend(_achar_suspeitos(v, p))
-    elif isinstance(obj, list):
-        for i, v in enumerate(obj[:3]):
-            achados.extend(_achar_suspeitos(v, f"{caminho}[{i}]"))
-    return achados
+def _amostra(valor) -> str:
+    dump = json.dumps(valor, ensure_ascii=False, default=str)
+    return dump[:160]
 
 
 async def main() -> None:
@@ -58,31 +54,32 @@ async def main() -> None:
         headers={"x-jurichat-api-key": s.jurichat_api_key},
         timeout=20,
     ) as c:
+        primeiro_cid = next(iter(CONVERSAS.values()))
         for nome, cid in CONVERSAS.items():
             r = await c.get(f"/conversation/{cid}")
             print(f"\n=== {nome} — GET /conversation/{{id}} -> {r.status_code}")
             if r.status_code != 200:
                 print(r.text[:200])
                 continue
-            data = r.json()
-            print("top-level keys:", sorted(data.keys()))
-            person = data.get("person")
-            if isinstance(person, dict):
-                print("person keys:", sorted(person.keys()))
-            for caminho, valor in _achar_suspeitos(data):
-                if caminho.startswith("messages"):
+            d = r.json().get("data") or {}
+            for chave in sorted(d.keys()):
+                if chave == "messages":
+                    print(f"  {chave}: [{len(d[chave] or [])} mensagens — omitidas]")
                     continue
-                dump = json.dumps(valor, ensure_ascii=False)[:250]
-                print(f"  SUSPEITO {caminho} = {dump}")
+                print(f"  {chave}: {_amostra(d[chave])}")
 
-        print("\n=== catálogo de áreas — tentativas de GET")
+        print("\n=== catálogo — tentativas de GET")
         for rota in _ROTAS_CATALOGO:
-            try:
-                r = await c.get(rota)
-                corpo = r.text[:120].replace("\n", " ")
-                print(f"{rota:15} -> {r.status_code} {corpo}")
-            except Exception as exc:  # noqa: BLE001 — sonda: reporta e segue
-                print(f"{rota:15} -> ERRO {exc}")
+            r = await c.get(rota)
+            corpo = "" if r.status_code == 404 else " " + r.text[:160].replace("\n", " ")
+            print(f"{rota:18} -> {r.status_code}{corpo}")
+
+        print("\n=== rotas escopadas na conversa (Lia) — tentativas de GET")
+        for molde in _ROTAS_DA_CONVERSA:
+            rota = molde.format(cid=primeiro_cid)
+            r = await c.get(rota)
+            corpo = "" if r.status_code == 404 else " " + r.text[:160].replace("\n", " ")
+            print(f"{molde:32} -> {r.status_code}{corpo}")
 
 
 if __name__ == "__main__":
