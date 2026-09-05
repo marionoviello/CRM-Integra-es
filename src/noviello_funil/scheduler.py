@@ -121,7 +121,7 @@ from noviello_funil.state import (
     zerar_erro_consecutivo,
 )
 from noviello_funil.transcricao import transcrever_audio
-from noviello_funil.urgencia import detectar_urgencia
+from noviello_funil.urgencia import detectar_proposta, detectar_urgencia
 from noviello_funil.zapsign_client import ZapSignClient
 
 logger = logging.getLogger(__name__)
@@ -151,12 +151,6 @@ async def ping_healthcheck(url: str) -> None:
 
 
 OPT_IN_TAGS = frozenset({"Fazer Follow up", "Proposta enviada"})
-
-FOLLOWUP_2_TEXT = (
-    "{nome}, percebi que talvez não seja o momento certo. "
-    "Posso encerrar nosso atendimento por aqui? "
-    "Se preferir continuar depois, é só me chamar novamente."
-)
 
 # Default polling cadence. Overridable via run_poll_cycle parameter.
 DEFAULT_POLL_INTERVAL_SECONDS = 60
@@ -2191,6 +2185,37 @@ async def run_poll_cycle(
                     "urgencia check failed for lead=%s: %s", lead_id, exc,
                 )
 
+        # Signal 1.65: PROPOSTA em jogo (pedido Mario 05/set, caso Kayan).
+        # Lead pedindo proposta/orçamento é fechamento à vista — o bot pode
+        # até responder bem, mas quem ENVIA a proposta é humano; sem alerta a
+        # promessa ("a equipe envia por email") morre invisível por dias.
+        # Dedup: 1 alerta por lead a cada 72h (deve_alertar_global).
+        try:
+            motivo_proposta = detectar_proposta(_last_lead_message(transcript))
+            if motivo_proposta and deve_alertar_global(
+                conn, f"proposta_lead_{lead_id}", cooldown_min=72 * 60,
+            ):
+                logger.info(
+                    "lead=%s: PROPOSTA detectada (%s) — escalando pro Mario",
+                    lead_id, motivo_proposta,
+                )
+                await notify_mario(
+                    jurichat,
+                    mario_conversation_id=mario_conversation_id,
+                    mensagem=format_notification(
+                        tipo="proposta",
+                        nome=lead["contato_nome"],
+                        telefone=lead["contato_telefone"],
+                        ultima_msg=_last_lead_message(transcript),
+                        motivo=motivo_proposta,
+                        conversation_id=conv_id,
+                    ),
+                )
+        except Exception as exc:
+            logger.exception(
+                "proposta check failed for lead=%s: %s", lead_id, exc,
+            )
+
         # Signal 1.7: ATENDIMENTO "como está meu processo?" (roadmap 2.4).
         # Curto-circuita o funil: o bot responde a consulta de status (ou
         # escala) em vez de tratar como lead. Regras OAB do Mario:
@@ -3553,6 +3578,51 @@ def _humano_assumiu_conv(conv: dict[str, Any], bot_user_id: str) -> bool:
     return bool(user_id and user_id != bot_user_id)
 
 
+async def _encerrar_sem_resposta(
+    conn: Any,
+    lead: Any,
+    jurichat: JurichatClient,
+    mario_conversation_id: str,
+) -> None:
+    """Encerramento silencioso pro LEAD: arquiva no Jurichat e avisa o Mario.
+
+    05/set (pedido Mario): usado direto após o FU1 sem resposta — o antigo
+    FU2 ("posso encerrar por aqui?") foi ABOLIDO; 3ª mensagem automática a
+    quem nunca respondeu é risco de bloqueio do número no WhatsApp. O ramo
+    FOLLOW_UP_2_ENVIADO segue chamando isto só pra drenar leads legados.
+    """
+    transicao(
+        conn, lead["id"], Estado.ENCERRADO_SEM_RESPOSTA,
+        motivo="scheduler_encerramento",
+        proxima_acao_horas=CLEAR_PROXIMA_ACAO,
+    )
+    conv_id_encerrado = lead["jurichat_conversation_id"]
+    arquivar_falhou: str | None = None
+    try:
+        await jurichat.archive_conversation(conv_id_encerrado)
+    except Exception as exc:
+        logger.exception(
+            "archive_conversation failed for lead=%s: %s",
+            lead["id"], exc,
+        )
+        # Revisão adversarial 2026-07-10: não afirma "arquivada" no
+        # aviso se o arquivamento falhou de verdade (mentiria pro
+        # Mario justo quando a API do Jurichat tem problema).
+        arquivar_falhou = str(exc)[:200]
+    await notify_mario(
+        jurichat,
+        mario_conversation_id=mario_conversation_id,
+        mensagem=format_notification(
+            tipo="encerrado_sem_resposta",
+            nome=lead["contato_nome"],
+            telefone=lead["contato_telefone"],
+            ultima_msg="",
+            motivo=arquivar_falhou,
+            conversation_id=conv_id_encerrado,
+        ),
+    )
+
+
 async def run_followup_cycle(
     *,
     get_db: Callable[[], Any],
@@ -3658,14 +3728,14 @@ async def run_followup_cycle(
                 )
 
             elif estado == Estado.FOLLOW_UP_1_ENVIADO:
-                # C2: idem — checa Signal 0 antes do FU2 (humano pode ter
+                # C2: checa Signal 0 antes de encerrar (humano pode ter
                 # assumido depois do FU1).
                 conv = await jurichat.get_conversation(
                     lead["jurichat_conversation_id"]
                 )
                 if _humano_assumiu_conv(conv, bot_user_id):
                     logger.info(
-                        "followup: humano assumiu lead=%s — pausa (sem FU2)",
+                        "followup: humano assumiu lead=%s — pausa (sem encerrar)",
                         lead["id"],
                     )
                     transicao(
@@ -3674,55 +3744,19 @@ async def run_followup_cycle(
                         proxima_acao_horas=CLEAR_PROXIMA_ACAO,
                     )
                     continue
-                nome = lead["contato_nome"] or "Olá"
-                texto = FOLLOWUP_2_TEXT.format(nome=nome)
-                transicao(
-                    conn, lead["id"], Estado.FOLLOW_UP_2_ENVIADO,
-                    motivo="scheduler_followup_2",
-                    proxima_acao_horas=encerramento_apos_horas,
-                )
-                await jurichat.start_human_support(
-                    lead["jurichat_conversation_id"],
-                )
-                await jurichat.send_message(
-                    lead["jurichat_conversation_id"], texto,
+                # 05/set (pedido Mario): 2 tentativas sem retorno (contato
+                # inicial + FU1) → encerra DIRETO, sem o antigo FU2. A 3ª
+                # mensagem automática a quem nunca respondeu era risco de
+                # bloqueio do número no WhatsApp.
+                await _encerrar_sem_resposta(
+                    conn, lead, jurichat, mario_conversation_id,
                 )
 
             elif estado == Estado.FOLLOW_UP_2_ENVIADO:
-                # Silent close — no new message TO THE LEAD (3 tentativas sem
-                # resposta: contato original + FU1 + FU2). Pedido Mario
-                # 2026-07-10: arquiva a conversa no Jurichat e avisa o Mario
-                # com um resumo do que foi feito — antes esse fechamento era
-                # totalmente invisível (nem lead nem Mario sabiam).
-                transicao(
-                    conn, lead["id"], Estado.ENCERRADO_SEM_RESPOSTA,
-                    motivo="scheduler_encerramento",
-                    proxima_acao_horas=CLEAR_PROXIMA_ACAO,
-                )
-                conv_id_encerrado = lead["jurichat_conversation_id"]
-                arquivar_falhou: str | None = None
-                try:
-                    await jurichat.archive_conversation(conv_id_encerrado)
-                except Exception as exc:
-                    logger.exception(
-                        "archive_conversation failed for lead=%s: %s",
-                        lead["id"], exc,
-                    )
-                    # Revisão adversarial 2026-07-10: não afirma "arquivada" no
-                    # aviso se o arquivamento falhou de verdade (mentiria pro
-                    # Mario justo quando a API do Jurichat tem problema).
-                    arquivar_falhou = str(exc)[:200]
-                await notify_mario(
-                    jurichat,
-                    mario_conversation_id=mario_conversation_id,
-                    mensagem=format_notification(
-                        tipo="encerrado_sem_resposta",
-                        nome=lead["contato_nome"],
-                        telefone=lead["contato_telefone"],
-                        ultima_msg="",
-                        motivo=arquivar_falhou,
-                        conversation_id=conv_id_encerrado,
-                    ),
+                # Ramo LEGADO: drena leads que já estavam em FU2 antes de
+                # 05/set. Nenhuma mensagem nova ao lead; só encerra.
+                await _encerrar_sem_resposta(
+                    conn, lead, jurichat, mario_conversation_id,
                 )
 
             else:

@@ -62,6 +62,19 @@ _TEMPORAIS = (
 )
 
 
+# Sinais de PROPOSTA em jogo (pedido Mario 05/set, caso Kayan): lead
+# pedindo/aguardando proposta, orçamento ou minuta é dinheiro na mesa.
+# Quem ENVIA proposta é humano — sem alerta, a promessa do bot ("a equipe
+# envia por email") morre invisível e o lead esfria.
+_PROPOSTA = {
+    "proposta": "lead falou de proposta",
+    "orcamento": "lead falou de orçamento",
+    "minuta": "lead falou de minuta",
+    "documento formal": "lead aguarda documento formal",
+    "doc formal": "lead aguarda documento formal",
+}
+
+
 def _norm(texto: str) -> str:
     s = unicodedata.normalize("NFKD", texto)
     s = "".join(c for c in s if not unicodedata.combining(c))
@@ -87,4 +100,16 @@ def detectar_urgencia(texto: object) -> str | None:
         for termo, motivo in _PRAZO.items():
             if termo in t:
                 return motivo
+    return None
+
+
+def detectar_proposta(texto: object) -> str | None:
+    """Retorna o motivo (string curta) ou None — mesmo espírito do
+    detector de urgência: léxico sensível, escalar a mais é seguro."""
+    if not texto or not isinstance(texto, str):
+        return None
+    t = _norm(texto)
+    for termo, motivo in _PROPOSTA.items():
+        if termo in t:
+            return motivo
     return None

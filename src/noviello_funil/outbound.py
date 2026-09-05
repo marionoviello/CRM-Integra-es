@@ -513,6 +513,10 @@ def format_notification(
         head = f"🚨 Lead {nome_label} ({telefone}) — URGÊNCIA JURÍDICA"
         body = f"Sinal: {motivo or 'prazo/ato iminente'}"
         extra = f'Última msg: "{ultima_msg}"'
+    elif tipo == "proposta":
+        head = f"💰 Lead {nome_label} ({telefone}) — FALOU DE PROPOSTA"
+        body = f"Sinal: {motivo or 'proposta/orçamento citado'}"
+        extra = f'Última msg: "{ultima_msg}"'
     elif tipo == "fechar":
         head = f"🔥 Lead {nome_label} ({telefone}) — QUER FECHAR"
         body = f'Última msg: "{ultima_msg}"'
@@ -532,7 +536,8 @@ def format_notification(
         body = "Verifique a conversa; o lead segue em em_conversa para retry."
         extra = ""
     elif tipo == "encerrado_sem_resposta":
-        base = "3 tentativas sem resposta (contato inicial + 2 follow-ups)."
+        # 05/set (pedido Mario): 2 tentativas — contato inicial + 1 follow-up.
+        base = "Tentativas automáticas esgotadas sem resposta do lead."
         if motivo:
             # motivo = erro do archive_conversation — revisão adversarial
             # 2026-07-10: NÃO afirmar "arquivada" se o arquivamento falhou

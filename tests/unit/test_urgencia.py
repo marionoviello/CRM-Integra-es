@@ -1,6 +1,6 @@
 """Tests for the legal-urgency detector (urgencia, roadmap 1.12)."""
 
-from noviello_funil.urgencia import detectar_urgencia
+from noviello_funil.urgencia import detectar_proposta, detectar_urgencia
 
 # --- termos fortes: disparam sozinhos -----------------------------------------
 
@@ -73,3 +73,21 @@ def test_retorna_motivo_legivel():
     motivo = detectar_urgencia("penhoraram minha conta")
     assert isinstance(motivo, str) and len(motivo) > 0
     assert "penhora" in motivo.lower() or "bloqueio" in motivo.lower()
+
+
+# --- detector de PROPOSTA (Signal 1.65, 05/set, caso Kayan) -------------------
+
+def test_proposta_dispara():
+    assert detectar_proposta("aguardamos um doc formal da proposta")
+    assert detectar_proposta("pode mandar o orçamento?")
+    assert detectar_proposta("quando sai a minuta do contrato?")
+
+
+def test_proposta_sem_acento_dispara():
+    assert detectar_proposta("me manda o orcamento por favor")
+
+
+def test_mensagem_comum_nao_dispara_proposta():
+    assert detectar_proposta("quem faleceu foi meu pai, em janeiro") is None
+    assert detectar_proposta("quero saber sobre inventário") is None
+    assert detectar_proposta(None) is None

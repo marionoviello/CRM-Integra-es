@@ -103,20 +103,24 @@ async def test_cycle_sends_first_followup_when_in_em_conversa(db_conn):
 
 
 @pytest.mark.asyncio
-async def test_cycle_sends_second_followup_when_in_follow_up_1(db_conn):
+async def test_cycle_encerra_apos_fu1_sem_resposta_sem_fu2(db_conn):
+    """05/set (pedido Mario): 2 tentativas sem retorno (contato + FU1) →
+    encerra DIRETO, sem o antigo FU2 "posso encerrar?". Terceira mensagem
+    automática a quem nunca respondeu é risco de bloqueio no WhatsApp."""
     _make_due_lead(db_conn, "L-1", "C-1", Estado.FOLLOW_UP_1_ENVIADO)
 
     fake_jurichat = MagicMock()
     fake_jurichat.get_lead_tags = AsyncMock(return_value=[])
-    # FU1 agora também busca a conversa (Signal 0 do C2, auditoria 24/jun).
+    # FU1 ainda busca a conversa (Signal 0 do C2, auditoria 24/jun).
     fake_jurichat.get_conversation = AsyncMock(return_value={
         "transcription": "Lead: oi (há 2 dias)",
     })
     fake_jurichat.start_human_support = AsyncMock(return_value={"success": True})
     fake_jurichat.send_message = AsyncMock(return_value={"id": "x"})
+    fake_jurichat.archive_conversation = AsyncMock(return_value={"isArchived": True})
 
     async def fake_followup_gen(**kwargs):
-        raise AssertionError("should not call brain on followup_2")
+        raise AssertionError("brain não deve ser chamado no encerramento")
 
     await run_followup_cycle(
         get_db=lambda: db_conn,
@@ -125,12 +129,16 @@ async def test_cycle_sends_second_followup_when_in_follow_up_1(db_conn):
         gerar_followup_msg=fake_followup_gen,
         followup_2_apos_horas=72,
         encerramento_apos_horas=24,
+        mario_conversation_id="mario-conv",
     )
 
     lead = get_lead_by_conversation(db_conn, "C-1")
-    assert lead["estado"] == Estado.FOLLOW_UP_2_ENVIADO
-    sent_text = fake_jurichat.send_message.call_args[0][1]
-    assert "encerrar" in sent_text.lower()
+    assert lead["estado"] == Estado.ENCERRADO_SEM_RESPOSTA
+    # NENHUMA mensagem nova pro lead (o FU2 morreu); Mario é avisado.
+    destinos = [c.args[0] for c in fake_jurichat.send_message.await_args_list]
+    assert "C-1" not in destinos
+    assert "mario-conv" in destinos
+    fake_jurichat.archive_conversation.assert_awaited_once_with("C-1")
 
 
 @pytest.mark.asyncio

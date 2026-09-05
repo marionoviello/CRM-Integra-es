@@ -2873,6 +2873,44 @@ async def test_mensagem_comum_nao_escala_urgencia(db_conn):
     assert lead["urgencia_alertada_em"] is None
 
 
+@pytest.mark.asyncio
+async def test_proposta_escala_pro_mario_e_nao_repete(db_conn):
+    """Signal 1.65 (05/set, caso Kayan): lead falou de proposta → alerta 💰
+    imediato ao Mario, sem interromper o atendimento; cooldown de 72h evita
+    repetição a cada tick."""
+    transcript = (
+        "Lead: aguardamos um doc formal da proposta com o escopo detalhado"
+    )
+    _insert_lead_due_for_poll(db_conn, transcript_hash="stale")
+    jurichat = _make_jurichat(transcript)
+    triagem_fn = await _triagem_returning(
+        Decisao(acao="responder", mensagem="Claro, nossa equipe prepara.")
+    )
+
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+
+    textos = [c[0][1] for c in jurichat.send_message.call_args_list]
+    assert any("PROPOSTA" in t for t in textos)      # 💰 alertou o Mario
+    assert any("equipe prepara" in t for t in textos)  # e seguiu atendendo
+
+    # Segundo tick (nova msg do lead ainda falando de proposta): cooldown segura.
+    db_conn.execute(
+        "UPDATE leads SET ultimo_transcript_hash = 'stale2', "
+        "proxima_acao_em = datetime('now', '-1 minute') "
+        "WHERE jurichat_conversation_id = 'C-1'",
+    )
+    jurichat2 = _make_jurichat(transcript + " ok?")
+    await run_poll_cycle(
+        get_db=lambda: db_conn, jurichat=jurichat2, triagem_fn=triagem_fn,
+        mario_conversation_id="mario-conv", max_turnos=20,
+    )
+    textos2 = [c[0][1] for c in jurichat2.send_message.call_args_list]
+    assert not any("PROPOSTA" in t for t in textos2)  # não re-alertou
+
+
 # --- 1.10 opt-out / LGPD ----------------------------------------------------
 
 @pytest.mark.asyncio
