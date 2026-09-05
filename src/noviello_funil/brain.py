@@ -330,3 +330,42 @@ async def gerar_followup_msg(
     if texto is None:
         raise DecisaoInvalida("follow-up: resposta sem bloco de texto (refusal?)")
     return remover_travessoes(texto.strip())
+
+
+async def gerar_previa_proposta(
+    *,
+    client: Any,
+    model: str,
+    conversation_transcript: str,
+    resumo_caso: str,
+) -> str:
+    """Prévia INTERNA de proposta pós-reunião (05/set, caso Kayan).
+
+    Rascunho para Mario/Hilde aprovarem e ajustarem — NUNCA vai ao lead.
+    Honorários ficam explicitamente em aberto (regra da casa: IA não
+    precifica) e o texto evita promessa de resultado (OAB) mesmo sendo
+    interno, para servir de base do documento final com o mínimo de edição.
+    """
+    user_text = (
+        "Tarefa INTERNA da equipe (nada disto vai ao cliente): a reunião "
+        "com o lead abaixo já aconteceu e a proposta ainda não foi enviada. "
+        "Redija uma PRÉVIA de proposta curta para a equipe aprovar, com: "
+        "1) objeto/escopo do serviço em 2 ou 3 frases; 2) etapas do "
+        "trabalho em até 4 itens; 3) documentos que o cliente deve enviar; "
+        "4) a linha final 'Honorários sugeridos: R$ ____ (a definir pela "
+        "equipe)'. NUNCA invente valores, prazos garantidos ou promessa de "
+        "resultado. Máximo 120 palavras, norma culta, sem travessão. "
+        "Responda APENAS com a prévia, sem preâmbulo.\n\n"
+        f"=== RESUMO DO CASO ===\n{resumo_caso or '(sem resumo)'}\n\n"
+        "=== TRANSCRIÇÃO DA CONVERSA ===\n"
+        f"{conversation_transcript}"
+    )
+    resp = await client.messages.create(
+        model=model,
+        max_tokens=700,
+        messages=[{"role": "user", "content": user_text}],
+    )
+    texto = _primeiro_texto(resp)
+    if texto is None:
+        raise DecisaoInvalida("previa de proposta: resposta sem bloco de texto")
+    return remover_travessoes(texto.strip())

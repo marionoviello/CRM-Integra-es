@@ -3578,6 +3578,103 @@ def _humano_assumiu_conv(conv: dict[str, Any], bot_user_id: str) -> bool:
     return bool(user_id and user_id != bot_user_id)
 
 
+# Prévia de proposta pós-reunião (05/set, caso Kayan): espera a reunião ter
+# acabado de fato (3h) e ignora reuniões velhas demais (7 dias — dessas o
+# Mario já sabe).
+_PREVIA_APOS_HORAS = 3
+_PREVIA_JANELA_DIAS = 7
+
+
+async def run_proposta_pendente_cycle(
+    *,
+    get_db: Callable[[], Any],
+    jurichat: JurichatClient,
+    gerar_previa: Callable[..., Awaitable[str]],
+    mario_conversation_id: str,
+    agora: datetime.datetime | None = None,
+) -> None:
+    """Reunião realizada + proposta não enviada → prévia interna pra aprovação.
+
+    Pedido Mario 05/set (caso Kayan: reunião dia 31, lead cobrou a proposta
+    dia 03 e ninguém viu). Para cada lead com reunião passada (3h+ e até 7
+    dias) SEM contrato vivo no pipeline, manda aos canais de alerta uma
+    prévia de orçamento rascunhada pelo modelo (honorários sempre em aberto:
+    IA não precifica). Um aviso por reunião (chave lead+horário). Best-effort:
+    nunca derruba o ciclo.
+    """
+    try:
+        conn = get_db()
+        agora = agora or datetime.datetime.now(datetime.UTC)
+        canais = set(split_conversation_ids(mario_conversation_id))
+        rows = conn.execute(
+            "SELECT * FROM leads WHERE reuniao_em IS NOT NULL",
+        ).fetchall()
+        for lead in rows:
+            if lead["jurichat_conversation_id"] in canais:
+                continue
+            try:
+                reuniao = datetime.datetime.fromisoformat(lead["reuniao_em"])
+            except ValueError:
+                continue
+            if reuniao.tzinfo is None:
+                reuniao = reuniao.replace(tzinfo=datetime.UTC)
+            idade = agora - reuniao
+            if idade < datetime.timedelta(hours=_PREVIA_APOS_HORAS):
+                continue
+            if idade > datetime.timedelta(days=_PREVIA_JANELA_DIAS):
+                continue
+            # Proposta/contrato já em andamento no pipeline → nada a cobrar.
+            tem_contrato = conn.execute(
+                "SELECT 1 FROM contrato WHERE lead_id = ? AND estado NOT IN "
+                "('contrato_recusado', 'contrato_expirado') LIMIT 1",
+                (lead["id"],),
+            ).fetchone()
+            if tem_contrato is not None:
+                continue
+            chave = f"proposta_previa_{lead['id']}_{lead['reuniao_em']}"
+            if not deve_alertar_global(conn, chave, cooldown_min=60 * 24 * 30):
+                continue
+
+            transcript = ""
+            try:
+                conv = await jurichat.get_conversation(
+                    lead["jurichat_conversation_id"],
+                )
+                transcript = conv.get("transcription", "")
+            except Exception as exc:
+                logger.warning(
+                    "previa: get_conversation falhou lead=%s: %s",
+                    lead["id"], exc,
+                )
+            previa = "(prévia indisponível: falha ao gerar; montar manualmente)"
+            try:
+                previa = await gerar_previa(
+                    conversation_transcript=transcript,
+                    resumo_caso=get_resumo_caso(conn, lead["id"]) or "",
+                )
+            except Exception as exc:
+                logger.exception(
+                    "previa de proposta falhou lead=%s: %s", lead["id"], exc,
+                )
+            nome = lead["contato_nome"] or lead["contato_telefone"]
+            await notify_mario(
+                jurichat,
+                mario_conversation_id=mario_conversation_id,
+                mensagem=(
+                    f"📝 *Proposta pendente: {nome}* "
+                    f"({lead['contato_telefone']})\n"
+                    f"Reunião realizada ({lead['reuniao_em'][:16]}) e nenhuma "
+                    "proposta saiu ainda.\n\n"
+                    "PRÉVIA para sua aprovação (interna, ajuste à vontade):\n"
+                    f"{previa}\n\n"
+                    "https://app.jurichat.com/messages?id="
+                    f"{lead['jurichat_conversation_id']}"
+                ),
+            )
+    except Exception:
+        logger.exception("proposta_pendente falhou — ciclo segue")
+
+
 async def _encerrar_sem_resposta(
     conn: Any,
     lead: Any,
@@ -3800,7 +3897,7 @@ def main() -> int:
     from anthropic import AsyncAnthropic
 
     from noviello_funil.brain import gerar_followup_msg as gen
-    from noviello_funil.brain import load_skill, triagem
+    from noviello_funil.brain import gerar_previa_proposta, load_skill, triagem
     from noviello_funil.config import Settings
     from noviello_funil.db import connect, run_migrations
 
@@ -3894,6 +3991,13 @@ def main() -> int:
         model=settings.anthropic_model,
         skill_content=skill,
     )
+    # Prévia de proposta (05/set): tarefa interna e simples — modelo do
+    # follow-up (mais leve) dá conta.
+    bound_previa = partial(
+        gerar_previa_proposta,
+        client=anthropic_client,
+        model=settings.anthropic_model_followup,
+    )
 
     async def _full_cycle() -> None:
         # 1. Sync Jurichat conversations into our DB (registers new
@@ -3977,6 +4081,15 @@ def main() -> int:
                 int(h) for h in settings.radar_relatorio_horas.split(",")
                 if h.strip()
             ),
+        )
+        # 6. Prévia de proposta pós-reunião (05/set, caso Kayan): reunião
+        #    realizada sem contrato no pipeline → prévia interna do
+        #    orçamento pra aprovação do Mario/Hilde. Best-effort.
+        await run_proposta_pendente_cycle(
+            get_db=lambda: conn,
+            jurichat=jurichat,
+            gerar_previa=bound_previa,
+            mario_conversation_id=settings.mario_conversation_id,
         )
 
     async def _full_cycle_with_cleanup() -> int:
