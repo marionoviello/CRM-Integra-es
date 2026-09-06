@@ -232,8 +232,11 @@ def test_criar_contrato_exige_honorarios():
 # --- iniciar_contrato (gatilho + conflito bloqueante) ------------------------
 
 def test_link_aprovacao():
+    # Tem que casar com a rota REAL em rotas_contrato (GET/POST
+    # /contrato/aprovar/{token}). Em 06/set o link saía /zapsign/aprovar/ e
+    # o nginx respondia 404 — o Mario não conseguia revisar o PDF.
     assert link_aprovacao("https://funil.x/", "tok123") == \
-        "https://funil.x/zapsign/aprovar/tok123"
+        "https://funil.x/contrato/aprovar/tok123"
 
 
 def test_iniciar_contrato_bloqueia_conflito():
@@ -263,7 +266,7 @@ def test_iniciar_contrato_livre_cria_e_devolve_link():
     )
     assert conflitos == []
     assert contrato["estado"] == EstadoContrato.PENDENTE_APROVACAO
-    assert link.startswith("https://funil.x/zapsign/aprovar/")
+    assert link.startswith("https://funil.x/contrato/aprovar/")
     assert link.endswith(contrato["aprovacao_token"])
     conn.close()
 

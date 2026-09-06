@@ -186,7 +186,7 @@ def link_aprovacao(base_url: str, token: str) -> str:
     """Link de aprovação 1-toque que vai pro WhatsApp do Mario. Cai numa
     PÁGINA de confirmação (GET, sem efeito) — a aprovação real é o POST do
     botão, pra prefetcher de link não 'tapar' sozinho."""
-    return f"{base_url.rstrip('/')}/zapsign/aprovar/{token}"
+    return f"{base_url.rstrip('/')}/contrato/aprovar/{token}"
 
 
 def parse_templates_por_tipo(raw: str | None) -> dict[str, str]:
