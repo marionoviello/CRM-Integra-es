@@ -189,6 +189,31 @@ def link_aprovacao(base_url: str, token: str) -> str:
     return f"{base_url.rstrip('/')}/zapsign/aprovar/{token}"
 
 
+def parse_templates_por_tipo(raw: str | None) -> dict[str, str]:
+    """``"aereo_consumidor:<token>,saude:<token>"`` → dict tipo → template_id.
+
+    Mesma disciplina de ``politica_contrato.parse_politicas``: par sem ``:``,
+    tipo vazio ou token vazio é descartado; a CHAVE é normalizada
+    (.strip().lower()) porque o .env é editado à mão. O TOKEN é copiado como
+    veio — é um UUID da ZapSign, não passa por lower().
+    """
+    mapa: dict[str, str] = {}
+    for par in (raw or "").split(","):
+        if ":" not in par:
+            continue
+        tipo, _, token = par.partition(":")
+        tipo, token = tipo.strip().lower(), token.strip()
+        if not tipo or not token:
+            continue
+        mapa[tipo] = token
+    return mapa
+
+
+def template_do_tipo(tipo_caso: str, mapa: dict[str, str]) -> str | None:
+    """template_id do tipo de caso; ``None`` se não configurado."""
+    return mapa.get((tipo_caso or "").strip().lower())
+
+
 # --- Pipeline NOVO: montagem do data[] sobre o template real (puro) -------
 
 # Mapa EXATO {{VAR}} do template → chave do dict ``cliente`` (spec do Mario).

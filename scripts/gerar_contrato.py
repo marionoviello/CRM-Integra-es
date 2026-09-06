@@ -30,6 +30,7 @@ from typing import Any
 
 from noviello_funil.asaas import AsaasClient
 from noviello_funil.config import Settings
+from noviello_funil.contrato import parse_templates_por_tipo, template_do_tipo
 from noviello_funil.db import connect, run_migrations
 from noviello_funil.orquestrador_contrato import (
     args_politica,
@@ -105,7 +106,11 @@ def main() -> int:
         description="Gera um contrato pelo pipeline (caminho A).",
     )
     ap.add_argument(
-        "input", help="JSON com tipo_caso, template_id, cliente, honorarios",
+        "input",
+        help=(
+            "JSON com tipo_caso, cliente, honorarios e, opcionalmente, "
+            "template_id (senão vem de ZAPSIGN_TEMPLATE_POR_TIPO)"
+        ),
     )
     ap.add_argument(
         "--novo-caso", action="store_true",
@@ -132,6 +137,21 @@ def main() -> int:
         print("ERRO: CONTRATOS_ASAAS/ASAAS_API_KEY ausentes no .env",
               file=sys.stderr)
         return 2
+    # Modelo ZapSign: o JSON pode trazer template_id explícito; se não
+    # trouxer, vem do .env por tipo de caso. Sem os dois = erro alto (nunca
+    # um modelo "default" silencioso — seria contrato errado pro caso errado).
+    if not dados.get("template_id"):
+        dados["template_id"] = template_do_tipo(
+            dados["tipo_caso"],
+            parse_templates_por_tipo(settings.zapsign_template_por_tipo),
+        )
+        if not dados["template_id"]:
+            print(
+                f"ERRO: sem template_id no JSON e sem entrada para "
+                f"tipo_caso {dados['tipo_caso']!r} em ZAPSIGN_TEMPLATE_POR_TIPO",
+                file=sys.stderr,
+            )
+            return 2
 
     conn = connect(settings.database_path)
     run_migrations(conn)

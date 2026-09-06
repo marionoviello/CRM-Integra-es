@@ -1,0 +1,25 @@
+{
+  "tipo_caso": "aereo_consumidor",
+  "cliente": {
+    "nome_completo": "Fulano de Tal",
+    "nacionalidade": "brasileiro",
+    "estado_civil": "solteiro",
+    "profissao": "analista de sistemas",
+    "rg": "00.000.000-0",
+    "orgao_emissor": "SSP/SP",
+    "cpf": "111.444.777-35",
+    "logradouro": "Rua Exemplo",
+    "numero": "100",
+    "complemento": "apto 12",
+    "bairro": "Vila Guarani",
+    "cidade": "São Paulo",
+    "uf": "SP",
+    "cep": "04311-000",
+    "celular": "11999999999",
+    "email": "cliente@email.com"
+  },
+  "honorarios": {
+    "valor": 500.00,
+    "valor_extenso": "quinhentos reais"
+  }
+}

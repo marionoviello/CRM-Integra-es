@@ -221,6 +221,11 @@ class Settings(BaseSettings):
     # {{...}}). Vazio = não gera. O mapa placeholder→campo é injetado em
     # runtime (não hardcodar os nomes do template do Mario).
     zapsign_template_honorarios_id: str = ""
+    # Modelo ZapSign POR TIPO DE CASO, "tipo:token,tipo:token" — ex.:
+    # "aereo_consumidor:2a4b99ec-...". Usado quando o JSON do gerar_contrato
+    # não traz template_id. Tipo ausente aqui E no JSON = erro alto, nunca um
+    # modelo "default" silencioso (contrato errado pro caso errado).
+    zapsign_template_por_tipo: str = ""
     # Base URL pública do funil (ex.: https://funil.noviello.adv.br) — monta o
     # link de aprovação 1-toque que vai pro WhatsApp do Mario e o endpoint do
     # webhook cadastrado na ZapSign. Vazio = links de aprovação quebrados.
